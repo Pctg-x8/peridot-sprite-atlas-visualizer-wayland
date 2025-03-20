@@ -1,0 +1,12 @@
+[package]
+name = "peridot-sprite-atlas-visualizer-wayland"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bedrock = { git = "https://github.com/Pctg-x8/bedrock", branch = "peridot", features = [
+    "Implements",
+    "Presentation",
+    "VK_KHR_wayland_surface",
+    "Allow1_4APIs",
+] }

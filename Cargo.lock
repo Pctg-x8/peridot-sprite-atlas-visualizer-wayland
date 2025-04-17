@@ -11,7 +11,7 @@ checksum = "ace50bade8e6234aa140d9a2f552bbee1db4d353f69b8217bc503490fc1a9f26"
 [[package]]
 name = "bedrock"
 version = "0.1.0-vk1.4.305"
-source = "git+https://github.com/Pctg-x8/bedrock?branch=peridot#ab2f0f44eafa4308e6f00b63dd0c75dd8e5d1d17"
+source = "git+https://github.com/Pctg-x8/bedrock?branch=peridot#33eb694d3bde383be7fce8e2a68f94335b28b910"
 dependencies = [
  "cfg-if",
  "derives",
@@ -34,7 +34,7 @@ checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 [[package]]
 name = "derives"
 version = "0.1.0"
-source = "git+https://github.com/Pctg-x8/bedrock?branch=peridot#ab2f0f44eafa4308e6f00b63dd0c75dd8e5d1d17"
+source = "git+https://github.com/Pctg-x8/bedrock?branch=peridot#33eb694d3bde383be7fce8e2a68f94335b28b910"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -42,10 +42,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "fontconfig"
+version = "2.13.1"
+source = "git+https://github.com/Pctg-x8/fc-rs#767694a5d9cbd8b1172bf80168df68cdb9f53e3c"
+dependencies = [
+ "freetype2",
+ "libc",
+]
+
+[[package]]
+name = "freetype2"
+version = "2.10.1"
+source = "git+https://github.com/Pctg-x8/ft2-rs#a5a8328dd32b65023b9147d9a23e184fce147575"
+
+[[package]]
 name = "libc"
-version = "0.2.171"
+version = "0.2.172"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c19937216e9d3aa9956d9bb8dfc0b0c8beb6058fc4f7a4dc4d850edf86a237d6"
+checksum = "d750af042f7ef4f724306de029d18836c26c1765a54a6a3f094cbd23a7267ffa"
 
 [[package]]
 name = "lock_api"
@@ -59,9 +73,9 @@ dependencies = [
 
 [[package]]
 name = "once_cell"
-version = "1.21.0"
+version = "1.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cde51589ab56b20a6f686b2c68f7a0bd6add753d697abf720d63f8db3ab7b1ad"
+checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
 
 [[package]]
 name = "parking_lot"
@@ -91,6 +105,8 @@ name = "peridot-sprite-atlas-visualizer-wayland"
 version = "0.1.0"
 dependencies = [
  "bedrock",
+ "fontconfig",
+ "freetype2",
 ]
 
 [[package]]
@@ -101,9 +117,9 @@ checksum = "3b3cff922bd51709b605d9ead9aa71031d81447142d828eb4a6eba76fe619f9b"
 
 [[package]]
 name = "proc-macro2"
-version = "1.0.94"
+version = "1.0.95"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a31971752e70b8b2686d7e46ec17fb38dad4051d94024c88df49b667caea9c84"
+checksum = "02b3e5e68a3a1a02aad3ec490a98007cbc13c37cbe84a3cd7b8e406d76e7f778"
 dependencies = [
  "unicode-ident",
 ]
@@ -119,9 +135,9 @@ dependencies = [
 
 [[package]]
 name = "redox_syscall"
-version = "0.5.10"
+version = "0.5.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b8c0c260b63a8219631167be35e6a988e9554dbd323f8bd08439c8ed1302bd1"
+checksum = "d2f103c6d277498fbceb16e84d317e2a400f160f46904d5f5410848c829511a3"
 dependencies = [
  "bitflags",
 ]
@@ -134,9 +150,9 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "smallvec"
-version = "1.14.0"
+version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7fcf8323ef1faaee30a44a340193b1ac6814fd9b7b4e88e9d4519a3e4abe1cfd"
+checksum = "8917285742e9f3e1683f0a9c4e6b57960b7314d0b08d30d1ecd426713ee2eee9"
 
 [[package]]
 name = "syn"

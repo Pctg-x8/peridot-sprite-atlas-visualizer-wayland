@@ -417,6 +417,12 @@ impl Surface {
         self.0.marshal_array_flags_void(6, 0, &mut [])
     }
 
+    #[inline]
+    pub fn set_buffer_scale(&mut self, scale: i32) -> Result<(), std::io::Error> {
+        self.0
+            .marshal_array_flags_void(8, 0, &mut [ffi::Argument { i: scale }])
+    }
+
     pub fn add_listener<'l, L: SurfaceEventListener + 'l>(
         &'l mut self,
         listener: &'l mut L,

@@ -36,22 +36,33 @@ fn load_spv_file(path: impl AsRef<Path>) -> std::io::Result<Vec<u32>> {
     Ok(words)
 }
 
+pub struct FontSet {
+    pub ui_default: freetype::Owned<freetype::Face>,
+}
+
 pub struct SpriteListPaneView {
     pub frame_image_atlas_rect: AtlasRect,
+    pub title_atlas_rect: AtlasRect,
 }
 impl SpriteListPaneView {
     const CORNER_RADIUS: f32 = 24.0;
 
     pub fn new(
         device: &br::DeviceObject<&br::InstanceObject>,
-        memory_types: &[br::vk::VkMemoryType],
+        adapter_memory_info: &br::MemoryProperties,
         graphics_queue_family_index: u32,
         graphics_queue: &mut impl br::QueueMut,
         atlas: &mut CompositionSurfaceAtlas,
         bitmap_scale: u32,
+        fonts: &mut FontSet,
     ) -> Self {
         let render_size_px = ((Self::CORNER_RADIUS * 2.0 + 1.0) * bitmap_scale as f32) as u32;
         let frame_image_atlas_rect = atlas.alloc(render_size_px, render_size_px);
+
+        let title_layout = TextLayout::build_simple("Sprites", &mut fonts.ui_default);
+        let title_atlas_rect = atlas.alloc(title_layout.width_px(), title_layout.height_px());
+        let (title_stg_image, title_stg_image_mem) =
+            title_layout.build_stg_image(device, adapter_memory_info);
 
         let render_pass = br::RenderPassObject::new(
             device,
@@ -171,6 +182,93 @@ impl SpriteListPaneView {
             cb.begin(&br::CommandBufferBeginInfo::new(), device)
                 .unwrap()
         }
+        .pipeline_barrier_2(&br::DependencyInfo::new(
+            &[],
+            &[],
+            &[
+                br::ImageMemoryBarrier2::new(
+                    &title_stg_image,
+                    br::vk::VkImageSubresourceRange {
+                        aspectMask: br::AspectMask::COLOR.bits(),
+                        baseMipLevel: 0,
+                        levelCount: 1,
+                        baseArrayLayer: 0,
+                        layerCount: 1,
+                    },
+                )
+                .of_memory(
+                    br::AccessFlags2::HOST.write,
+                    br::AccessFlags2::TRANSFER.read,
+                )
+                .of_execution(br::PipelineStageFlags2::HOST, br::PipelineStageFlags2::COPY)
+                .transit_to(br::ImageLayout::TransferSrcOpt.from_undefined()),
+                br::ImageMemoryBarrier2::new(
+                    atlas.resource.image(),
+                    br::vk::VkImageSubresourceRange {
+                        aspectMask: br::AspectMask::COLOR.bits(),
+                        baseMipLevel: 0,
+                        levelCount: 1,
+                        baseArrayLayer: 0,
+                        layerCount: 1,
+                    },
+                )
+                .transit_to(br::ImageLayout::TransferDestOpt.from_undefined()),
+            ],
+        ))
+        .copy_image(
+            &title_stg_image,
+            br::ImageLayout::TransferSrcOpt,
+            atlas.resource.image(),
+            br::ImageLayout::TransferDestOpt,
+            &[br::vk::VkImageCopy {
+                srcSubresource: br::vk::VkImageSubresourceLayers {
+                    aspectMask: br::AspectMask::COLOR.bits(),
+                    mipLevel: 0,
+                    baseArrayLayer: 0,
+                    layerCount: 1,
+                },
+                srcOffset: br::Offset3D { x: 0, y: 0, z: 0 },
+                dstSubresource: br::vk::VkImageSubresourceLayers {
+                    aspectMask: br::AspectMask::COLOR.bits(),
+                    mipLevel: 0,
+                    baseArrayLayer: 0,
+                    layerCount: 1,
+                },
+                dstOffset: br::Offset3D {
+                    x: title_atlas_rect.left as _,
+                    y: title_atlas_rect.top as _,
+                    z: 0,
+                },
+                extent: br::Extent3D {
+                    width: title_atlas_rect.width(),
+                    height: title_atlas_rect.height(),
+                    depth: 1,
+                },
+            }],
+        )
+        .pipeline_barrier_2(&br::DependencyInfo::new(
+            &[],
+            &[],
+            &[br::ImageMemoryBarrier2::new(
+                atlas.resource.image(),
+                br::vk::VkImageSubresourceRange {
+                    aspectMask: br::AspectMask::COLOR.bits(),
+                    baseMipLevel: 0,
+                    levelCount: 1,
+                    baseArrayLayer: 0,
+                    layerCount: 1,
+                },
+            )
+            .of_memory(
+                br::AccessFlags2::TRANSFER.write,
+                br::AccessFlags2::SHADER_SAMPLED_READ,
+            )
+            .of_execution(
+                br::PipelineStageFlags2::COPY,
+                br::PipelineStageFlags2::FRAGMENT_SHADER,
+            )
+            .transit_from(br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt))],
+        ))
         .begin_render_pass2(
             &br::RenderPassBeginInfo::new(
                 &render_pass,
@@ -209,6 +307,7 @@ impl SpriteListPaneView {
 
         Self {
             frame_image_atlas_rect,
+            title_atlas_rect,
         }
     }
 }
@@ -624,12 +723,20 @@ impl CompositeTree {
         mapped_ptr: &br::MappedMemory<'_, impl br::DeviceMemoryMut + ?Sized>,
     ) {
         println!("sink all: {}x{}", size.width, size.height);
-        let mut targets = vec![(0, (size.width as f32, size.height as f32))];
+        let mut targets = vec![(0, (0.0, 0.0, size.width as f32, size.height as f32))];
         while !targets.is_empty() {
             let current = core::mem::replace(&mut targets, Vec::new());
-            for (r, (effective_width, effective_height)) in current {
+            for (r, (effective_base_left, effective_base_top, effective_width, effective_height)) in
+                current
+            {
                 let r = &mut self.rects[r];
                 r.dirty = false;
+                let left = effective_base_left
+                    + (effective_width * r.relative_offset_adjustment[0])
+                    + r.offset[0];
+                let top = effective_base_top
+                    + (effective_height * r.relative_offset_adjustment[1])
+                    + r.offset[1];
                 let w = effective_width * r.relative_size_adjustment[0] + r.size[0];
                 let h = effective_height * r.relative_size_adjustment[1] + r.size[1];
 
@@ -640,7 +747,7 @@ impl CompositeTree {
                                 core::mem::size_of::<CompositeInstanceData>() * instance_slot_index,
                             ),
                             CompositeInstanceData {
-                                pos_st: [w, h, r.offset[0], r.offset[1]],
+                                pos_st: [w, h, left, top],
                                 uv_st: [
                                     r.texatlas_rect.width() as f32 / tex_size.width as f32,
                                     r.texatlas_rect.height() as f32 / tex_size.height as f32,
@@ -663,9 +770,200 @@ impl CompositeTree {
                     }
                 }
 
-                targets.extend(r.children.iter().map(|&x| (x, (w, h))));
+                targets.extend(r.children.iter().map(|&x| (x, (left, top, w, h))));
             }
         }
+    }
+}
+
+struct GlyphBitmap {
+    pub buf: Box<[u8]>,
+    pub width: usize,
+    pub pitch: usize,
+    pub rows: usize,
+    pub left_offset: isize,
+    pub ascending_pixels: isize,
+}
+impl GlyphBitmap {
+    pub fn copy_from_ft_glyph_slot(slot: &FT_GlyphSlotRec) -> Self {
+        assert!(
+            slot.bitmap.pitch >= 0,
+            "inverted flow is not supported at this point"
+        );
+        let bytes = slot.bitmap.pitch as usize * slot.bitmap.rows as usize;
+        let mut buf = Vec::with_capacity(bytes);
+        unsafe {
+            buf.set_len(bytes);
+        }
+        let mut buf = buf.into_boxed_slice();
+        unsafe {
+            core::ptr::copy_nonoverlapping(slot.bitmap.buffer, buf.as_mut_ptr(), bytes);
+        }
+
+        Self {
+            buf,
+            width: slot.bitmap.width as _,
+            pitch: slot.bitmap.pitch as _,
+            rows: slot.bitmap.rows as _,
+            left_offset: slot.bitmap_left as _,
+            ascending_pixels: slot.bitmap_top as _,
+        }
+    }
+}
+
+pub struct TextLayout {
+    bitmaps: Vec<GlyphBitmap>,
+    final_left_pos: f32,
+    final_top_pos: f32,
+    max_ascender: i32,
+    max_descender: i32,
+}
+impl TextLayout {
+    pub fn build_simple(text: &str, face: &mut freetype::Face) -> Self {
+        let mut hb_buffer = harfbuzz::Buffer::new();
+        hb_buffer.add(text);
+        hb_buffer.guess_segment_properties();
+        let mut hb_font = harfbuzz::Font::from_ft_face_referenced(face);
+        harfbuzz::shape(&mut hb_font, &mut hb_buffer, &[]);
+        let (glyph_infos, glyph_positions) = hb_buffer.get_shape_results();
+        let mut left_pos = 0.0;
+        let mut top_pos = 0.0;
+        let mut max_ascender = 0;
+        let mut max_descender = 0;
+        // println!(
+        //     "base metrics: {} {}",
+        //     face.ascender_pixels(),
+        //     face.height_pixels()
+        // );
+        let mut glyph_bitmaps = Vec::with_capacity(glyph_infos.len());
+        for (info, pos) in glyph_infos.iter().zip(glyph_positions.iter()) {
+            face.set_transform(
+                None,
+                Some(&freetype2::FT_Vector {
+                    x: (left_pos * 64.0) as _,
+                    y: (top_pos * 64.0) as _,
+                }),
+            );
+            face.load_glyph(info.codepoint, FT_LOAD_DEFAULT).unwrap();
+            face.render_glyph(FT_RENDER_MODE_NORMAL).unwrap();
+            let slot = face.glyph_slot().unwrap();
+
+            // println!(
+            //     "glyph {} {} {} {} {} {} {} {} {} {}",
+            //     info.codepoint,
+            //     pos.x_advance as f32 / 64.0,
+            //     pos.y_advance as f32 / 64.0,
+            //     pos.x_offset,
+            //     pos.y_offset,
+            //     slot.bitmap_left,
+            //     slot.bitmap_top,
+            //     slot.bitmap.width,
+            //     slot.bitmap.rows,
+            //     slot.bitmap.pitch,
+            // );
+
+            glyph_bitmaps.push(GlyphBitmap::copy_from_ft_glyph_slot(slot));
+
+            left_pos += pos.x_advance as f32 / 64.0;
+            top_pos += pos.y_advance as f32 / 64.0;
+            max_ascender = max_ascender.max(slot.bitmap_top);
+            max_descender = max_descender.max(slot.bitmap.rows as i32 - slot.bitmap_top);
+        }
+        // println!("final metrics: {left_pos} {top_pos} {max_ascender} {max_descender}");
+
+        Self {
+            bitmaps: glyph_bitmaps,
+            final_left_pos: left_pos,
+            final_top_pos: top_pos,
+            max_ascender,
+            max_descender,
+        }
+    }
+
+    pub const fn width(&self) -> f32 {
+        self.final_left_pos
+    }
+
+    #[inline]
+    pub fn width_px(&self) -> u32 {
+        self.width().ceil() as _
+    }
+
+    pub const fn height(&self) -> f32 {
+        self.max_ascender as f32 + self.max_descender as f32
+    }
+
+    #[inline]
+    pub fn height_px(&self) -> u32 {
+        self.height().ceil() as _
+    }
+
+    pub fn build_stg_image<'d, D: br::Device + 'd>(
+        &self,
+        device: &'d D,
+        adapter_memory_info: &br::MemoryProperties,
+    ) -> (br::ImageObject<&'d D>, br::DeviceMemoryObject<&'d D>) {
+        let mut img = br::ImageObject::new(
+            device,
+            &br::ImageCreateInfo::new(
+                br::Extent2D {
+                    width: self.width_px(),
+                    height: self.height_px(),
+                },
+                br::vk::VK_FORMAT_R8_UNORM,
+            )
+            .usage_with(br::ImageUsageFlags::TRANSFER_SRC)
+            .use_linear_tiling(),
+        )
+        .expect("Failed to create staging text image");
+        let mreq = img.requirements();
+        let memory_index = adapter_memory_info
+            .find_host_visible_index(mreq.memoryTypeBits)
+            .expect("no suitable memory for image staging");
+        let mut mem = br::DeviceMemoryObject::new(
+            device,
+            &br::MemoryAllocateInfo::new(mreq.size, memory_index),
+        )
+        .expect("Failed to allocate text surface stg memory");
+        img.bind(&mem, 0).expect("Failed to bind stg memory");
+        let subresource_layout = img
+            .by_ref()
+            .subresource(br::AspectMask::COLOR, 0, 0)
+            .layout_info();
+
+        let n = mem.native_ptr();
+        let ptr = mem
+            .map(0..(subresource_layout.rowPitch * self.height_px() as br::DeviceSize) as _)
+            .unwrap();
+        for b in self.bitmaps.iter() {
+            for y in 0..b.rows {
+                let dy = y as isize + self.max_ascender as isize - b.ascending_pixels;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        b.buf.as_ptr().add(b.pitch * y),
+                        ptr.addr_of_mut(
+                            subresource_layout.rowPitch as usize * dy as usize
+                                + b.left_offset as usize,
+                        ),
+                        b.width,
+                    )
+                }
+            }
+        }
+        if !adapter_memory_info.is_coherent(memory_index) {
+            unsafe {
+                device
+                    .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(
+                        n,
+                        0,
+                        subresource_layout.rowPitch * self.height_px() as br::DeviceSize,
+                    )])
+                    .unwrap();
+            }
+        }
+        ptr.end();
+
+        (img, mem)
     }
 }
 
@@ -1030,40 +1328,6 @@ fn main() {
         ft_face.ascender_pixels(),
         ft_face.height_pixels()
     );
-    struct GlyphBitmap {
-        pub buf: Box<[u8]>,
-        pub width: usize,
-        pub pitch: usize,
-        pub rows: usize,
-        pub left_offset: isize,
-        pub ascending_pixels: isize,
-    }
-    impl GlyphBitmap {
-        pub fn copy_from_ft_glyph_slot(slot: &FT_GlyphSlotRec) -> Self {
-            assert!(
-                slot.bitmap.pitch >= 0,
-                "inverted flow is not supported at this point"
-            );
-            let bytes = slot.bitmap.pitch as usize * slot.bitmap.rows as usize;
-            let mut buf = Vec::with_capacity(bytes);
-            unsafe {
-                buf.set_len(bytes);
-            }
-            let mut buf = buf.into_boxed_slice();
-            unsafe {
-                core::ptr::copy_nonoverlapping(slot.bitmap.buffer, buf.as_mut_ptr(), bytes);
-            }
-
-            Self {
-                buf,
-                width: slot.bitmap.width as _,
-                pitch: slot.bitmap.pitch as _,
-                rows: slot.bitmap.rows as _,
-                left_offset: slot.bitmap_left as _,
-                ascending_pixels: slot.bitmap_top as _,
-            }
-        }
-    }
     let mut glyph_bitmaps = Vec::with_capacity(glyph_infos.len());
     for (info, pos) in glyph_infos.iter().zip(glyph_positions.iter()) {
         ft_face.set_transform(
@@ -1287,21 +1551,14 @@ fn main() {
         .unwrap();
     graphics_queue.wait().unwrap();
 
-    let header_size = 16.0 + 16.0 + max_ascender as f32 + max_descender as f32;
+    let mut font_set = FontSet {
+        ui_default: ft_face,
+    };
 
     let mut composite_instance_buffer =
         CompositeInstanceManager::new(&device, &adapter_memory_info);
-
-    let sprite_list_pane_view = SpriteListPaneView::new(
-        &device,
-        adapter_memory_info.types(),
-        graphics_queue_family_index,
-        &mut graphics_queue,
-        &mut composition_alphamask_surface_atlas,
-        surface_events.optimal_buffer_scale,
-    );
-
     let mut composite_tree = CompositeTree::new();
+
     let title_cr = composite_tree.alloc();
     composite_tree.add_child(0, title_cr);
     {
@@ -1316,6 +1573,18 @@ fn main() {
         title_cr.texatlas_rect = text_surface_rect.clone();
         title_cr.composite_mode = CompositeMode::ColorTint([1.0, 1.0, 1.0, 1.0]);
     }
+
+    let header_size = 16.0 + 16.0 + max_ascender as f32 + max_descender as f32;
+
+    let sprite_list_pane_view = SpriteListPaneView::new(
+        &device,
+        &adapter_memory_info,
+        graphics_queue_family_index,
+        &mut graphics_queue,
+        &mut composition_alphamask_surface_atlas,
+        surface_events.optimal_buffer_scale,
+        &mut font_set,
+    );
     let sprite_list_window_cr = composite_tree.alloc();
     composite_tree.add_child(0, sprite_list_window_cr);
     {
@@ -1339,6 +1608,27 @@ fn main() {
             SpriteListPaneView::CORNER_RADIUS * surface_events.optimal_buffer_scale as f32,
         ];
         sprite_list_frame_cr.composite_mode = CompositeMode::ColorTint([1.0, 1.0, 1.0, 0.5]);
+    }
+    let sprite_list_title_cr = composite_tree.alloc();
+    composite_tree.add_child(sprite_list_window_cr, sprite_list_title_cr);
+    {
+        let sprite_list_title_cr = composite_tree.get_mut(sprite_list_title_cr);
+
+        sprite_list_title_cr.instance_slot_index = Some(composite_instance_buffer.alloc());
+        sprite_list_title_cr.offset = [
+            -(sprite_list_pane_view.title_atlas_rect.width() as f32 * 0.5)
+                * surface_events.optimal_buffer_scale as f32,
+            8.0 * surface_events.optimal_buffer_scale as f32,
+        ];
+        sprite_list_title_cr.relative_offset_adjustment = [0.5, 0.0];
+        sprite_list_title_cr.size = [
+            (sprite_list_pane_view.title_atlas_rect.width() as f32)
+                * surface_events.optimal_buffer_scale as f32,
+            (sprite_list_pane_view.title_atlas_rect.height() as f32)
+                * surface_events.optimal_buffer_scale as f32,
+        ];
+        sprite_list_title_cr.texatlas_rect = sprite_list_pane_view.title_atlas_rect.clone();
+        sprite_list_title_cr.composite_mode = CompositeMode::ColorTint([0.0, 0.0, 0.0, 1.0]);
     }
 
     let n = composite_instance_buffer.memory_stg.native_ptr();

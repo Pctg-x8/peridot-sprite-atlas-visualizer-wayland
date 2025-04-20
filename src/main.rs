@@ -1313,124 +1313,14 @@ fn main() {
         .set_char_size((10.0 * 64.0) as _, (10.0 * 64.0) as _, 96 * 2, 96 * 2)
         .expect("Failed to set char size");
 
-    let mut hb_buffer = harfbuzz::Buffer::new();
-    hb_buffer.add("Peridot SpriteAtlas Visualizer/Editor");
-    hb_buffer.guess_segment_properties();
-    let mut hb_font = harfbuzz::Font::from_ft_face_referenced(&mut ft_face);
-    harfbuzz::shape(&mut hb_font, &mut hb_buffer, &[]);
-    let (glyph_infos, glyph_positions) = hb_buffer.get_shape_results();
-    let mut left_pos = 0.0;
-    let mut top_pos = 0.0;
-    let mut max_ascender = 0;
-    let mut max_descender = 0;
-    println!(
-        "base metrics: {} {}",
-        ft_face.ascender_pixels(),
-        ft_face.height_pixels()
-    );
-    let mut glyph_bitmaps = Vec::with_capacity(glyph_infos.len());
-    for (info, pos) in glyph_infos.iter().zip(glyph_positions.iter()) {
-        ft_face.set_transform(
-            None,
-            Some(&freetype2::FT_Vector {
-                x: (left_pos * 64.0) as _,
-                y: (top_pos * 64.0) as _,
-            }),
-        );
-        ft_face.load_glyph(info.codepoint, FT_LOAD_DEFAULT).unwrap();
-        ft_face.render_glyph(FT_RENDER_MODE_NORMAL).unwrap();
-        let slot = ft_face.glyph_slot().unwrap();
-
-        println!(
-            "glyph {} {} {} {} {} {} {} {} {} {}",
-            info.codepoint,
-            pos.x_advance as f32 / 64.0,
-            pos.y_advance as f32 / 64.0,
-            pos.x_offset,
-            pos.y_offset,
-            slot.bitmap_left,
-            slot.bitmap_top,
-            slot.bitmap.width,
-            slot.bitmap.rows,
-            slot.bitmap.pitch,
-        );
-
-        glyph_bitmaps.push(GlyphBitmap::copy_from_ft_glyph_slot(slot));
-
-        left_pos += pos.x_advance as f32 / 64.0;
-        top_pos += pos.y_advance as f32 / 64.0;
-        max_ascender = max_ascender.max(slot.bitmap_top);
-        max_descender = max_descender.max(slot.bitmap.rows as i32 - slot.bitmap_top);
-    }
-    println!("final metrics: {left_pos} {top_pos} {max_ascender} {max_descender}");
+    let title_layout =
+        TextLayout::build_simple("Peridot SpriteAtlas Visualizer / Editor", &mut ft_face);
+    let (title_stg_image, title_stg_image_mem) =
+        title_layout.build_stg_image(&device, &adapter_memory_info);
 
     let text_surface_rect = composition_alphamask_surface_atlas
-        .alloc(left_pos.ceil() as _, (max_ascender + max_descender) as _);
+        .alloc(title_layout.width_px(), title_layout.height_px());
     println!("text surface rect: {text_surface_rect:?}");
-
-    let mut text_surface_stg_image = br::ImageObject::new(
-        &device,
-        &br::ImageCreateInfo::new(
-            br::Extent2D {
-                width: left_pos.ceil() as _,
-                height: (max_ascender + max_descender) as _,
-            },
-            br::vk::VK_FORMAT_R8_UNORM,
-        )
-        .usage_with(br::ImageUsageFlags::TRANSFER_SRC)
-        .use_linear_tiling(),
-    )
-    .expect("Failed to create staging text image");
-    let text_surface_stg_image_mreq = text_surface_stg_image.requirements();
-    let text_surface_stg_image_memory_index = adapter_memory_info
-        .find_host_visible_index(text_surface_stg_image_mreq.memoryTypeBits)
-        .expect("no suitable memory for image staging");
-    let mut text_surface_stg_memory = br::DeviceMemoryObject::new(
-        &device,
-        &br::MemoryAllocateInfo::new(
-            text_surface_stg_image_mreq.size,
-            text_surface_stg_image_memory_index,
-        ),
-    )
-    .expect("Failed to allocate text surface stg memory");
-    text_surface_stg_image
-        .bind(&text_surface_stg_memory, 0)
-        .expect("Failed to bind stg memory");
-    let subresource_layout = text_surface_stg_image
-        .by_ref()
-        .subresource(br::AspectMask::COLOR, 0, 0)
-        .layout_info();
-
-    let n = text_surface_stg_memory.native_ptr();
-    let ptr = text_surface_stg_memory
-        .map(0..(subresource_layout.rowPitch * text_surface_rect.height() as br::DeviceSize) as _)
-        .unwrap();
-    for b in glyph_bitmaps {
-        for y in 0..b.rows {
-            let dy = y as isize + max_ascender as isize - b.ascending_pixels;
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    b.buf.as_ptr().add(b.pitch * y),
-                    ptr.addr_of_mut(
-                        subresource_layout.rowPitch as usize * dy as usize + b.left_offset as usize,
-                    ),
-                    b.width,
-                )
-            }
-        }
-    }
-    if !adapter_memory_info.is_coherent(text_surface_stg_image_memory_index) {
-        unsafe {
-            device
-                .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(
-                    n,
-                    0,
-                    subresource_layout.rowPitch * text_surface_rect.height() as br::DeviceSize,
-                )])
-                .unwrap();
-        }
-    }
-    ptr.end();
 
     let mut upload_cp = br::CommandPoolObject::new(
         &device,
@@ -1455,7 +1345,7 @@ fn main() {
         &[],
         &[
             br::ImageMemoryBarrier2::new(
-                &text_surface_stg_image,
+                &title_stg_image,
                 br::vk::VkImageSubresourceRange {
                     aspectMask: br::AspectMask::COLOR.bits(),
                     baseMipLevel: 0,
@@ -1484,7 +1374,7 @@ fn main() {
         ],
     ))
     .copy_image(
-        &text_surface_stg_image,
+        &title_stg_image,
         br::ImageLayout::TransferSrcOpt,
         composition_alphamask_surface_atlas.resource.image(),
         br::ImageLayout::TransferDestOpt,
@@ -1565,7 +1455,10 @@ fn main() {
         let title_cr = composite_tree.get_mut(title_cr);
 
         title_cr.instance_slot_index = Some(composite_instance_buffer.alloc());
-        title_cr.offset = [24.0, 16.0];
+        title_cr.offset = [
+            24.0 * surface_events.optimal_buffer_scale as f32,
+            16.0 * surface_events.optimal_buffer_scale as f32,
+        ];
         title_cr.size = [
             text_surface_rect.width() as _,
             text_surface_rect.height() as _,
@@ -1574,7 +1467,8 @@ fn main() {
         title_cr.composite_mode = CompositeMode::ColorTint([1.0, 1.0, 1.0, 1.0]);
     }
 
-    let header_size = 16.0 + 16.0 + max_ascender as f32 + max_descender as f32;
+    let header_size =
+        16.0 + 16.0 + title_layout.height() / surface_events.optimal_buffer_scale as f32;
 
     let sprite_list_pane_view = SpriteListPaneView::new(
         &device,
@@ -1593,13 +1487,13 @@ fn main() {
         sprite_list_frame_cr.instance_slot_index = Some(composite_instance_buffer.alloc());
         sprite_list_frame_cr.offset = [
             8.0 * surface_events.optimal_buffer_scale as f32,
-            (header_size) * surface_events.optimal_buffer_scale as f32,
+            header_size * surface_events.optimal_buffer_scale as f32,
         ];
         sprite_list_frame_cr.size = [
-            360.0 * surface_events.optimal_buffer_scale as f32,
+            320.0 * surface_events.optimal_buffer_scale as f32,
             -(header_size + 8.0) * surface_events.optimal_buffer_scale as f32,
         ];
-        sprite_list_frame_cr.relative_size_adjustment[1] = 1.0;
+        sprite_list_frame_cr.relative_size_adjustment = [0.0, 1.0];
         sprite_list_frame_cr.texatlas_rect = sprite_list_pane_view.frame_image_atlas_rect.clone();
         sprite_list_frame_cr.slice_borders = [
             SpriteListPaneView::CORNER_RADIUS * surface_events.optimal_buffer_scale as f32,
@@ -1616,19 +1510,16 @@ fn main() {
 
         sprite_list_title_cr.instance_slot_index = Some(composite_instance_buffer.alloc());
         sprite_list_title_cr.offset = [
-            -(sprite_list_pane_view.title_atlas_rect.width() as f32 * 0.5)
-                * surface_events.optimal_buffer_scale as f32,
+            -(sprite_list_pane_view.title_atlas_rect.width() as f32 * 0.5),
             8.0 * surface_events.optimal_buffer_scale as f32,
         ];
         sprite_list_title_cr.relative_offset_adjustment = [0.5, 0.0];
         sprite_list_title_cr.size = [
-            (sprite_list_pane_view.title_atlas_rect.width() as f32)
-                * surface_events.optimal_buffer_scale as f32,
-            (sprite_list_pane_view.title_atlas_rect.height() as f32)
-                * surface_events.optimal_buffer_scale as f32,
+            sprite_list_pane_view.title_atlas_rect.width() as f32,
+            sprite_list_pane_view.title_atlas_rect.height() as f32,
         ];
         sprite_list_title_cr.texatlas_rect = sprite_list_pane_view.title_atlas_rect.clone();
-        sprite_list_title_cr.composite_mode = CompositeMode::ColorTint([0.0, 0.0, 0.0, 1.0]);
+        sprite_list_title_cr.composite_mode = CompositeMode::ColorTint([0.1, 0.1, 0.1, 1.0]);
     }
 
     let n = composite_instance_buffer.memory_stg.native_ptr();

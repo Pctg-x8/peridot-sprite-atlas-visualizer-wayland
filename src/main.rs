@@ -1300,7 +1300,12 @@ fn main() {
         .new_face(&primary_face_path, primary_face_index as _)
         .expect("Failed to create ft face");
     ft_face
-        .set_char_size((10.0 * 64.0) as _, (10.0 * 64.0) as _, 96 * 2, 96 * 2)
+        .set_char_size(
+            (10.0 * 64.0) as _,
+            (10.0 * 64.0) as _,
+            96 * surface_events.optimal_buffer_scale,
+            96 * surface_events.optimal_buffer_scale,
+        )
         .expect("Failed to set char size");
 
     let title_layout =
@@ -1956,6 +1961,9 @@ fn main() {
                         }
 
                         last_update_command_fence.reset().unwrap();
+                        unsafe {
+                            update_cp.reset(0).unwrap();
+                        }
                         let rec = unsafe {
                             update_cb
                                 .begin(&br::CommandBufferBeginInfo::new(), &device)

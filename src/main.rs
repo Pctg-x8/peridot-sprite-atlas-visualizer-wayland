@@ -1962,7 +1962,7 @@ fn main() {
 
                         last_update_command_fence.reset().unwrap();
                         unsafe {
-                            update_cp.reset(0).unwrap();
+                            update_cp.reset(br::CommandPoolResetFlags::EMPTY).unwrap();
                         }
                         let rec = unsafe {
                             update_cb
@@ -2063,9 +2063,7 @@ fn main() {
                             }
 
                             unsafe {
-                                main_cp
-                                    .reset(br::vk::VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT)
-                                    .unwrap();
+                                main_cp.reset(br::CommandPoolResetFlags::EMPTY).unwrap();
                             }
                             drop(main_fbs);
                             drop(backbuffer_views);

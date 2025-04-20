@@ -61,7 +61,7 @@ impl SpriteListPaneView {
 
         let title_layout = TextLayout::build_simple("Sprites", &mut fonts.ui_default);
         let title_atlas_rect = atlas.alloc(title_layout.width_px(), title_layout.height_px());
-        let (title_stg_image, title_stg_image_mem) =
+        let (title_stg_image, _title_stg_image_mem) =
             title_layout.build_stg_image(device, adapter_memory_info);
 
         let render_pass = br::RenderPassObject::new(
@@ -221,19 +221,9 @@ impl SpriteListPaneView {
             atlas.resource.image(),
             br::ImageLayout::TransferDestOpt,
             &[br::vk::VkImageCopy {
-                srcSubresource: br::vk::VkImageSubresourceLayers {
-                    aspectMask: br::AspectMask::COLOR.bits(),
-                    mipLevel: 0,
-                    baseArrayLayer: 0,
-                    layerCount: 1,
-                },
-                srcOffset: br::Offset3D { x: 0, y: 0, z: 0 },
-                dstSubresource: br::vk::VkImageSubresourceLayers {
-                    aspectMask: br::AspectMask::COLOR.bits(),
-                    mipLevel: 0,
-                    baseArrayLayer: 0,
-                    layerCount: 1,
-                },
+                srcSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
+                srcOffset: br::Offset3D::ZERO,
+                dstSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
                 dstOffset: br::Offset3D {
                     x: title_atlas_rect.left as _,
                     y: title_atlas_rect.top as _,
@@ -1314,8 +1304,8 @@ fn main() {
         .expect("Failed to set char size");
 
     let title_layout =
-        TextLayout::build_simple("Peridot SpriteAtlas Visualizer / Editor", &mut ft_face);
-    let (title_stg_image, title_stg_image_mem) =
+        TextLayout::build_simple("Peridot SpriteAtlas Visualizer/Editor", &mut ft_face);
+    let (title_stg_image, _title_stg_image_mem) =
         title_layout.build_stg_image(&device, &adapter_memory_info);
 
     let text_surface_rect = composition_alphamask_surface_atlas
@@ -1379,19 +1369,9 @@ fn main() {
         composition_alphamask_surface_atlas.resource.image(),
         br::ImageLayout::TransferDestOpt,
         &[br::vk::VkImageCopy {
-            srcSubresource: br::vk::VkImageSubresourceLayers {
-                aspectMask: br::AspectMask::COLOR.bits(),
-                mipLevel: 0,
-                baseArrayLayer: 0,
-                layerCount: 1,
-            },
+            srcSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
             srcOffset: br::Offset3D { x: 0, y: 0, z: 0 },
-            dstSubresource: br::vk::VkImageSubresourceLayers {
-                aspectMask: br::AspectMask::COLOR.bits(),
-                mipLevel: 0,
-                baseArrayLayer: 0,
-                layerCount: 1,
-            },
+            dstSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
             dstOffset: br::Offset3D {
                 x: text_surface_rect.left as _,
                 y: text_surface_rect.top as _,

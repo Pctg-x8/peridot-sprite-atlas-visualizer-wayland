@@ -36,6 +36,23 @@ fn load_spv_file(path: impl AsRef<Path>) -> std::io::Result<Vec<u32>> {
     Ok(words)
 }
 
+const MS_STATE_EMPTY: &'static br::PipelineMultisampleStateCreateInfo =
+    &br::PipelineMultisampleStateCreateInfo::new();
+const BLEND_STATE_SINGLE_NONE: &'static br::PipelineColorBlendStateCreateInfo<'static> =
+    &br::PipelineColorBlendStateCreateInfo::new(&[
+        br::vk::VkPipelineColorBlendAttachmentState::NOBLEND,
+    ]);
+const RASTER_STATE_DEFAULT_FILL_NOCULL: &'static br::PipelineRasterizationStateCreateInfo =
+    &br::PipelineRasterizationStateCreateInfo::new(
+        br::PolygonMode::Fill,
+        br::CullModeFlags::NONE,
+        br::FrontFace::CounterClockwise,
+    );
+const IA_STATE_TRILIST: &'static br::PipelineInputAssemblyStateCreateInfo =
+    &br::PipelineInputAssemblyStateCreateInfo::new(br::PrimitiveTopology::TriangleList);
+const VI_STATE_EMPTY: &'static br::PipelineVertexInputStateCreateInfo<'static> =
+    &br::PipelineVertexInputStateCreateInfo::new(&[], &[]);
+
 pub struct FontSet {
     pub ui_default: freetype::Owned<freetype::Face>,
 }
@@ -74,10 +91,7 @@ impl SpriteListPaneView {
         let mut title_blurred_work_image = br::ImageObject::new(
             device,
             &br::ImageCreateInfo::new(
-                br::Extent2D {
-                    width: title_blurred_atlas_rect.width(),
-                    height: title_blurred_atlas_rect.height(),
-                },
+                title_blurred_atlas_rect.extent(),
                 br::vk::VK_FORMAT_R8_UNORM,
             )
             .as_color_attachment()
@@ -108,7 +122,7 @@ impl SpriteListPaneView {
                         br::ImageLayout::Undefined,
                         br::ImageLayout::ShaderReadOnlyOpt,
                     )
-                    .color_memory_op(br::LoadOp::Clear, br::StoreOp::Store)],
+                    .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store)],
                 &[
                     br::SubpassDescription2::new().colors(&[br::AttachmentReference2::color(
                         0,
@@ -256,40 +270,16 @@ impl SpriteListPaneView {
                             br::PipelineShaderStage::new(br::ShaderStage::Vertex, &vsh, c"main"),
                             br::PipelineShaderStage::new(br::ShaderStage::Fragment, &fsh, c"main"),
                         ],
-                        &br::PipelineVertexInputStateCreateInfo::new(&[], &[]),
-                        &br::PipelineInputAssemblyStateCreateInfo::new(
-                            br::PrimitiveTopology::TriangleList,
-                        ),
+                        VI_STATE_EMPTY,
+                        IA_STATE_TRILIST,
                         &br::PipelineViewportStateCreateInfo::new(
-                            &[br::Viewport {
-                                x: frame_image_atlas_rect.left as _,
-                                y: frame_image_atlas_rect.top as _,
-                                width: render_size_px as _,
-                                height: render_size_px as _,
-                                minDepth: 0.0,
-                                maxDepth: 1.0,
-                            }],
-                            &[br::vk::VkRect2D {
-                                offset: br::Offset2D {
-                                    x: frame_image_atlas_rect.left as _,
-                                    y: frame_image_atlas_rect.top as _,
-                                },
-                                extent: br::Extent2D {
-                                    width: render_size_px,
-                                    height: render_size_px,
-                                },
-                            }],
+                            &[frame_image_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
+                            &[frame_image_atlas_rect.vk_rect()],
                         ),
-                        &br::PipelineRasterizationStateCreateInfo::new(
-                            br::PolygonMode::Fill,
-                            br::CullModeFlags::NONE,
-                            br::FrontFace::CounterClockwise,
-                        ),
-                        &br::PipelineColorBlendStateCreateInfo::new(&[
-                            br::vk::VkPipelineColorBlendAttachmentState::NOBLEND,
-                        ]),
+                        RASTER_STATE_DEFAULT_FILL_NOCULL,
+                        BLEND_STATE_SINGLE_NONE,
                     )
-                    .multisample_state(&br::PipelineMultisampleStateCreateInfo::new()),
+                    .multisample_state(MS_STATE_EMPTY),
                     br::GraphicsPipelineCreateInfo::new(
                         &blur_pipeline_layout,
                         render_pass.subpass(0),
@@ -311,37 +301,21 @@ impl SpriteListPaneView {
                                 ),
                             ),
                         ],
-                        &br::PipelineVertexInputStateCreateInfo::new(&[], &[]),
-                        &br::PipelineInputAssemblyStateCreateInfo::new(
-                            br::PrimitiveTopology::TriangleList,
-                        ),
+                        VI_STATE_EMPTY,
+                        IA_STATE_TRILIST,
                         &br::PipelineViewportStateCreateInfo::new(
-                            &[br::Viewport {
-                                x: 0.0,
-                                y: 0.0,
-                                width: title_blurred_atlas_rect.width() as _,
-                                height: title_blurred_atlas_rect.height() as _,
-                                minDepth: 0.0,
-                                maxDepth: 1.0,
-                            }],
-                            &[br::vk::VkRect2D {
-                                offset: br::Offset2D::ZERO,
-                                extent: br::Extent2D {
-                                    width: title_blurred_atlas_rect.width(),
-                                    height: title_blurred_atlas_rect.height(),
-                                },
-                            }],
+                            &[title_blurred_atlas_rect
+                                .extent()
+                                .into_rect(br::Offset2D::ZERO)
+                                .make_viewport(0.0..1.0)],
+                            &[title_blurred_atlas_rect
+                                .extent()
+                                .into_rect(br::Offset2D::ZERO)],
                         ),
-                        &br::PipelineRasterizationStateCreateInfo::new(
-                            br::PolygonMode::Fill,
-                            br::CullModeFlags::NONE,
-                            br::FrontFace::CounterClockwise,
-                        ),
-                        &br::PipelineColorBlendStateCreateInfo::new(&[
-                            br::vk::VkPipelineColorBlendAttachmentState::NOBLEND,
-                        ]),
+                        RASTER_STATE_DEFAULT_FILL_NOCULL,
+                        BLEND_STATE_SINGLE_NONE,
                     )
-                    .multisample_state(&br::PipelineMultisampleStateCreateInfo::new()),
+                    .multisample_state(MS_STATE_EMPTY),
                     br::GraphicsPipelineCreateInfo::new(
                         &blur_pipeline_layout,
                         render_pass.subpass(0),
@@ -363,40 +337,16 @@ impl SpriteListPaneView {
                                 ),
                             ),
                         ],
-                        &br::PipelineVertexInputStateCreateInfo::new(&[], &[]),
-                        &br::PipelineInputAssemblyStateCreateInfo::new(
-                            br::PrimitiveTopology::TriangleList,
-                        ),
+                        VI_STATE_EMPTY,
+                        IA_STATE_TRILIST,
                         &br::PipelineViewportStateCreateInfo::new(
-                            &[br::Viewport {
-                                x: title_blurred_atlas_rect.left as _,
-                                y: title_blurred_atlas_rect.top as _,
-                                width: title_blurred_atlas_rect.width() as _,
-                                height: title_blurred_atlas_rect.height() as _,
-                                minDepth: 0.0,
-                                maxDepth: 1.0,
-                            }],
-                            &[br::vk::VkRect2D {
-                                offset: br::Offset2D {
-                                    x: title_blurred_atlas_rect.left as _,
-                                    y: title_blurred_atlas_rect.top as _,
-                                },
-                                extent: br::Extent2D {
-                                    width: title_blurred_atlas_rect.width(),
-                                    height: title_blurred_atlas_rect.height(),
-                                },
-                            }],
+                            &[title_blurred_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
+                            &[title_blurred_atlas_rect.vk_rect()],
                         ),
-                        &br::PipelineRasterizationStateCreateInfo::new(
-                            br::PolygonMode::Fill,
-                            br::CullModeFlags::NONE,
-                            br::FrontFace::CounterClockwise,
-                        ),
-                        &br::PipelineColorBlendStateCreateInfo::new(&[
-                            br::vk::VkPipelineColorBlendAttachmentState::NOBLEND,
-                        ]),
+                        RASTER_STATE_DEFAULT_FILL_NOCULL,
+                        BLEND_STATE_SINGLE_NONE,
                     )
-                    .multisample_state(&br::PipelineMultisampleStateCreateInfo::new()),
+                    .multisample_state(MS_STATE_EMPTY),
                 ],
                 None::<&br::PipelineCacheObject<&br::DeviceObject<&br::InstanceObject>>>,
             )
@@ -450,33 +400,22 @@ impl SpriteListPaneView {
             &[],
             &[],
             &[
-                br::ImageMemoryBarrier2::new(
-                    &title_stg_image,
-                    br::vk::VkImageSubresourceRange {
-                        aspectMask: br::AspectMask::COLOR.bits(),
-                        baseMipLevel: 0,
-                        levelCount: 1,
-                        baseArrayLayer: 0,
-                        layerCount: 1,
-                    },
-                )
-                .of_memory(
-                    br::AccessFlags2::HOST.write,
-                    br::AccessFlags2::TRANSFER.read,
-                )
-                .of_execution(br::PipelineStageFlags2::HOST, br::PipelineStageFlags2::COPY)
-                .transit_to(br::ImageLayout::TransferSrcOpt.from_undefined()),
-                br::ImageMemoryBarrier2::new(
-                    atlas.resource.image(),
-                    br::vk::VkImageSubresourceRange {
-                        aspectMask: br::AspectMask::COLOR.bits(),
-                        baseMipLevel: 0,
-                        levelCount: 1,
-                        baseArrayLayer: 0,
-                        layerCount: 1,
-                    },
-                )
-                .transit_to(br::ImageLayout::TransferDestOpt.from_undefined()),
+                title_stg_image
+                    .by_ref()
+                    .subresource_range(br::AspectMask::COLOR, 0..1, 0..1)
+                    .memory_barrier2()
+                    .from(br::PipelineStageFlags2::HOST, br::AccessFlags2::HOST.write)
+                    .to(
+                        br::PipelineStageFlags2::COPY,
+                        br::AccessFlags2::TRANSFER.read,
+                    )
+                    .transit_to(br::ImageLayout::TransferSrcOpt.from_undefined()),
+                atlas
+                    .resource
+                    .image()
+                    .subresource_range(br::AspectMask::COLOR, 0..1, 0..1)
+                    .memory_barrier2()
+                    .transit_to(br::ImageLayout::TransferDestOpt.from_undefined()),
             ],
         ))
         .copy_image(
@@ -488,56 +427,36 @@ impl SpriteListPaneView {
                 srcSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
                 srcOffset: br::Offset3D::ZERO,
                 dstSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
-                dstOffset: br::Offset3D {
-                    x: title_atlas_rect.left as _,
-                    y: title_atlas_rect.top as _,
-                    z: 0,
-                },
-                extent: br::Extent3D {
-                    width: title_atlas_rect.width(),
-                    height: title_atlas_rect.height(),
-                    depth: 1,
-                },
+                dstOffset: title_atlas_rect.lt_offset().with_z(0),
+                extent: title_atlas_rect.extent().with_depth(1),
             }],
         )
         .pipeline_barrier_2(&br::DependencyInfo::new(
             &[],
             &[],
-            &[br::ImageMemoryBarrier2::new(
-                atlas.resource.image(),
-                br::vk::VkImageSubresourceRange {
-                    aspectMask: br::AspectMask::COLOR.bits(),
-                    baseMipLevel: 0,
-                    levelCount: 1,
-                    baseArrayLayer: 0,
-                    layerCount: 1,
-                },
-            )
-            .of_memory(
-                br::AccessFlags2::TRANSFER.write,
-                br::AccessFlags2::SHADER_SAMPLED_READ,
-            )
-            .of_execution(
-                br::PipelineStageFlags2::COPY,
-                br::PipelineStageFlags2::FRAGMENT_SHADER,
-            )
-            .transit_from(br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt))],
+            &[atlas
+                .resource
+                .image()
+                .subresource_range(br::AspectMask::COLOR, 0..1, 0..1)
+                .memory_barrier2()
+                .from(
+                    br::PipelineStageFlags2::COPY,
+                    br::AccessFlags2::TRANSFER.write,
+                )
+                .to(
+                    br::PipelineStageFlags2::FRAGMENT_SHADER,
+                    br::AccessFlags2::SHADER_SAMPLED_READ,
+                )
+                .transit_from(
+                    br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt),
+                )],
         ))
         .begin_render_pass2(
             &br::RenderPassBeginInfo::new(
                 &render_pass,
                 &framebuffer,
-                br::vk::VkRect2D {
-                    offset: br::Offset2D {
-                        x: frame_image_atlas_rect.left as _,
-                        y: frame_image_atlas_rect.top as _,
-                    },
-                    extent: br::Extent2D {
-                        width: render_size_px,
-                        height: render_size_px,
-                    },
-                },
-                &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 0.0])],
+                frame_image_atlas_rect.vk_rect(),
+                &[br::ClearValue::color_f32([0.0; 4])],
             ),
             &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
         )
@@ -548,14 +467,10 @@ impl SpriteListPaneView {
             &br::RenderPassBeginInfo::new(
                 &render_pass,
                 &title_blurred_work_framebuffer,
-                br::vk::VkRect2D {
-                    offset: br::Offset2D::ZERO,
-                    extent: br::Extent2D {
-                        width: title_blurred_atlas_rect.width(),
-                        height: title_blurred_atlas_rect.height(),
-                    },
-                },
-                &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 0.0])],
+                title_blurred_atlas_rect
+                    .extent()
+                    .into_rect(br::Offset2D::ZERO),
+                &[br::ClearValue::color_f32([0.0; 4])],
             ),
             &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
         )
@@ -591,17 +506,8 @@ impl SpriteListPaneView {
             &br::RenderPassBeginInfo::new(
                 &render_pass,
                 &framebuffer,
-                br::vk::VkRect2D {
-                    offset: br::Offset2D {
-                        x: title_blurred_atlas_rect.left as _,
-                        y: title_blurred_atlas_rect.top as _,
-                    },
-                    extent: br::Extent2D {
-                        width: title_blurred_atlas_rect.width(),
-                        height: title_blurred_atlas_rect.height(),
-                    },
-                },
-                &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 0.0])],
+                title_blurred_atlas_rect.vk_rect(),
+                &[br::ClearValue::color_f32([0.0; 4])],
             ),
             &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
         )
@@ -664,6 +570,24 @@ impl AtlasRect {
 
     pub const fn height(&self) -> u32 {
         self.bottom - self.top
+    }
+
+    pub const fn lt_offset(&self) -> br::Offset2D {
+        br::Offset2D {
+            x: self.left as _,
+            y: self.top as _,
+        }
+    }
+
+    pub const fn extent(&self) -> br::Extent2D {
+        br::Extent2D {
+            width: self.width(),
+            height: self.height(),
+        }
+    }
+
+    pub const fn vk_rect(&self) -> br::Rect2D {
+        self.extent().into_rect(self.lt_offset())
     }
 }
 
@@ -1650,9 +1574,9 @@ fn main() {
     ft_face
         .set_char_size(
             (10.0 * 64.0) as _,
-            (10.0 * 64.0) as _,
+            0,
             96 * surface_events.optimal_buffer_scale,
-            96 * surface_events.optimal_buffer_scale,
+            0,
         )
         .expect("Failed to set char size");
 
@@ -1687,33 +1611,22 @@ fn main() {
         &[],
         &[],
         &[
-            br::ImageMemoryBarrier2::new(
-                &title_stg_image,
-                br::vk::VkImageSubresourceRange {
-                    aspectMask: br::AspectMask::COLOR.bits(),
-                    baseMipLevel: 0,
-                    levelCount: 1,
-                    baseArrayLayer: 0,
-                    layerCount: 1,
-                },
-            )
-            .of_memory(
-                br::AccessFlags2::HOST.write,
-                br::AccessFlags2::TRANSFER.read,
-            )
-            .of_execution(br::PipelineStageFlags2::HOST, br::PipelineStageFlags2::COPY)
-            .transit_to(br::ImageLayout::TransferSrcOpt.from_undefined()),
-            br::ImageMemoryBarrier2::new(
-                composition_alphamask_surface_atlas.resource.image(),
-                br::vk::VkImageSubresourceRange {
-                    aspectMask: br::AspectMask::COLOR.bits(),
-                    baseMipLevel: 0,
-                    levelCount: 1,
-                    baseArrayLayer: 0,
-                    layerCount: 1,
-                },
-            )
-            .transit_to(br::ImageLayout::TransferDestOpt.from_undefined()),
+            title_stg_image
+                .by_ref()
+                .subresource_range(br::AspectMask::COLOR, 0..1, 0..1)
+                .memory_barrier2()
+                .from(br::PipelineStageFlags2::HOST, br::AccessFlags2::HOST.write)
+                .to(
+                    br::PipelineStageFlags2::COPY,
+                    br::AccessFlags2::TRANSFER.read,
+                )
+                .transit_to(br::ImageLayout::TransferSrcOpt.from_undefined()),
+            composition_alphamask_surface_atlas
+                .resource
+                .image()
+                .subresource_range(br::AspectMask::COLOR, 0..1, 0..1)
+                .memory_barrier2()
+                .transit_to(br::ImageLayout::TransferDestOpt.from_undefined()),
         ],
     ))
     .copy_image(
@@ -1723,42 +1636,29 @@ fn main() {
         br::ImageLayout::TransferDestOpt,
         &[br::vk::VkImageCopy {
             srcSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
-            srcOffset: br::Offset3D { x: 0, y: 0, z: 0 },
+            srcOffset: br::Offset3D::ZERO,
             dstSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
-            dstOffset: br::Offset3D {
-                x: text_surface_rect.left as _,
-                y: text_surface_rect.top as _,
-                z: 0,
-            },
-            extent: br::Extent3D {
-                width: text_surface_rect.width(),
-                height: text_surface_rect.height(),
-                depth: 1,
-            },
+            dstOffset: text_surface_rect.lt_offset().with_z(0),
+            extent: text_surface_rect.extent().with_depth(1),
         }],
     )
     .pipeline_barrier_2(&br::DependencyInfo::new(
         &[],
         &[],
-        &[br::ImageMemoryBarrier2::new(
-            composition_alphamask_surface_atlas.resource.image(),
-            br::vk::VkImageSubresourceRange {
-                aspectMask: br::AspectMask::COLOR.bits(),
-                baseMipLevel: 0,
-                levelCount: 1,
-                baseArrayLayer: 0,
-                layerCount: 1,
-            },
-        )
-        .of_memory(
-            br::AccessFlags2::TRANSFER.write,
-            br::AccessFlags2::SHADER_SAMPLED_READ,
-        )
-        .of_execution(
-            br::PipelineStageFlags2::COPY,
-            br::PipelineStageFlags2::FRAGMENT_SHADER,
-        )
-        .transit_from(br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt))],
+        &[composition_alphamask_surface_atlas
+            .resource
+            .image()
+            .subresource_range(br::AspectMask::COLOR, 0..1, 0..1)
+            .memory_barrier2()
+            .from(
+                br::PipelineStageFlags2::COPY,
+                br::AccessFlags2::TRANSFER.write,
+            )
+            .to(
+                br::PipelineStageFlags2::FRAGMENT_SHADER,
+                br::AccessFlags2::SHADER_SAMPLED_READ,
+            )
+            .transit_from(br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt))],
     ))
     .end()
     .unwrap();
@@ -1879,7 +1779,7 @@ fn main() {
     let n = composite_instance_buffer.memory_stg.native_ptr();
     let ptr = composite_instance_buffer
         .memory_stg
-        .map(0..core::mem::size_of::<CompositeInstanceData>())
+        .map(0..core::mem::size_of::<CompositeInstanceData>() * composite_instance_buffer.count)
         .unwrap();
     unsafe {
         composite_tree.sink_all(
@@ -2075,7 +1975,7 @@ fn main() {
                 &composite_vinput,
                 &composite_ia_state,
                 &br::PipelineViewportStateCreateInfo::new(
-                    &[br::vk::VkViewport {
+                    &[br::Viewport {
                         x: 0.0,
                         y: 0.0,
                         width: sc_size.width as _,
@@ -2083,10 +1983,7 @@ fn main() {
                         minDepth: 0.0,
                         maxDepth: 1.0,
                     }],
-                    &[br::vk::VkRect2D {
-                        offset: br::vk::VkOffset2D::ZERO,
-                        extent: sc_size,
-                    }],
+                    &[sc_size.into_rect(br::Offset2D::ZERO)],
                 ),
                 &composite_raster_state,
                 &br::PipelineColorBlendStateCreateInfo::new(&[
@@ -2122,10 +2019,7 @@ fn main() {
             &br::RenderPassBeginInfo::new(
                 &main_rp,
                 fb,
-                br::vk::VkRect2D {
-                    offset: br::vk::VkOffset2D::ZERO,
-                    extent: sc_size,
-                },
+                sc_size.into_rect(br::Offset2D::ZERO),
                 &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 1.0])],
             ),
             &br::SubpassBeginInfo::new(br::SubpassContents::Inline),

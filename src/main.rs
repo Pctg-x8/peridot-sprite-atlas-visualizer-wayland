@@ -57,6 +57,274 @@ pub struct FontSet {
     pub ui_default: freetype::Owned<freetype::Face>,
 }
 
+#[repr(C)]
+struct AtlasViewGridParams {
+    pub offset: [f32; 2],
+    pub size: [f32; 2],
+}
+
+pub struct AtlasView<'d> {
+    pub param_buffer: br::BufferObject<&'d br::DeviceObject<&'d br::InstanceObject>>,
+    _param_buffer_memory: br::DeviceMemoryObject<&'d br::DeviceObject<&'d br::InstanceObject>>,
+    grid_vsh: br::ShaderModuleObject<&'d br::DeviceObject<&'d br::InstanceObject>>,
+    grid_fsh: br::ShaderModuleObject<&'d br::DeviceObject<&'d br::InstanceObject>>,
+    pub render_pipeline_layout:
+        br::PipelineLayoutObject<&'d br::DeviceObject<&'d br::InstanceObject>>,
+    pub render_pipeline: br::PipelineObject<&'d br::DeviceObject<&'d br::InstanceObject>>,
+    pub dsl_param: br::DescriptorSetLayoutObject<&'d br::DeviceObject<&'d br::InstanceObject>>,
+    pub dp: br::DescriptorPoolObject<&'d br::DeviceObject<&'d br::InstanceObject>>,
+    pub ds_param: br::DescriptorSet,
+}
+impl<'d> AtlasView<'d> {
+    pub fn new(
+        device: &'d br::DeviceObject<&'d br::InstanceObject>,
+        adapter_memory_info: &br::MemoryProperties,
+        graphics_queue_family_index: u32,
+        graphics_queue: &mut impl br::QueueMut,
+        rendered_pass: br::SubpassRef<impl br::RenderPass>,
+        main_buffer_size: br::Extent2D,
+    ) -> Self {
+        let mut param_buffer = br::BufferObject::new(
+            device,
+            &br::BufferCreateInfo::new_for_type::<AtlasViewGridParams>(
+                br::BufferUsage::UNIFORM_BUFFER | br::BufferUsage::TRANSFER_DEST,
+            ),
+        )
+        .unwrap();
+        let mreq = param_buffer.requirements();
+        let memindex = adapter_memory_info
+            .find_device_local_index(mreq.memoryTypeBits)
+            .expect("no suitable memory property");
+        let param_buffer_memory =
+            br::DeviceMemoryObject::new(device, &br::MemoryAllocateInfo::new(mreq.size, memindex))
+                .unwrap();
+        param_buffer.bind(&param_buffer_memory, 0).unwrap();
+
+        let mut param_buffer_stg = br::BufferObject::new(
+            device,
+            &br::BufferCreateInfo::new_for_type::<AtlasViewGridParams>(
+                br::BufferUsage::TRANSFER_SRC,
+            ),
+        )
+        .unwrap();
+        let mreq = param_buffer_stg.requirements();
+        let memindex = adapter_memory_info
+            .find_host_visible_index(mreq.memoryTypeBits)
+            .expect("no suitable memory property");
+        let mut param_buffer_stg_memory =
+            br::DeviceMemoryObject::new(device, &br::MemoryAllocateInfo::new(mreq.size, memindex))
+                .unwrap();
+        param_buffer_stg.bind(&param_buffer_stg_memory, 0).unwrap();
+        let n = param_buffer_stg_memory.native_ptr();
+        let ptr = param_buffer_stg_memory
+            .map(0..core::mem::size_of::<AtlasViewGridParams>())
+            .unwrap();
+        unsafe {
+            core::ptr::write(
+                ptr.get_mut(0),
+                AtlasViewGridParams {
+                    offset: [0.0, 0.0],
+                    size: [64.0, 64.0],
+                },
+            );
+        }
+        if !adapter_memory_info.is_coherent(memindex) {
+            unsafe {
+                device
+                    .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new(
+                        &br::VkHandleRef::dangling(n),
+                        0..core::mem::size_of::<AtlasViewGridParams>() as _,
+                    )])
+                    .unwrap();
+            }
+        }
+        ptr.end();
+
+        let mut cp = br::CommandPoolObject::new(
+            device,
+            &br::CommandPoolCreateInfo::new(graphics_queue_family_index),
+        )
+        .unwrap();
+        let [mut cb] = br::CommandBufferObject::alloc_array(
+            device,
+            &br::CommandBufferFixedCountAllocateInfo::new(&mut cp, br::CommandBufferLevel::Primary),
+        )
+        .unwrap();
+        unsafe {
+            cb.begin(&br::CommandBufferBeginInfo::new(), device)
+                .unwrap()
+        }
+        .pipeline_barrier_2(&br::DependencyInfo::new(
+            &[br::MemoryBarrier2::new()
+                .from(br::PipelineStageFlags2::HOST, br::AccessFlags2::HOST.write)
+                .to(
+                    br::PipelineStageFlags2::COPY,
+                    br::AccessFlags2::TRANSFER.read,
+                )],
+            &[],
+            &[],
+        ))
+        .copy_buffer(
+            &param_buffer_stg,
+            &param_buffer,
+            &[br::BufferCopy::mirror_data::<AtlasViewGridParams>(0)],
+        )
+        .pipeline_barrier_2(&br::DependencyInfo::new(
+            &[br::MemoryBarrier2::new()
+                .from(
+                    br::PipelineStageFlags2::COPY,
+                    br::AccessFlags2::TRANSFER.write,
+                )
+                .to(
+                    br::PipelineStageFlags2::FRAGMENT_SHADER,
+                    br::AccessFlags2::SHADER.read,
+                )],
+            &[],
+            &[],
+        ))
+        .end()
+        .unwrap();
+        graphics_queue
+            .submit2(
+                &[br::SubmitInfo2::new(
+                    &[],
+                    &[br::CommandBufferSubmitInfo::new(&cb)],
+                    &[],
+                )],
+                None,
+            )
+            .unwrap();
+        graphics_queue.wait().unwrap();
+
+        let dsl_param = br::DescriptorSetLayoutObject::new(
+            device,
+            &br::DescriptorSetLayoutCreateInfo::new(&[
+                br::DescriptorType::UniformBuffer.make_binding(0, 1)
+            ]),
+        )
+        .unwrap();
+        let mut dp = br::DescriptorPoolObject::new(
+            device,
+            &br::DescriptorPoolCreateInfo::new(
+                1,
+                &[br::DescriptorType::UniformBuffer.make_size(1)],
+            ),
+        )
+        .unwrap();
+        let [ds_param] = dp.alloc_array(&[dsl_param.as_transparent_ref()]).unwrap();
+        device.update_descriptor_sets(
+            &[ds_param
+                .binding_at(0)
+                .write(br::DescriptorContents::uniform_buffer(
+                    &param_buffer,
+                    0..core::mem::size_of::<AtlasViewGridParams>() as _,
+                ))],
+            &[],
+        );
+
+        let vsh = br::ShaderModuleObject::new(
+            device,
+            &br::ShaderModuleCreateInfo::new(&load_spv_file("resources/filltri.vert").unwrap()),
+        )
+        .unwrap();
+        let fsh = br::ShaderModuleObject::new(
+            device,
+            &br::ShaderModuleCreateInfo::new(&load_spv_file("resources/grid.frag").unwrap()),
+        )
+        .unwrap();
+
+        let render_pipeline_layout = br::PipelineLayoutObject::new(
+            device,
+            &br::PipelineLayoutCreateInfo::new(
+                &[dsl_param.as_transparent_ref()],
+                &[br::vk::VkPushConstantRange::for_type::<[f32; 2]>(
+                    br::vk::VK_SHADER_STAGE_FRAGMENT_BIT,
+                    0,
+                )],
+            ),
+        )
+        .unwrap();
+        let [render_pipeline] = device
+            .new_graphics_pipeline_array(
+                &[br::GraphicsPipelineCreateInfo::new(
+                    &render_pipeline_layout,
+                    rendered_pass,
+                    &[
+                        br::PipelineShaderStage::new(br::ShaderStage::Vertex, &vsh, c"main"),
+                        br::PipelineShaderStage::new(br::ShaderStage::Fragment, &fsh, c"main"),
+                    ],
+                    VI_STATE_EMPTY,
+                    IA_STATE_TRILIST,
+                    &br::PipelineViewportStateCreateInfo::new(
+                        &[main_buffer_size
+                            .into_rect(br::Offset2D::ZERO)
+                            .make_viewport(0.0..1.0)],
+                        &[main_buffer_size.into_rect(br::Offset2D::ZERO)],
+                    ),
+                    RASTER_STATE_DEFAULT_FILL_NOCULL,
+                    BLEND_STATE_SINGLE_NONE,
+                )
+                .multisample_state(MS_STATE_EMPTY)],
+                None::<&br::PipelineCacheObject<&'d br::DeviceObject<&'d br::InstanceObject>>>,
+            )
+            .unwrap();
+
+        Self {
+            param_buffer,
+            _param_buffer_memory: param_buffer_memory,
+            dsl_param,
+            dp,
+            ds_param,
+            grid_vsh: vsh,
+            grid_fsh: fsh,
+            render_pipeline_layout,
+            render_pipeline,
+        }
+    }
+
+    pub fn recreate(
+        &mut self,
+        device: &'d br::DeviceObject<&'d br::InstanceObject>,
+        rendered_pass: br::SubpassRef<impl br::RenderPass>,
+        main_buffer_size: br::Extent2D,
+    ) {
+        let [render_pipeline] = device
+            .new_graphics_pipeline_array(
+                &[br::GraphicsPipelineCreateInfo::new(
+                    &self.render_pipeline_layout,
+                    rendered_pass,
+                    &[
+                        br::PipelineShaderStage::new(
+                            br::ShaderStage::Vertex,
+                            &self.grid_vsh,
+                            c"main",
+                        ),
+                        br::PipelineShaderStage::new(
+                            br::ShaderStage::Fragment,
+                            &self.grid_fsh,
+                            c"main",
+                        ),
+                    ],
+                    VI_STATE_EMPTY,
+                    IA_STATE_TRILIST,
+                    &br::PipelineViewportStateCreateInfo::new(
+                        &[main_buffer_size
+                            .into_rect(br::Offset2D::ZERO)
+                            .make_viewport(0.0..1.0)],
+                        &[main_buffer_size.into_rect(br::Offset2D::ZERO)],
+                    ),
+                    RASTER_STATE_DEFAULT_FILL_NOCULL,
+                    BLEND_STATE_SINGLE_NONE,
+                )
+                .multisample_state(MS_STATE_EMPTY)],
+                None::<&br::PipelineCacheObject<&'d br::DeviceObject<&'d br::InstanceObject>>>,
+            )
+            .unwrap();
+
+        self.render_pipeline = render_pipeline;
+    }
+}
+
 pub struct SpriteListPaneView {
     pub frame_image_atlas_rect: AtlasRect,
     pub title_atlas_rect: AtlasRect,
@@ -1415,7 +1683,71 @@ fn main() {
         .next()
         .expect("no physical devices");
     let adapter_queue_info = adapter.queue_family_properties_alloc();
+    for (n, q) in adapter_queue_info.iter().enumerate() {
+        let mut v = Vec::with_capacity(4);
+        if q.queue_flags().has(br::QueueFlags::GRAPHICS) {
+            v.push("Graphics");
+        }
+        if q.queue_flags().has(br::QueueFlags::COMPUTE) {
+            v.push("Compute");
+        }
+        if q.queue_flags().has(br::QueueFlags::TRANSFER) {
+            v.push("Transfer");
+        }
+        if q.queue_flags().has(br::QueueFlags::SPARSE_BINDING) {
+            v.push("Sparse Binding");
+        }
+
+        println!("Queue #{n}: x{} {}", q.queueCount, v.join(" / "));
+    }
     let adapter_memory_info = adapter.memory_properties();
+    for (n, p) in adapter_memory_info.types().iter().enumerate() {
+        let h = &adapter_memory_info.heaps()[p.heapIndex as usize];
+
+        let mut v = Vec::with_capacity(6);
+        if p.property_flags()
+            .has(br::MemoryPropertyFlags::DEVICE_LOCAL)
+        {
+            v.push("Device Local");
+        }
+        if p.property_flags()
+            .has(br::MemoryPropertyFlags::HOST_VISIBLE)
+        {
+            v.push("Host Visible");
+        }
+        if p.property_flags()
+            .has(br::MemoryPropertyFlags::HOST_COHERENT)
+        {
+            v.push("Host Coherent");
+        }
+        if p.property_flags().has(br::MemoryPropertyFlags::HOST_CACHED) {
+            v.push("Host Cached");
+        }
+        if p.property_flags()
+            .has(br::MemoryPropertyFlags::LAZILY_ALLOCATED)
+        {
+            v.push("Lazy Allocated");
+        }
+        if p.property_flags().has(br::MemoryPropertyFlags::PROTECTED) {
+            v.push("Protected");
+        }
+
+        let mut hv = Vec::with_capacity(2);
+        if h.flags().has(br::MemoryHeapFlags::DEVICE_LOCAL) {
+            hv.push("Device Local");
+        }
+        if h.flags().has(br::MemoryHeapFlags::MULTI_INSTANCE) {
+            hv.push("Multi Instance");
+        }
+
+        println!(
+            "Memory Type #{n}: {} heap #{} ({}) size {}",
+            v.join(" / "),
+            p.heapIndex,
+            hv.join(" / "),
+            fmt_bytesize(h.size as _)
+        );
+    }
     let adapter_properties = adapter.properties();
     println!(
         "max texture2d size: {}",
@@ -1678,138 +2010,12 @@ fn main() {
         ui_default: ft_face,
     };
 
-    let mut composite_instance_buffer =
-        CompositeInstanceManager::new(&device, &adapter_memory_info);
-    let mut composite_tree = CompositeTree::new();
-
-    let title_cr = composite_tree.alloc();
-    composite_tree.add_child(0, title_cr);
-    {
-        let title_cr = composite_tree.get_mut(title_cr);
-
-        title_cr.instance_slot_index = Some(composite_instance_buffer.alloc());
-        title_cr.offset = [
-            24.0 * surface_events.optimal_buffer_scale as f32,
-            16.0 * surface_events.optimal_buffer_scale as f32,
-        ];
-        title_cr.size = [
-            text_surface_rect.width() as _,
-            text_surface_rect.height() as _,
-        ];
-        title_cr.texatlas_rect = text_surface_rect.clone();
-        title_cr.composite_mode = CompositeMode::ColorTint([1.0, 1.0, 1.0, 1.0]);
-    }
-
-    let header_size =
-        16.0 + 16.0 + title_layout.height() / surface_events.optimal_buffer_scale as f32;
-
-    let sprite_list_pane_view = SpriteListPaneView::new(
-        &device,
-        &adapter_memory_info,
-        graphics_queue_family_index,
-        &mut graphics_queue,
-        &mut composition_alphamask_surface_atlas,
-        surface_events.optimal_buffer_scale,
-        &mut font_set,
-    );
-    let sprite_list_window_cr = composite_tree.alloc();
-    composite_tree.add_child(0, sprite_list_window_cr);
-    {
-        let sprite_list_frame_cr = composite_tree.get_mut(sprite_list_window_cr);
-
-        sprite_list_frame_cr.instance_slot_index = Some(composite_instance_buffer.alloc());
-        sprite_list_frame_cr.offset = [
-            8.0 * surface_events.optimal_buffer_scale as f32,
-            header_size * surface_events.optimal_buffer_scale as f32,
-        ];
-        sprite_list_frame_cr.size = [
-            320.0 * surface_events.optimal_buffer_scale as f32,
-            -(header_size + 8.0) * surface_events.optimal_buffer_scale as f32,
-        ];
-        sprite_list_frame_cr.relative_size_adjustment = [0.0, 1.0];
-        sprite_list_frame_cr.texatlas_rect = sprite_list_pane_view.frame_image_atlas_rect.clone();
-        sprite_list_frame_cr.slice_borders = [
-            SpriteListPaneView::CORNER_RADIUS * surface_events.optimal_buffer_scale as f32,
-            SpriteListPaneView::CORNER_RADIUS * surface_events.optimal_buffer_scale as f32,
-            SpriteListPaneView::CORNER_RADIUS * surface_events.optimal_buffer_scale as f32,
-            SpriteListPaneView::CORNER_RADIUS * surface_events.optimal_buffer_scale as f32,
-        ];
-        sprite_list_frame_cr.composite_mode = CompositeMode::ColorTint([1.0, 1.0, 1.0, 0.5]);
-    }
-    let sprite_list_title_blurred_cr = composite_tree.alloc();
-    composite_tree.add_child(sprite_list_window_cr, sprite_list_title_blurred_cr);
-    {
-        let sprite_list_title_blurred_cr = composite_tree.get_mut(sprite_list_title_blurred_cr);
-
-        sprite_list_title_blurred_cr.instance_slot_index = Some(composite_instance_buffer.alloc());
-        sprite_list_title_blurred_cr.offset = [
-            -(sprite_list_pane_view.title_blurred_atlas_rect.width() as f32 * 0.5),
-            (8.0 - SpriteListPaneView::BLUR_AMOUNT_ONEDIR as f32)
-                * surface_events.optimal_buffer_scale as f32,
-        ];
-        sprite_list_title_blurred_cr.relative_offset_adjustment = [0.5, 0.0];
-        sprite_list_title_blurred_cr.size = [
-            sprite_list_pane_view.title_blurred_atlas_rect.width() as f32,
-            sprite_list_pane_view.title_blurred_atlas_rect.height() as f32,
-        ];
-        sprite_list_title_blurred_cr.texatlas_rect =
-            sprite_list_pane_view.title_blurred_atlas_rect.clone();
-        sprite_list_title_blurred_cr.composite_mode =
-            CompositeMode::ColorTint([0.9, 0.9, 0.9, 1.0]);
-    }
-    let sprite_list_title_cr = composite_tree.alloc();
-    composite_tree.add_child(sprite_list_window_cr, sprite_list_title_cr);
-    {
-        let sprite_list_title_cr = composite_tree.get_mut(sprite_list_title_cr);
-
-        sprite_list_title_cr.instance_slot_index = Some(composite_instance_buffer.alloc());
-        sprite_list_title_cr.offset = [
-            -(sprite_list_pane_view.title_atlas_rect.width() as f32 * 0.5),
-            8.0 * surface_events.optimal_buffer_scale as f32,
-        ];
-        sprite_list_title_cr.relative_offset_adjustment = [0.5, 0.0];
-        sprite_list_title_cr.size = [
-            sprite_list_pane_view.title_atlas_rect.width() as f32,
-            sprite_list_pane_view.title_atlas_rect.height() as f32,
-        ];
-        sprite_list_title_cr.texatlas_rect = sprite_list_pane_view.title_atlas_rect.clone();
-        sprite_list_title_cr.composite_mode = CompositeMode::ColorTint([0.1, 0.1, 0.1, 1.0]);
-    }
-
-    let n = composite_instance_buffer.memory_stg.native_ptr();
-    let ptr = composite_instance_buffer
-        .memory_stg
-        .map(0..core::mem::size_of::<CompositeInstanceData>() * composite_instance_buffer.count)
-        .unwrap();
-    unsafe {
-        composite_tree.sink_all(
-            sc_size,
-            br::Extent2D {
-                width: composition_alphamask_surface_atlas.size,
-                height: composition_alphamask_surface_atlas.size,
-            },
-            &ptr,
-        );
-    }
-    if composite_instance_buffer.stg_mem_requires_flush {
-        unsafe {
-            device
-                .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new(
-                    &br::VkHandleRef::dangling(n),
-                    0..core::mem::size_of::<CompositeInstanceData>() as _,
-                )])
-                .unwrap();
-        }
-    }
-    ptr.end();
-    let mut composite_instance_buffer_dirty = true;
-
     let main_rp = br::RenderPassObject::new(
         &device,
         &br::RenderPassCreateInfo2::new(
             &[br::AttachmentDescription2::new(sc_format.format)
                 .layout_transition(br::ImageLayout::Undefined, br::ImageLayout::PresentSrc)
-                .color_memory_op(br::LoadOp::Clear, br::StoreOp::Store)],
+                .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store)],
             &[
                 br::SubpassDescription2::new().colors(&[br::AttachmentReference2::color(
                     0,
@@ -1995,6 +2201,141 @@ fn main() {
         )
         .unwrap();
 
+    let mut composite_instance_buffer =
+        CompositeInstanceManager::new(&device, &adapter_memory_info);
+    let mut composite_tree = CompositeTree::new();
+
+    let title_cr = composite_tree.alloc();
+    composite_tree.add_child(0, title_cr);
+    {
+        let title_cr = composite_tree.get_mut(title_cr);
+
+        title_cr.instance_slot_index = Some(composite_instance_buffer.alloc());
+        title_cr.offset = [
+            24.0 * surface_events.optimal_buffer_scale as f32,
+            16.0 * surface_events.optimal_buffer_scale as f32,
+        ];
+        title_cr.size = [
+            text_surface_rect.width() as _,
+            text_surface_rect.height() as _,
+        ];
+        title_cr.texatlas_rect = text_surface_rect.clone();
+        title_cr.composite_mode = CompositeMode::ColorTint([1.0, 1.0, 1.0, 1.0]);
+    }
+
+    let header_size =
+        16.0 + 16.0 + title_layout.height() / surface_events.optimal_buffer_scale as f32;
+
+    let mut atlas_view = AtlasView::new(
+        &device,
+        &adapter_memory_info,
+        graphics_queue_family_index,
+        &mut graphics_queue,
+        main_rp.subpass(0),
+        sc_size,
+    );
+
+    let sprite_list_pane_view = SpriteListPaneView::new(
+        &device,
+        &adapter_memory_info,
+        graphics_queue_family_index,
+        &mut graphics_queue,
+        &mut composition_alphamask_surface_atlas,
+        surface_events.optimal_buffer_scale,
+        &mut font_set,
+    );
+    let sprite_list_window_cr = composite_tree.alloc();
+    composite_tree.add_child(0, sprite_list_window_cr);
+    {
+        let sprite_list_frame_cr = composite_tree.get_mut(sprite_list_window_cr);
+
+        sprite_list_frame_cr.instance_slot_index = Some(composite_instance_buffer.alloc());
+        sprite_list_frame_cr.offset = [
+            8.0 * surface_events.optimal_buffer_scale as f32,
+            header_size * surface_events.optimal_buffer_scale as f32,
+        ];
+        sprite_list_frame_cr.size = [
+            320.0 * surface_events.optimal_buffer_scale as f32,
+            -(header_size + 8.0) * surface_events.optimal_buffer_scale as f32,
+        ];
+        sprite_list_frame_cr.relative_size_adjustment = [0.0, 1.0];
+        sprite_list_frame_cr.texatlas_rect = sprite_list_pane_view.frame_image_atlas_rect.clone();
+        sprite_list_frame_cr.slice_borders = [
+            SpriteListPaneView::CORNER_RADIUS * surface_events.optimal_buffer_scale as f32,
+            SpriteListPaneView::CORNER_RADIUS * surface_events.optimal_buffer_scale as f32,
+            SpriteListPaneView::CORNER_RADIUS * surface_events.optimal_buffer_scale as f32,
+            SpriteListPaneView::CORNER_RADIUS * surface_events.optimal_buffer_scale as f32,
+        ];
+        sprite_list_frame_cr.composite_mode = CompositeMode::ColorTint([1.0, 1.0, 1.0, 0.5]);
+    }
+    let sprite_list_title_blurred_cr = composite_tree.alloc();
+    composite_tree.add_child(sprite_list_window_cr, sprite_list_title_blurred_cr);
+    {
+        let sprite_list_title_blurred_cr = composite_tree.get_mut(sprite_list_title_blurred_cr);
+
+        sprite_list_title_blurred_cr.instance_slot_index = Some(composite_instance_buffer.alloc());
+        sprite_list_title_blurred_cr.offset = [
+            -(sprite_list_pane_view.title_blurred_atlas_rect.width() as f32 * 0.5),
+            (8.0 - SpriteListPaneView::BLUR_AMOUNT_ONEDIR as f32)
+                * surface_events.optimal_buffer_scale as f32,
+        ];
+        sprite_list_title_blurred_cr.relative_offset_adjustment = [0.5, 0.0];
+        sprite_list_title_blurred_cr.size = [
+            sprite_list_pane_view.title_blurred_atlas_rect.width() as f32,
+            sprite_list_pane_view.title_blurred_atlas_rect.height() as f32,
+        ];
+        sprite_list_title_blurred_cr.texatlas_rect =
+            sprite_list_pane_view.title_blurred_atlas_rect.clone();
+        sprite_list_title_blurred_cr.composite_mode =
+            CompositeMode::ColorTint([0.9, 0.9, 0.9, 1.0]);
+    }
+    let sprite_list_title_cr = composite_tree.alloc();
+    composite_tree.add_child(sprite_list_window_cr, sprite_list_title_cr);
+    {
+        let sprite_list_title_cr = composite_tree.get_mut(sprite_list_title_cr);
+
+        sprite_list_title_cr.instance_slot_index = Some(composite_instance_buffer.alloc());
+        sprite_list_title_cr.offset = [
+            -(sprite_list_pane_view.title_atlas_rect.width() as f32 * 0.5),
+            8.0 * surface_events.optimal_buffer_scale as f32,
+        ];
+        sprite_list_title_cr.relative_offset_adjustment = [0.5, 0.0];
+        sprite_list_title_cr.size = [
+            sprite_list_pane_view.title_atlas_rect.width() as f32,
+            sprite_list_pane_view.title_atlas_rect.height() as f32,
+        ];
+        sprite_list_title_cr.texatlas_rect = sprite_list_pane_view.title_atlas_rect.clone();
+        sprite_list_title_cr.composite_mode = CompositeMode::ColorTint([0.1, 0.1, 0.1, 1.0]);
+    }
+
+    let n = composite_instance_buffer.memory_stg.native_ptr();
+    let ptr = composite_instance_buffer
+        .memory_stg
+        .map(0..core::mem::size_of::<CompositeInstanceData>() * composite_instance_buffer.count)
+        .unwrap();
+    unsafe {
+        composite_tree.sink_all(
+            sc_size,
+            br::Extent2D {
+                width: composition_alphamask_surface_atlas.size,
+                height: composition_alphamask_surface_atlas.size,
+            },
+            &ptr,
+        );
+    }
+    if composite_instance_buffer.stg_mem_requires_flush {
+        unsafe {
+            device
+                .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new(
+                    &br::VkHandleRef::dangling(n),
+                    0..core::mem::size_of::<CompositeInstanceData>() as _,
+                )])
+                .unwrap();
+        }
+    }
+    ptr.end();
+    let mut composite_instance_buffer_dirty = true;
+
     let mut main_cp = br::CommandPoolObject::new(
         &device,
         &br::CommandPoolCreateInfo::new(graphics_queue_family_index),
@@ -2024,6 +2365,21 @@ fn main() {
             ),
             &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
         )
+        .bind_pipeline(br::PipelineBindPoint::Graphics, &atlas_view.render_pipeline)
+        .push_constant(
+            &atlas_view.render_pipeline_layout,
+            br::vk::VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            &[sc_size.width as f32, sc_size.height as f32],
+        )
+        .bind_descriptor_sets(
+            br::PipelineBindPoint::Graphics,
+            &atlas_view.render_pipeline_layout,
+            0,
+            &[atlas_view.ds_param],
+            &[],
+        )
+        .draw(3, 1, 0, 0)
         .bind_pipeline(br::PipelineBindPoint::Graphics, &composite_pipeline)
         .bind_vertex_buffer_array(
             0,
@@ -2406,6 +2762,8 @@ fn main() {
                                 .unwrap();
                             composite_pipeline = composite_pipeline1;
 
+                            atlas_view.recreate(&device, main_rp.subpass(0), sc_size);
+
                             for (cb, fb) in main_cbs.iter_mut().zip(main_fbs.iter()) {
                                 unsafe {
                                     cb.begin(&br::CommandBufferBeginInfo::new(), &device)
@@ -2423,6 +2781,24 @@ fn main() {
                                     ),
                                     &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
                                 )
+                                .bind_pipeline(
+                                    br::PipelineBindPoint::Graphics,
+                                    &atlas_view.render_pipeline,
+                                )
+                                .push_constant(
+                                    &atlas_view.render_pipeline_layout,
+                                    br::vk::VK_SHADER_STAGE_FRAGMENT_BIT,
+                                    0,
+                                    &[sc_size.width as f32, sc_size.height as f32],
+                                )
+                                .bind_descriptor_sets(
+                                    br::PipelineBindPoint::Graphics,
+                                    &atlas_view.render_pipeline_layout,
+                                    0,
+                                    &[atlas_view.ds_param],
+                                    &[],
+                                )
+                                .draw(3, 1, 0, 0)
                                 .bind_pipeline(br::PipelineBindPoint::Graphics, &composite_pipeline)
                                 .push_constant(
                                     &composite_pipeline_layout,
@@ -2462,4 +2838,29 @@ fn main() {
     unsafe {
         device.wait().unwrap();
     }
+}
+
+fn fmt_bytesize(x: usize) -> String {
+    if x < 1000 {
+        return format!("{x}bytes");
+    }
+
+    let (mut suffix, mut x) = ("KB", x as f64 / 1024.0);
+
+    if x >= 1000.0 {
+        suffix = "MB";
+        x /= 1024.0;
+    }
+
+    if x >= 1000.0 {
+        suffix = "GB";
+        x /= 1024.0;
+    }
+
+    if x >= 1000.0 {
+        suffix = "TB";
+        x /= 1024.0;
+    }
+
+    format!("{x:.3} {suffix}")
 }

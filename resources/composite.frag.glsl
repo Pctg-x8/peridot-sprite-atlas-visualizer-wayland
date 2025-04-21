@@ -52,7 +52,7 @@ void main() {
 
     if (uv_compositeMode.z == 1.0) {
         // input is r8 format
-        col_out = col_out.r * colorTint;
+        col_out = colorTint * vec4(1.0, 1.0, 1.0, col_out.r);
     }
 
     // premultiply

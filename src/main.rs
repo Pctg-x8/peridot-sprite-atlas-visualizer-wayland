@@ -43,9 +43,11 @@ pub struct FontSet {
 pub struct SpriteListPaneView {
     pub frame_image_atlas_rect: AtlasRect,
     pub title_atlas_rect: AtlasRect,
+    pub title_blurred_atlas_rect: AtlasRect,
 }
 impl SpriteListPaneView {
     const CORNER_RADIUS: f32 = 24.0;
+    const BLUR_AMOUNT_ONEDIR: u32 = 8;
 
     pub fn new(
         device: &br::DeviceObject<&br::InstanceObject>,
@@ -59,10 +61,44 @@ impl SpriteListPaneView {
         let render_size_px = ((Self::CORNER_RADIUS * 2.0 + 1.0) * bitmap_scale as f32) as u32;
         let frame_image_atlas_rect = atlas.alloc(render_size_px, render_size_px);
 
+        let title_blur_pixels = Self::BLUR_AMOUNT_ONEDIR * bitmap_scale;
         let title_layout = TextLayout::build_simple("Sprites", &mut fonts.ui_default);
         let title_atlas_rect = atlas.alloc(title_layout.width_px(), title_layout.height_px());
+        let title_blurred_atlas_rect = atlas.alloc(
+            title_layout.width_px() + (title_blur_pixels * 2 + 1),
+            title_layout.height_px() + (title_blur_pixels * 2 + 1),
+        );
         let (title_stg_image, _title_stg_image_mem) =
             title_layout.build_stg_image(device, adapter_memory_info);
+
+        let mut title_blurred_work_image = br::ImageObject::new(
+            device,
+            &br::ImageCreateInfo::new(
+                br::Extent2D {
+                    width: title_blurred_atlas_rect.width(),
+                    height: title_blurred_atlas_rect.height(),
+                },
+                br::vk::VK_FORMAT_R8_UNORM,
+            )
+            .as_color_attachment()
+            .sampled(),
+        )
+        .unwrap();
+        let mreq = title_blurred_work_image.requirements();
+        let memindex = adapter_memory_info
+            .find_device_local_index(mreq.memoryTypeBits)
+            .expect("no suitable memory index");
+        let title_blurred_work_image_mem =
+            br::DeviceMemoryObject::new(device, &br::MemoryAllocateInfo::new(mreq.size, memindex))
+                .unwrap();
+        title_blurred_work_image
+            .bind(&title_blurred_work_image_mem, 0)
+            .unwrap();
+        let title_blurred_work_image_view = title_blurred_work_image
+            .subresource_range(br::AspectMask::COLOR, 0..1, 0..1)
+            .view_builder()
+            .create()
+            .unwrap();
 
         let render_pass = br::RenderPassObject::new(
             device,
@@ -104,6 +140,16 @@ impl SpriteListPaneView {
             ),
         )
         .unwrap();
+        let title_blurred_work_framebuffer = br::FramebufferObject::new(
+            device,
+            &br::FramebufferCreateInfo::new(
+                &render_pass,
+                &[title_blurred_work_image_view.as_transparent_ref()],
+                title_blurred_atlas_rect.width(),
+                title_blurred_atlas_rect.height(),
+            ),
+        )
+        .unwrap();
 
         let vsh = br::ShaderModuleObject::new(
             device,
@@ -117,56 +163,274 @@ impl SpriteListPaneView {
             ),
         )
         .unwrap();
+        let vsh_blur = br::ShaderModuleObject::new(
+            device,
+            &br::ShaderModuleCreateInfo::new(
+                &load_spv_file("resources/filltri_uvmod.vert").unwrap(),
+            ),
+        )
+        .unwrap();
+        let fsh_blur = br::ShaderModuleObject::new(
+            device,
+            &br::ShaderModuleCreateInfo::new(
+                &load_spv_file("resources/blit_axis_convolved.frag").unwrap(),
+            ),
+        )
+        .unwrap();
+
+        let dsl_tex1 = br::DescriptorSetLayoutObject::new(
+            device,
+            &br::DescriptorSetLayoutCreateInfo::new(&[
+                br::DescriptorType::CombinedImageSampler.make_binding(0, 1)
+            ]),
+        )
+        .unwrap();
+        let smp = br::SamplerObject::new(device, &br::SamplerCreateInfo::new()).unwrap();
+        let mut dp = br::DescriptorPoolObject::new(
+            device,
+            &br::DescriptorPoolCreateInfo::new(
+                2,
+                &[br::DescriptorType::CombinedImageSampler.make_size(2)],
+            ),
+        )
+        .unwrap();
+        let [ds_title, ds_title2] = dp
+            .alloc_array(&[dsl_tex1.as_transparent_ref(), dsl_tex1.as_transparent_ref()])
+            .unwrap();
+        device.update_descriptor_sets(
+            &[
+                ds_title
+                    .binding_at(0)
+                    .write(br::DescriptorContents::CombinedImageSampler(vec![
+                        br::DescriptorImageInfo::new(
+                            &atlas.resource.as_transparent_ref(),
+                            br::ImageLayout::ShaderReadOnlyOpt,
+                        )
+                        .with_sampler(&smp),
+                    ])),
+                ds_title2
+                    .binding_at(0)
+                    .write(br::DescriptorContents::CombinedImageSampler(vec![
+                        br::DescriptorImageInfo::new(
+                            &title_blurred_work_image_view.as_transparent_ref(),
+                            br::ImageLayout::ShaderReadOnlyOpt,
+                        )
+                        .with_sampler(&smp),
+                    ])),
+            ],
+            &[],
+        );
 
         let pipeline_layout =
             br::PipelineLayoutObject::new(device, &br::PipelineLayoutCreateInfo::new(&[], &[]))
                 .unwrap();
-        let [pipeline] = device
-            .new_graphics_pipeline_array(
-                &[br::GraphicsPipelineCreateInfo::new(
-                    &pipeline_layout,
-                    render_pass.subpass(0),
-                    &[
-                        br::PipelineShaderStage::new(br::ShaderStage::Vertex, &vsh, c"main"),
-                        br::PipelineShaderStage::new(br::ShaderStage::Fragment, &fsh, c"main"),
-                    ],
-                    &br::PipelineVertexInputStateCreateInfo::new(&[], &[]),
-                    &br::PipelineInputAssemblyStateCreateInfo::new(
-                        br::PrimitiveTopology::TriangleList,
+        let blur_pipeline_layout = br::PipelineLayoutObject::new(
+            device,
+            &br::PipelineLayoutCreateInfo::new(
+                &[dsl_tex1.as_transparent_ref()],
+                &[
+                    br::vk::VkPushConstantRange::for_type::<[f32; 4]>(
+                        br::vk::VK_SHADER_STAGE_VERTEX_BIT,
+                        0,
                     ),
-                    &br::PipelineViewportStateCreateInfo::new(
-                        &[br::Viewport {
-                            x: frame_image_atlas_rect.left as _,
-                            y: frame_image_atlas_rect.top as _,
-                            width: render_size_px as _,
-                            height: render_size_px as _,
-                            minDepth: 0.0,
-                            maxDepth: 1.0,
-                        }],
-                        &[br::vk::VkRect2D {
-                            offset: br::Offset2D {
+                    br::vk::VkPushConstantRange::new(
+                        br::vk::VK_SHADER_STAGE_FRAGMENT_BIT,
+                        core::mem::size_of::<[f32; 4]>() as _
+                            ..(core::mem::size_of::<[f32; 4]>()
+                                + core::mem::size_of::<[f32; 4]>()
+                                + core::mem::size_of::<[f32; 2]>()
+                                + (core::mem::size_of::<f32>() * title_blur_pixels as usize))
+                                as _,
+                    ),
+                ],
+            ),
+        )
+        .unwrap();
+        let [pipeline, pipeline_blur1, pipeline_blur] = device
+            .new_graphics_pipeline_array(
+                &[
+                    br::GraphicsPipelineCreateInfo::new(
+                        &pipeline_layout,
+                        render_pass.subpass(0),
+                        &[
+                            br::PipelineShaderStage::new(br::ShaderStage::Vertex, &vsh, c"main"),
+                            br::PipelineShaderStage::new(br::ShaderStage::Fragment, &fsh, c"main"),
+                        ],
+                        &br::PipelineVertexInputStateCreateInfo::new(&[], &[]),
+                        &br::PipelineInputAssemblyStateCreateInfo::new(
+                            br::PrimitiveTopology::TriangleList,
+                        ),
+                        &br::PipelineViewportStateCreateInfo::new(
+                            &[br::Viewport {
                                 x: frame_image_atlas_rect.left as _,
                                 y: frame_image_atlas_rect.top as _,
-                            },
-                            extent: br::Extent2D {
-                                width: render_size_px,
-                                height: render_size_px,
-                            },
-                        }],
-                    ),
-                    &br::PipelineRasterizationStateCreateInfo::new(
-                        br::PolygonMode::Fill,
-                        br::CullModeFlags::NONE,
-                        br::FrontFace::CounterClockwise,
-                    ),
-                    &br::PipelineColorBlendStateCreateInfo::new(&[
-                        br::vk::VkPipelineColorBlendAttachmentState::NOBLEND,
-                    ]),
-                )
-                .multisample_state(&br::PipelineMultisampleStateCreateInfo::new())],
+                                width: render_size_px as _,
+                                height: render_size_px as _,
+                                minDepth: 0.0,
+                                maxDepth: 1.0,
+                            }],
+                            &[br::vk::VkRect2D {
+                                offset: br::Offset2D {
+                                    x: frame_image_atlas_rect.left as _,
+                                    y: frame_image_atlas_rect.top as _,
+                                },
+                                extent: br::Extent2D {
+                                    width: render_size_px,
+                                    height: render_size_px,
+                                },
+                            }],
+                        ),
+                        &br::PipelineRasterizationStateCreateInfo::new(
+                            br::PolygonMode::Fill,
+                            br::CullModeFlags::NONE,
+                            br::FrontFace::CounterClockwise,
+                        ),
+                        &br::PipelineColorBlendStateCreateInfo::new(&[
+                            br::vk::VkPipelineColorBlendAttachmentState::NOBLEND,
+                        ]),
+                    )
+                    .multisample_state(&br::PipelineMultisampleStateCreateInfo::new()),
+                    br::GraphicsPipelineCreateInfo::new(
+                        &blur_pipeline_layout,
+                        render_pass.subpass(0),
+                        &[
+                            br::PipelineShaderStage::new(
+                                br::ShaderStage::Vertex,
+                                &vsh_blur,
+                                c"main",
+                            ),
+                            br::PipelineShaderStage::new(
+                                br::ShaderStage::Fragment,
+                                &fsh_blur,
+                                c"main",
+                            )
+                            .with_specialization_info(
+                                &br::SpecializationInfo::from_any_type(
+                                    &[br::vk::VkSpecializationMapEntry::for_type::<u32>(0, 0)],
+                                    &title_blur_pixels,
+                                ),
+                            ),
+                        ],
+                        &br::PipelineVertexInputStateCreateInfo::new(&[], &[]),
+                        &br::PipelineInputAssemblyStateCreateInfo::new(
+                            br::PrimitiveTopology::TriangleList,
+                        ),
+                        &br::PipelineViewportStateCreateInfo::new(
+                            &[br::Viewport {
+                                x: 0.0,
+                                y: 0.0,
+                                width: title_blurred_atlas_rect.width() as _,
+                                height: title_blurred_atlas_rect.height() as _,
+                                minDepth: 0.0,
+                                maxDepth: 1.0,
+                            }],
+                            &[br::vk::VkRect2D {
+                                offset: br::Offset2D::ZERO,
+                                extent: br::Extent2D {
+                                    width: title_blurred_atlas_rect.width(),
+                                    height: title_blurred_atlas_rect.height(),
+                                },
+                            }],
+                        ),
+                        &br::PipelineRasterizationStateCreateInfo::new(
+                            br::PolygonMode::Fill,
+                            br::CullModeFlags::NONE,
+                            br::FrontFace::CounterClockwise,
+                        ),
+                        &br::PipelineColorBlendStateCreateInfo::new(&[
+                            br::vk::VkPipelineColorBlendAttachmentState::NOBLEND,
+                        ]),
+                    )
+                    .multisample_state(&br::PipelineMultisampleStateCreateInfo::new()),
+                    br::GraphicsPipelineCreateInfo::new(
+                        &blur_pipeline_layout,
+                        render_pass.subpass(0),
+                        &[
+                            br::PipelineShaderStage::new(
+                                br::ShaderStage::Vertex,
+                                &vsh_blur,
+                                c"main",
+                            ),
+                            br::PipelineShaderStage::new(
+                                br::ShaderStage::Fragment,
+                                &fsh_blur,
+                                c"main",
+                            )
+                            .with_specialization_info(
+                                &br::SpecializationInfo::from_any_type(
+                                    &[br::vk::VkSpecializationMapEntry::for_type::<u32>(0, 0)],
+                                    &title_blur_pixels,
+                                ),
+                            ),
+                        ],
+                        &br::PipelineVertexInputStateCreateInfo::new(&[], &[]),
+                        &br::PipelineInputAssemblyStateCreateInfo::new(
+                            br::PrimitiveTopology::TriangleList,
+                        ),
+                        &br::PipelineViewportStateCreateInfo::new(
+                            &[br::Viewport {
+                                x: title_blurred_atlas_rect.left as _,
+                                y: title_blurred_atlas_rect.top as _,
+                                width: title_blurred_atlas_rect.width() as _,
+                                height: title_blurred_atlas_rect.height() as _,
+                                minDepth: 0.0,
+                                maxDepth: 1.0,
+                            }],
+                            &[br::vk::VkRect2D {
+                                offset: br::Offset2D {
+                                    x: title_blurred_atlas_rect.left as _,
+                                    y: title_blurred_atlas_rect.top as _,
+                                },
+                                extent: br::Extent2D {
+                                    width: title_blurred_atlas_rect.width(),
+                                    height: title_blurred_atlas_rect.height(),
+                                },
+                            }],
+                        ),
+                        &br::PipelineRasterizationStateCreateInfo::new(
+                            br::PolygonMode::Fill,
+                            br::CullModeFlags::NONE,
+                            br::FrontFace::CounterClockwise,
+                        ),
+                        &br::PipelineColorBlendStateCreateInfo::new(&[
+                            br::vk::VkPipelineColorBlendAttachmentState::NOBLEND,
+                        ]),
+                    )
+                    .multisample_state(&br::PipelineMultisampleStateCreateInfo::new()),
+                ],
                 None::<&br::PipelineCacheObject<&br::DeviceObject<&br::InstanceObject>>>,
             )
             .unwrap();
+
+        fn gauss_distrib(x: f32, p: f32) -> f32 {
+            (core::f32::consts::TAU * p.powi(2)).sqrt().recip()
+                * (-x.powi(2) / (2.0 * p.powi(2))).exp()
+        }
+        let mut fsh_h_params = vec![0.0f32; title_blur_pixels as usize + 6];
+        let mut fsh_v_params = vec![0.0f32; title_blur_pixels as usize + 6];
+        // uv_limit
+        fsh_h_params[0] = title_atlas_rect.left as f32 / atlas.size as f32;
+        fsh_h_params[1] = title_atlas_rect.top as f32 / atlas.size as f32;
+        fsh_h_params[2] = title_atlas_rect.right as f32 / atlas.size as f32;
+        fsh_h_params[3] = title_atlas_rect.bottom as f32 / atlas.size as f32;
+        fsh_v_params[2] = 1.0;
+        fsh_v_params[3] = 1.0;
+        // uv_step
+        fsh_h_params[4] = 1.0 / atlas.size as f32;
+        fsh_v_params[5] = 1.0 / title_blurred_atlas_rect.height() as f32;
+        // factors
+        let mut t = 0.0;
+        for n in 0..title_blur_pixels as usize {
+            let v = gauss_distrib(n as f32, title_blur_pixels as f32 / 3.0);
+            fsh_h_params[n + 6] = v;
+            fsh_v_params[n + 6] = v;
+
+            t += v;
+        }
+        for n in 0..title_blur_pixels as usize {
+            fsh_h_params[n + 6] /= t;
+            fsh_v_params[n + 6] /= t;
+        }
 
         let mut cp = br::CommandPoolObject::new(
             device,
@@ -280,6 +544,89 @@ impl SpriteListPaneView {
         .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline)
         .draw(3, 1, 0, 0)
         .end_render_pass2(&br::SubpassEndInfo::new())
+        .begin_render_pass2(
+            &br::RenderPassBeginInfo::new(
+                &render_pass,
+                &title_blurred_work_framebuffer,
+                br::vk::VkRect2D {
+                    offset: br::Offset2D::ZERO,
+                    extent: br::Extent2D {
+                        width: title_blurred_atlas_rect.width(),
+                        height: title_blurred_atlas_rect.height(),
+                    },
+                },
+                &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 0.0])],
+            ),
+            &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+        )
+        .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline_blur1)
+        .bind_descriptor_sets(
+            br::PipelineBindPoint::Graphics,
+            &blur_pipeline_layout,
+            0,
+            &[ds_title],
+            &[],
+        )
+        .push_constant(
+            &blur_pipeline_layout,
+            br::vk::VK_SHADER_STAGE_VERTEX_BIT,
+            0,
+            &[
+                ((title_atlas_rect.width() + title_blur_pixels * 2 + 1) as f32 / atlas.size as f32),
+                ((title_atlas_rect.height() + title_blur_pixels * 2 + 1) as f32
+                    / atlas.size as f32),
+                ((title_atlas_rect.left as f32 - title_blur_pixels as f32) / atlas.size as f32),
+                ((title_atlas_rect.top as f32 - title_blur_pixels as f32) / atlas.size as f32),
+            ],
+        )
+        .push_constant_slice(
+            &blur_pipeline_layout,
+            br::vk::VK_SHADER_STAGE_FRAGMENT_BIT,
+            core::mem::size_of::<[f32; 4]>() as _,
+            &fsh_h_params,
+        )
+        .draw(3, 1, 0, 0)
+        .end_render_pass2(&br::SubpassEndInfo::new())
+        .begin_render_pass2(
+            &br::RenderPassBeginInfo::new(
+                &render_pass,
+                &framebuffer,
+                br::vk::VkRect2D {
+                    offset: br::Offset2D {
+                        x: title_blurred_atlas_rect.left as _,
+                        y: title_blurred_atlas_rect.top as _,
+                    },
+                    extent: br::Extent2D {
+                        width: title_blurred_atlas_rect.width(),
+                        height: title_blurred_atlas_rect.height(),
+                    },
+                },
+                &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 0.0])],
+            ),
+            &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+        )
+        .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline_blur)
+        .bind_descriptor_sets(
+            br::PipelineBindPoint::Graphics,
+            &blur_pipeline_layout,
+            0,
+            &[ds_title2],
+            &[],
+        )
+        .push_constant(
+            &blur_pipeline_layout,
+            br::vk::VK_SHADER_STAGE_VERTEX_BIT,
+            0,
+            &[1.0f32, 1.0, 0.0, 0.0],
+        )
+        .push_constant_slice(
+            &blur_pipeline_layout,
+            br::vk::VK_SHADER_STAGE_FRAGMENT_BIT,
+            core::mem::size_of::<[f32; 4]>() as _,
+            &fsh_v_params,
+        )
+        .draw(3, 1, 0, 0)
+        .end_render_pass2(&br::SubpassEndInfo::new())
         .end()
         .unwrap();
 
@@ -298,6 +645,7 @@ impl SpriteListPaneView {
         Self {
             frame_image_atlas_rect,
             title_atlas_rect,
+            title_blurred_atlas_rect,
         }
     }
 }
@@ -1110,7 +1458,7 @@ fn main() {
         }
     }
     let mut surface_events = SurfaceEvents {
-        optimal_buffer_scale: 1,
+        optimal_buffer_scale: 2,
     };
     wl_surface.add_listener(&mut surface_events).unwrap();
 
@@ -1487,6 +1835,27 @@ fn main() {
             SpriteListPaneView::CORNER_RADIUS * surface_events.optimal_buffer_scale as f32,
         ];
         sprite_list_frame_cr.composite_mode = CompositeMode::ColorTint([1.0, 1.0, 1.0, 0.5]);
+    }
+    let sprite_list_title_blurred_cr = composite_tree.alloc();
+    composite_tree.add_child(sprite_list_window_cr, sprite_list_title_blurred_cr);
+    {
+        let sprite_list_title_blurred_cr = composite_tree.get_mut(sprite_list_title_blurred_cr);
+
+        sprite_list_title_blurred_cr.instance_slot_index = Some(composite_instance_buffer.alloc());
+        sprite_list_title_blurred_cr.offset = [
+            -(sprite_list_pane_view.title_blurred_atlas_rect.width() as f32 * 0.5),
+            (8.0 - SpriteListPaneView::BLUR_AMOUNT_ONEDIR as f32)
+                * surface_events.optimal_buffer_scale as f32,
+        ];
+        sprite_list_title_blurred_cr.relative_offset_adjustment = [0.5, 0.0];
+        sprite_list_title_blurred_cr.size = [
+            sprite_list_pane_view.title_blurred_atlas_rect.width() as f32,
+            sprite_list_pane_view.title_blurred_atlas_rect.height() as f32,
+        ];
+        sprite_list_title_blurred_cr.texatlas_rect =
+            sprite_list_pane_view.title_blurred_atlas_rect.clone();
+        sprite_list_title_blurred_cr.composite_mode =
+            CompositeMode::ColorTint([0.9, 0.9, 0.9, 1.0]);
     }
     let sprite_list_title_cr = composite_tree.alloc();
     composite_tree.add_child(sprite_list_window_cr, sprite_list_title_cr);

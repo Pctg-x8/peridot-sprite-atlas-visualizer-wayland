@@ -356,70 +356,15 @@ impl<'d> AtlasView<'d> {
     }
 }
 
-pub struct SpriteListPaneActionHandler {
-    ht_resize_area: HitTestTreeRef,
-}
-impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
-    type Context = AppState;
-
-    fn cursor_shape(&self, sender: HitTestTreeRef, _context: &mut Self::Context) -> CursorShape {
-        if sender == self.ht_resize_area {
-            return CursorShape::ResizeHorizontal;
-        }
-
-        CursorShape::Default
-    }
-
-    fn on_pointer_down(
-        &self,
-        sender: HitTestTreeRef,
-        _context: &mut Self::Context,
-        _ht: &mut HitTestTreeManager<Self::Context>,
-        _args: hittest::PointerActionArgs,
-    ) -> input::EventContinueControl {
-        if sender == self.ht_resize_area {
-            return EventContinueControl::CAPTURE_ELEMENT;
-        }
-
-        EventContinueControl::empty()
-    }
-
-    fn on_pointer_move(
-        &self,
-        sender: HitTestTreeRef,
-        _context: &mut Self::Context,
-        _ht: &mut HitTestTreeManager<Self::Context>,
-        args: hittest::PointerActionArgs,
-    ) -> EventContinueControl {
-        if sender == self.ht_resize_area {
-            println!("resize area: {} {}", args.client_x, args.client_y);
-        }
-
-        EventContinueControl::empty()
-    }
-
-    fn on_pointer_up(
-        &self,
-        sender: HitTestTreeRef,
-        _context: &mut Self::Context,
-        _ht: &mut HitTestTreeManager<Self::Context>,
-        _args: hittest::PointerActionArgs,
-    ) -> EventContinueControl {
-        if sender == self.ht_resize_area {
-            return EventContinueControl::RELEASE_CAPTURE_ELEMENT;
-        }
-
-        EventContinueControl::empty()
-    }
-}
-
 pub struct SpriteListPaneView {
     pub frame_image_atlas_rect: AtlasRect,
     pub title_atlas_rect: AtlasRect,
     pub title_blurred_atlas_rect: AtlasRect,
+    ct_root: usize,
     ht_frame: HitTestTreeRef,
     ht_resize_area: HitTestTreeRef,
-    _ht_action_handler: std::rc::Rc<SpriteListPaneActionHandler>,
+    width: Cell<f32>,
+    ui_scale_factor: Cell<f32>,
 }
 impl SpriteListPaneView {
     const CORNER_RADIUS: f32 = 24.0;
@@ -437,7 +382,9 @@ impl SpriteListPaneView {
         bitmap_scale: u32,
         header_height: f32,
         fonts: &mut FontSet,
-        ht: &mut HitTestTreeManager<AppState>,
+        composite_tree: &mut CompositeTree,
+        composite_instance_manager: &mut CompositeInstanceManager,
+        ht: &mut HitTestTreeManager<AppUpdateContext>,
     ) -> Self {
         let render_size_px = ((Self::CORNER_RADIUS * 2.0 + 1.0) * bitmap_scale as f32) as u32;
         let frame_image_atlas_rect = atlas.alloc(render_size_px, render_size_px);
@@ -912,6 +859,66 @@ impl SpriteListPaneView {
             .unwrap();
         graphics_queue.wait().unwrap();
 
+        let ct_root = composite_tree.alloc();
+        {
+            let ct_root = composite_tree.get_mut(ct_root);
+
+            ct_root.instance_slot_index = Some(composite_instance_manager.alloc());
+            ct_root.offset = [
+                Self::FLOATING_MARGIN * bitmap_scale as f32,
+                header_height * bitmap_scale as f32,
+            ];
+            ct_root.size = [
+                Self::INIT_WIDTH * bitmap_scale as f32,
+                -(header_height + Self::FLOATING_MARGIN) * bitmap_scale as f32,
+            ];
+            ct_root.relative_size_adjustment = [0.0, 1.0];
+            ct_root.texatlas_rect = frame_image_atlas_rect.clone();
+            ct_root.slice_borders = [
+                Self::CORNER_RADIUS * bitmap_scale as f32,
+                Self::CORNER_RADIUS * bitmap_scale as f32,
+                Self::CORNER_RADIUS * bitmap_scale as f32,
+                Self::CORNER_RADIUS * bitmap_scale as f32,
+            ];
+            ct_root.composite_mode = CompositeMode::ColorTint([1.0, 1.0, 1.0, 0.5]);
+        }
+        let ct_title_blurred = composite_tree.alloc();
+        composite_tree.add_child(ct_root, ct_title_blurred);
+        {
+            let ct_title_blurred = composite_tree.get_mut(ct_title_blurred);
+
+            ct_title_blurred.instance_slot_index = Some(composite_instance_manager.alloc());
+            ct_title_blurred.offset = [
+                -(title_blurred_atlas_rect.width() as f32 * 0.5),
+                (8.0 - Self::BLUR_AMOUNT_ONEDIR as f32) * bitmap_scale as f32,
+            ];
+            ct_title_blurred.relative_offset_adjustment = [0.5, 0.0];
+            ct_title_blurred.size = [
+                title_blurred_atlas_rect.width() as f32,
+                title_blurred_atlas_rect.height() as f32,
+            ];
+            ct_title_blurred.texatlas_rect = title_blurred_atlas_rect.clone();
+            ct_title_blurred.composite_mode = CompositeMode::ColorTint([0.9, 0.9, 0.9, 1.0]);
+        }
+        let ct_title = composite_tree.alloc();
+        composite_tree.add_child(ct_root, ct_title);
+        {
+            let ct_title = composite_tree.get_mut(ct_title);
+
+            ct_title.instance_slot_index = Some(composite_instance_manager.alloc());
+            ct_title.offset = [
+                -(title_atlas_rect.width() as f32 * 0.5),
+                8.0 * bitmap_scale as f32,
+            ];
+            ct_title.relative_offset_adjustment = [0.5, 0.0];
+            ct_title.size = [
+                title_atlas_rect.width() as f32,
+                title_atlas_rect.height() as f32,
+            ];
+            ct_title.texatlas_rect = title_atlas_rect.clone();
+            ct_title.composite_mode = CompositeMode::ColorTint([0.1, 0.1, 0.1, 1.0]);
+        }
+
         let ht_frame = ht.create(HitTestTreeData {
             top: header_height,
             left: Self::FLOATING_MARGIN,
@@ -929,22 +936,169 @@ impl SpriteListPaneView {
         });
         ht.add_child(ht_frame, ht_resize_area);
 
-        let ht_action_handler = std::rc::Rc::new(SpriteListPaneActionHandler { ht_resize_area });
-        ht.get_data_mut(ht_resize_area).action_handler =
-            Some(std::rc::Rc::downgrade(&ht_action_handler) as _);
-
         Self {
             frame_image_atlas_rect,
             title_atlas_rect,
             title_blurred_atlas_rect,
+            ct_root,
             ht_frame,
             ht_resize_area,
+            width: Cell::new(Self::INIT_WIDTH),
+            ui_scale_factor: Cell::new(bitmap_scale as _),
+        }
+    }
+
+    pub fn mount(
+        &self,
+        ct: &mut CompositeTree,
+        ct_parent: usize,
+        ht: &mut HitTestTreeManager<AppUpdateContext>,
+        ht_parent: HitTestTreeRef,
+    ) {
+        ct.add_child(ct_parent, self.ct_root);
+        ht.add_child(ht_parent, self.ht_frame);
+    }
+
+    pub fn set_width(
+        &self,
+        width: f32,
+        ct: &mut CompositeTree,
+        ht: &mut HitTestTreeManager<AppUpdateContext>,
+    ) {
+        ct.get_mut(self.ct_root).size[0] = width * self.ui_scale_factor.get();
+        ct.mark_dirty(self.ct_root);
+        ht.get_data_mut(self.ht_frame).width = width;
+
+        self.width.set(width);
+    }
+}
+
+pub struct SpriteListPaneActionHandler {
+    view: Rc<SpriteListPaneView>,
+    ht_resize_area: HitTestTreeRef,
+    resize_state: Cell<Option<(f32, f32)>>,
+}
+impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
+    type Context = AppUpdateContext;
+
+    fn cursor_shape(&self, sender: HitTestTreeRef, _context: &mut Self::Context) -> CursorShape {
+        if sender == self.ht_resize_area {
+            return CursorShape::ResizeHorizontal;
+        }
+
+        CursorShape::Default
+    }
+
+    fn on_pointer_down(
+        &self,
+        sender: HitTestTreeRef,
+        _context: &mut Self::Context,
+        _ht: &mut HitTestTreeManager<Self::Context>,
+        args: hittest::PointerActionArgs,
+    ) -> input::EventContinueControl {
+        if sender == self.ht_resize_area {
+            self.resize_state
+                .set(Some((self.view.width.get(), args.client_x)));
+
+            return EventContinueControl::CAPTURE_ELEMENT | EventContinueControl::STOP_PROPAGATION;
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_pointer_move(
+        &self,
+        sender: HitTestTreeRef,
+        context: &mut Self::Context,
+        ht: &mut HitTestTreeManager<Self::Context>,
+        args: hittest::PointerActionArgs,
+    ) -> EventContinueControl {
+        if sender == self.ht_resize_area {
+            if let Some((base_width, base_cx)) = self.resize_state.get() {
+                let w = (base_width + (args.client_x - base_cx)).max(16.0);
+                self.view.set_width(w, &mut context.composite_tree, ht);
+
+                return EventContinueControl::STOP_PROPAGATION;
+            }
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_pointer_up(
+        &self,
+        sender: HitTestTreeRef,
+        context: &mut Self::Context,
+        ht: &mut HitTestTreeManager<Self::Context>,
+        args: hittest::PointerActionArgs,
+    ) -> EventContinueControl {
+        if sender == self.ht_resize_area {
+            if let Some((base_width, base_cx)) = self.resize_state.replace(None) {
+                let w = (base_width + (args.client_x - base_cx)).max(16.0);
+                self.view.set_width(w, &mut context.composite_tree, ht);
+
+                return EventContinueControl::RELEASE_CAPTURE_ELEMENT;
+            }
+        }
+
+        EventContinueControl::empty()
+    }
+}
+
+pub struct SpriteListPanePresenter {
+    view: Rc<SpriteListPaneView>,
+    _ht_action_handler: Rc<SpriteListPaneActionHandler>,
+}
+impl SpriteListPanePresenter {
+    pub fn new(
+        device: &br::DeviceObject<&br::InstanceObject>,
+        adapter_memory_info: &br::MemoryProperties,
+        graphics_queue_family_index: u32,
+        graphics_queue: &mut impl br::QueueMut,
+        atlas: &mut CompositionSurfaceAtlas,
+        bitmap_scale: u32,
+        header_height: f32,
+        fonts: &mut FontSet,
+        composite_tree: &mut CompositeTree,
+        composite_instance_manager: &mut CompositeInstanceManager,
+        ht: &mut HitTestTreeManager<AppUpdateContext>,
+    ) -> Self {
+        let view = Rc::new(SpriteListPaneView::new(
+            device,
+            adapter_memory_info,
+            graphics_queue_family_index,
+            graphics_queue,
+            atlas,
+            bitmap_scale,
+            header_height,
+            fonts,
+            composite_tree,
+            composite_instance_manager,
+            ht,
+        ));
+
+        let ht_action_handler = Rc::new(SpriteListPaneActionHandler {
+            view: view.clone(),
+            ht_resize_area: view.ht_resize_area,
+            resize_state: Cell::new(None),
+        });
+        ht.get_data_mut(view.ht_resize_area).action_handler =
+            Some(Rc::downgrade(&ht_action_handler) as _);
+
+        Self {
+            view,
             _ht_action_handler: ht_action_handler,
         }
     }
 
-    pub fn mount(&self, ht: &mut HitTestTreeManager<AppState>, ht_parent: HitTestTreeRef) {
-        ht.add_child(ht_parent, self.ht_frame);
+    pub fn mount(
+        &self,
+        ct: &mut CompositeTree,
+        ct_parent: usize,
+        ht: &mut HitTestTreeManager<AppUpdateContext>,
+        ht_parent: HitTestTreeRef,
+    ) {
+        self.view.mount(ct, ct_parent, ht, ht_parent);
     }
 }
 
@@ -1268,6 +1422,7 @@ impl<'d> CompositeInstanceManager<'d> {
 pub struct CompositeTree {
     rects: Vec<CompositeRect>,
     unused: BTreeSet<usize>,
+    dirty: bool,
 }
 impl CompositeTree {
     pub fn new() -> Self {
@@ -1295,6 +1450,7 @@ impl CompositeTree {
         Self {
             rects,
             unused: BTreeSet::new(),
+            dirty: false,
         }
     }
 
@@ -1353,6 +1509,15 @@ impl CompositeTree {
 
     pub fn get_mut(&mut self, index: usize) -> &mut CompositeRect {
         &mut self.rects[index]
+    }
+
+    pub fn mark_dirty(&mut self, index: usize) {
+        self.rects[index].dirty = true;
+        self.dirty = true;
+    }
+
+    pub fn take_dirty(&mut self) -> bool {
+        core::mem::replace(&mut self.dirty, false)
     }
 
     pub fn add_child(&mut self, parent: usize, child: usize) {
@@ -1623,6 +1788,11 @@ impl TextLayout {
 
 pub struct AppState {}
 
+pub struct AppUpdateContext {
+    composite_tree: CompositeTree,
+    state: AppState,
+}
+
 fn main() {
     let mut dp = wl::Display::connect().expect("Failed to connect to wayland display");
     let mut registry = dp.get_registry().expect("Failed to get global registry");
@@ -1722,7 +1892,7 @@ fn main() {
     let client_size = Cell::new((640.0f32, 480.0));
     let mut app_state = AppState {};
     let mut pointer_input_manager = PointerInputManager::new();
-    let mut ht_manager = HitTestTreeManager::<AppState>::new();
+    let mut ht_manager = HitTestTreeManager::new();
     let ht_root = ht_manager.create(HitTestTreeData {
         left: 0.0,
         top: 0.0,
@@ -2554,7 +2724,7 @@ fn main() {
         sc_size,
     );
 
-    let sprite_list_pane_view = SpriteListPaneView::new(
+    let sprite_list_pane = SpriteListPanePresenter::new(
         &device,
         &adapter_memory_info,
         graphics_queue_family_index,
@@ -2563,73 +2733,11 @@ fn main() {
         surface_events.optimal_buffer_scale,
         header_size,
         &mut font_set,
+        &mut composite_tree,
+        &mut composite_instance_buffer,
         &mut ht_manager,
     );
-    sprite_list_pane_view.mount(&mut ht_manager, ht_root);
-    let sprite_list_window_cr = composite_tree.alloc();
-    composite_tree.add_child(0, sprite_list_window_cr);
-    {
-        let sprite_list_frame_cr = composite_tree.get_mut(sprite_list_window_cr);
-
-        sprite_list_frame_cr.instance_slot_index = Some(composite_instance_buffer.alloc());
-        sprite_list_frame_cr.offset = [
-            SpriteListPaneView::FLOATING_MARGIN * surface_events.optimal_buffer_scale as f32,
-            header_size * surface_events.optimal_buffer_scale as f32,
-        ];
-        sprite_list_frame_cr.size = [
-            SpriteListPaneView::INIT_WIDTH * surface_events.optimal_buffer_scale as f32,
-            -(header_size + SpriteListPaneView::FLOATING_MARGIN)
-                * surface_events.optimal_buffer_scale as f32,
-        ];
-        sprite_list_frame_cr.relative_size_adjustment = [0.0, 1.0];
-        sprite_list_frame_cr.texatlas_rect = sprite_list_pane_view.frame_image_atlas_rect.clone();
-        sprite_list_frame_cr.slice_borders = [
-            SpriteListPaneView::CORNER_RADIUS * surface_events.optimal_buffer_scale as f32,
-            SpriteListPaneView::CORNER_RADIUS * surface_events.optimal_buffer_scale as f32,
-            SpriteListPaneView::CORNER_RADIUS * surface_events.optimal_buffer_scale as f32,
-            SpriteListPaneView::CORNER_RADIUS * surface_events.optimal_buffer_scale as f32,
-        ];
-        sprite_list_frame_cr.composite_mode = CompositeMode::ColorTint([1.0, 1.0, 1.0, 0.5]);
-    }
-    let sprite_list_title_blurred_cr = composite_tree.alloc();
-    composite_tree.add_child(sprite_list_window_cr, sprite_list_title_blurred_cr);
-    {
-        let sprite_list_title_blurred_cr = composite_tree.get_mut(sprite_list_title_blurred_cr);
-
-        sprite_list_title_blurred_cr.instance_slot_index = Some(composite_instance_buffer.alloc());
-        sprite_list_title_blurred_cr.offset = [
-            -(sprite_list_pane_view.title_blurred_atlas_rect.width() as f32 * 0.5),
-            (8.0 - SpriteListPaneView::BLUR_AMOUNT_ONEDIR as f32)
-                * surface_events.optimal_buffer_scale as f32,
-        ];
-        sprite_list_title_blurred_cr.relative_offset_adjustment = [0.5, 0.0];
-        sprite_list_title_blurred_cr.size = [
-            sprite_list_pane_view.title_blurred_atlas_rect.width() as f32,
-            sprite_list_pane_view.title_blurred_atlas_rect.height() as f32,
-        ];
-        sprite_list_title_blurred_cr.texatlas_rect =
-            sprite_list_pane_view.title_blurred_atlas_rect.clone();
-        sprite_list_title_blurred_cr.composite_mode =
-            CompositeMode::ColorTint([0.9, 0.9, 0.9, 1.0]);
-    }
-    let sprite_list_title_cr = composite_tree.alloc();
-    composite_tree.add_child(sprite_list_window_cr, sprite_list_title_cr);
-    {
-        let sprite_list_title_cr = composite_tree.get_mut(sprite_list_title_cr);
-
-        sprite_list_title_cr.instance_slot_index = Some(composite_instance_buffer.alloc());
-        sprite_list_title_cr.offset = [
-            -(sprite_list_pane_view.title_atlas_rect.width() as f32 * 0.5),
-            8.0 * surface_events.optimal_buffer_scale as f32,
-        ];
-        sprite_list_title_cr.relative_offset_adjustment = [0.5, 0.0];
-        sprite_list_title_cr.size = [
-            sprite_list_pane_view.title_atlas_rect.width() as f32,
-            sprite_list_pane_view.title_atlas_rect.height() as f32,
-        ];
-        sprite_list_title_cr.texatlas_rect = sprite_list_pane_view.title_atlas_rect.clone();
-        sprite_list_title_cr.composite_mode = CompositeMode::ColorTint([0.1, 0.1, 0.1, 1.0]);
-    }
+    sprite_list_pane.mount(&mut composite_tree, 0, &mut ht_manager, ht_root);
 
     ht_manager.dump(ht_root);
 
@@ -2840,6 +2948,11 @@ fn main() {
         ))
         .unwrap();
 
+    let mut app_update_context = AppUpdateContext {
+        composite_tree,
+        state: app_state,
+    };
+
     dp.flush().unwrap();
     let mut t = std::time::Instant::now();
     let mut frame_resize_request = None;
@@ -2861,14 +2974,15 @@ fn main() {
                         last_rendering = false;
                     }
 
-                    if last_render_scale != surface_events.optimal_buffer_scale
+                    if app_update_context.composite_tree.take_dirty()
+                        || last_render_scale != surface_events.optimal_buffer_scale
                         || last_render_size != sc_size
                     {
                         let n = composite_instance_buffer.memory_stg.native_ptr();
                         let r = composite_instance_buffer.range_all();
                         let ptr = composite_instance_buffer.memory_stg.map(r.clone()).unwrap();
                         unsafe {
-                            composite_tree.sink_all(
+                            app_update_context.composite_tree.sink_all(
                                 sc_size,
                                 br::Extent2D {
                                     width: composition_alphamask_surface_atlas.size as _,
@@ -3168,10 +3282,11 @@ fn main() {
                         cw,
                         ch,
                         &mut ht_manager,
-                        &mut app_state,
+                        &mut app_update_context,
                         ht_root,
                     );
-                    let shape = pointer_input_manager.cursor_shape(&mut ht_manager, &mut app_state);
+                    let shape = pointer_input_manager
+                        .cursor_shape(&mut ht_manager, &mut app_update_context);
                     cursor_shape_device
                         .set_shape(
                             enter_serial,
@@ -3194,11 +3309,12 @@ fn main() {
                         cw,
                         ch,
                         &mut ht_manager,
-                        &mut app_state,
+                        &mut app_update_context,
                         ht_root,
                     );
 
-                    let shape = pointer_input_manager.cursor_shape(&mut ht_manager, &mut app_state);
+                    let shape = pointer_input_manager
+                        .cursor_shape(&mut ht_manager, &mut app_update_context);
                     cursor_shape_device
                         .set_shape(
                             enter_serial,
@@ -3219,11 +3335,12 @@ fn main() {
                         cw,
                         ch,
                         &mut ht_manager,
-                        &mut app_state,
+                        &mut app_update_context,
                         ht_root,
                     );
 
-                    let shape = pointer_input_manager.cursor_shape(&mut ht_manager, &mut app_state);
+                    let shape = pointer_input_manager
+                        .cursor_shape(&mut ht_manager, &mut app_update_context);
                     cursor_shape_device
                         .set_shape(
                             enter_serial,

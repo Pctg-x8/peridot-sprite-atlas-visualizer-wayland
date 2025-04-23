@@ -1,9 +1,18 @@
 mod fontconfig;
 mod freetype;
 mod harfbuzz;
+mod hittest;
+mod input;
+mod linux_input_event_codes;
 mod wl;
 
-use std::{collections::BTreeSet, io::Read, path::Path, rc::Rc};
+use std::{
+    cell::Cell,
+    collections::{BTreeSet, VecDeque},
+    io::Read,
+    path::Path,
+    rc::Rc,
+};
 
 use ::fontconfig::{FC_FAMILY, FcMatchPattern};
 use bedrock::{
@@ -16,13 +25,34 @@ use freetype2::{
     FT_Bitmap, FT_Bool, FT_GlyphSlotRec, FT_LOAD_DEFAULT, FT_RENDER_MODE_LIGHT,
     FT_RENDER_MODE_NORMAL,
 };
+use hittest::{
+    CursorShape, HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef,
+};
+use input::{EventContinueControl, PointerInputManager};
+use linux_input_event_codes::BTN_LEFT;
 use wl::{WpCursorShapeDeviceV1, WpCursorShapeDeviceV1Shape, WpCursorShapeManagerV1};
 
 pub enum AppEvent {
-    ToplevelWindowConfigure { width: u32, height: u32 },
-    ToplevelWindowSurfaceConfigure { serial: u32 },
+    ToplevelWindowConfigure {
+        width: u32,
+        height: u32,
+    },
+    ToplevelWindowSurfaceConfigure {
+        serial: u32,
+    },
     ToplevelWindowClose,
     ToplevelWindowFrameTiming,
+    MainWindowPointerMove {
+        enter_serial: u32,
+        surface_x: f32,
+        surface_y: f32,
+    },
+    MainWindowPointerLeftDown {
+        enter_serial: u32,
+    },
+    MainWindowPointerLeftUp {
+        enter_serial: u32,
+    },
 }
 
 fn load_spv_file(path: impl AsRef<Path>) -> std::io::Result<Vec<u32>> {
@@ -326,14 +356,77 @@ impl<'d> AtlasView<'d> {
     }
 }
 
+pub struct SpriteListPaneActionHandler {
+    ht_resize_area: HitTestTreeRef,
+}
+impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
+    type Context = AppState;
+
+    fn cursor_shape(&self, sender: HitTestTreeRef, _context: &mut Self::Context) -> CursorShape {
+        if sender == self.ht_resize_area {
+            return CursorShape::ResizeHorizontal;
+        }
+
+        CursorShape::Default
+    }
+
+    fn on_pointer_down(
+        &self,
+        sender: HitTestTreeRef,
+        _context: &mut Self::Context,
+        _ht: &mut HitTestTreeManager<Self::Context>,
+        _args: hittest::PointerActionArgs,
+    ) -> input::EventContinueControl {
+        if sender == self.ht_resize_area {
+            return EventContinueControl::CAPTURE_ELEMENT;
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_pointer_move(
+        &self,
+        sender: HitTestTreeRef,
+        _context: &mut Self::Context,
+        _ht: &mut HitTestTreeManager<Self::Context>,
+        args: hittest::PointerActionArgs,
+    ) -> EventContinueControl {
+        if sender == self.ht_resize_area {
+            println!("resize area: {} {}", args.client_x, args.client_y);
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_pointer_up(
+        &self,
+        sender: HitTestTreeRef,
+        _context: &mut Self::Context,
+        _ht: &mut HitTestTreeManager<Self::Context>,
+        _args: hittest::PointerActionArgs,
+    ) -> EventContinueControl {
+        if sender == self.ht_resize_area {
+            return EventContinueControl::RELEASE_CAPTURE_ELEMENT;
+        }
+
+        EventContinueControl::empty()
+    }
+}
+
 pub struct SpriteListPaneView {
     pub frame_image_atlas_rect: AtlasRect,
     pub title_atlas_rect: AtlasRect,
     pub title_blurred_atlas_rect: AtlasRect,
+    ht_frame: HitTestTreeRef,
+    ht_resize_area: HitTestTreeRef,
+    _ht_action_handler: std::rc::Rc<SpriteListPaneActionHandler>,
 }
 impl SpriteListPaneView {
     const CORNER_RADIUS: f32 = 24.0;
     const BLUR_AMOUNT_ONEDIR: u32 = 8;
+    const FLOATING_MARGIN: f32 = 8.0;
+    const INIT_WIDTH: f32 = 320.0;
+    const RESIZE_AREA_WIDTH: f32 = 8.0;
 
     pub fn new(
         device: &br::DeviceObject<&br::InstanceObject>,
@@ -342,7 +435,9 @@ impl SpriteListPaneView {
         graphics_queue: &mut impl br::QueueMut,
         atlas: &mut CompositionSurfaceAtlas,
         bitmap_scale: u32,
+        header_height: f32,
         fonts: &mut FontSet,
+        ht: &mut HitTestTreeManager<AppState>,
     ) -> Self {
         let render_size_px = ((Self::CORNER_RADIUS * 2.0 + 1.0) * bitmap_scale as f32) as u32;
         let frame_image_atlas_rect = atlas.alloc(render_size_px, render_size_px);
@@ -817,11 +912,39 @@ impl SpriteListPaneView {
             .unwrap();
         graphics_queue.wait().unwrap();
 
+        let ht_frame = ht.create(HitTestTreeData {
+            top: header_height,
+            left: Self::FLOATING_MARGIN,
+            width: Self::INIT_WIDTH,
+            height: -Self::FLOATING_MARGIN - header_height,
+            height_adjustment_factor: 1.0,
+            ..Default::default()
+        });
+        let ht_resize_area = ht.create(HitTestTreeData {
+            left: -Self::RESIZE_AREA_WIDTH * 0.5,
+            left_adjustment_factor: 1.0,
+            width: Self::RESIZE_AREA_WIDTH,
+            height_adjustment_factor: 1.0,
+            ..Default::default()
+        });
+        ht.add_child(ht_frame, ht_resize_area);
+
+        let ht_action_handler = std::rc::Rc::new(SpriteListPaneActionHandler { ht_resize_area });
+        ht.get_data_mut(ht_resize_area).action_handler =
+            Some(std::rc::Rc::downgrade(&ht_action_handler) as _);
+
         Self {
             frame_image_atlas_rect,
             title_atlas_rect,
             title_blurred_atlas_rect,
+            ht_frame,
+            ht_resize_area,
+            _ht_action_handler: ht_action_handler,
         }
+    }
+
+    pub fn mount(&self, ht: &mut HitTestTreeManager<AppState>, ht_parent: HitTestTreeRef) {
+        ht.add_child(ht_parent, self.ht_frame);
     }
 }
 
@@ -1498,9 +1621,9 @@ impl TextLayout {
     }
 }
 
-fn main() {
-    let (app_event_sender, app_event_receiver) = std::sync::mpsc::channel();
+pub struct AppState {}
 
+fn main() {
     let mut dp = wl::Display::connect().expect("Failed to connect to wayland display");
     let mut registry = dp.get_registry().expect("Failed to get global registry");
     struct RegistryListener {
@@ -1594,6 +1717,24 @@ fn main() {
     let mut seat_listener = SeatListener { pointer: None };
     seat.add_listener(&mut seat_listener).unwrap();
 
+    let mut events = VecDeque::new();
+
+    let client_size = Cell::new((640.0f32, 480.0));
+    let mut app_state = AppState {};
+    let mut pointer_input_manager = PointerInputManager::new();
+    let mut ht_manager = HitTestTreeManager::<AppState>::new();
+    let ht_root = ht_manager.create(HitTestTreeData {
+        left: 0.0,
+        top: 0.0,
+        left_adjustment_factor: 0.0,
+        top_adjustment_factor: 0.0,
+        width: 0.0,
+        height: 0.0,
+        width_adjustment_factor: 1.0,
+        height_adjustment_factor: 1.0,
+        action_handler: None,
+    });
+
     let mut wl_surface = compositor
         .create_surface()
         .expect("Failed to create wl_surface");
@@ -1611,26 +1752,23 @@ fn main() {
         .expect("Failed to set title");
 
     struct ToplevelSurfaceEventsHandler {
-        app_event_sender: std::sync::mpsc::Sender<AppEvent>,
+        app_event_queue: *mut VecDeque<AppEvent>,
     }
     impl wl::XdgSurfaceEventListener for ToplevelSurfaceEventsHandler {
         fn configure(&mut self, _: &mut wl::XdgSurface, serial: u32) {
-            self.app_event_sender
-                .send(AppEvent::ToplevelWindowSurfaceConfigure { serial })
-                .unwrap();
+            unsafe { &mut *self.app_event_queue }
+                .push_back(AppEvent::ToplevelWindowSurfaceConfigure { serial });
         }
     }
     struct ToplevelWindowEventsHandler {
-        app_event_sender: std::sync::mpsc::Sender<AppEvent>,
+        app_event_queue: *mut VecDeque<AppEvent>,
     }
     impl wl::XdgToplevelEventListener for ToplevelWindowEventsHandler {
         fn configure(&mut self, _: &mut wl::XdgToplevel, width: i32, height: i32, states: &[i32]) {
-            self.app_event_sender
-                .send(AppEvent::ToplevelWindowConfigure {
-                    width: width as _,
-                    height: height as _,
-                })
-                .unwrap();
+            unsafe { &mut *self.app_event_queue }.push_back(AppEvent::ToplevelWindowConfigure {
+                width: width as _,
+                height: height as _,
+            });
 
             println!(
                 "configure: {width} {height} {states:?} th: {:?}",
@@ -1639,9 +1777,7 @@ fn main() {
         }
 
         fn close(&mut self, _: &mut wl::XdgToplevel) {
-            self.app_event_sender
-                .send(AppEvent::ToplevelWindowClose)
-                .unwrap();
+            unsafe { &mut *self.app_event_queue }.push_back(AppEvent::ToplevelWindowClose);
         }
 
         fn configure_bounds(&mut self, toplevel: &mut wl::XdgToplevel, width: i32, height: i32) {
@@ -1659,10 +1795,10 @@ fn main() {
         }
     }
     let mut tseh = ToplevelSurfaceEventsHandler {
-        app_event_sender: app_event_sender.clone(),
+        app_event_queue: &mut events as *mut _,
     };
     let mut tweh = ToplevelWindowEventsHandler {
-        app_event_sender: app_event_sender.clone(),
+        app_event_queue: &mut events as *mut _,
     };
     xdg_surface
         .add_listener(&mut tseh)
@@ -1707,10 +1843,16 @@ fn main() {
     let mut cursor_shape_device = cursor_shape_manager
         .get_pointer(&mut pointer)
         .expect("Failed to get cursor shape device");
-    struct PointerEvents<'x> {
-        cursor_shape_device: &'x mut WpCursorShapeDeviceV1,
+    enum PointerOnSurface {
+        None,
+        Main { serial: u32 },
     }
-    impl wl::PointerEventListener for PointerEvents<'_> {
+    struct PointerEvents {
+        pointer_on_surface: PointerOnSurface,
+        main_surface_handle: *mut wl::Surface,
+        app_event_queue: *mut VecDeque<AppEvent>,
+    }
+    impl wl::PointerEventListener for PointerEvents {
         fn enter(
             &mut self,
             _pointer: &mut wl::Pointer,
@@ -1719,12 +1861,31 @@ fn main() {
             surface_x: wl::Fixed,
             surface_y: wl::Fixed,
         ) {
-            self.cursor_shape_device
-                .set_shape(serial, WpCursorShapeDeviceV1Shape::Default)
-                .expect("Failed to set cursor shape");
+            self.pointer_on_surface = if core::ptr::addr_eq(surface, self.main_surface_handle) {
+                PointerOnSurface::Main { serial }
+            } else {
+                PointerOnSurface::None
+            };
+
+            match self.pointer_on_surface {
+                PointerOnSurface::None => (),
+                PointerOnSurface::Main { serial } => unsafe { &mut *self.app_event_queue }
+                    .push_back(AppEvent::MainWindowPointerMove {
+                        enter_serial: serial,
+                        surface_x: surface_x.to_f32(),
+                        surface_y: surface_y.to_f32(),
+                    }),
+            }
         }
-        fn leave(&mut self, _pointer: &mut wl::Pointer, serial: u32, surface: &mut wl::Surface) {
-            // do nothing
+        fn leave(&mut self, _pointer: &mut wl::Pointer, _serial: u32, surface: &mut wl::Surface) {
+            match self.pointer_on_surface {
+                PointerOnSurface::None => (),
+                PointerOnSurface::Main { .. } => {
+                    if core::ptr::addr_eq(surface, self.main_surface_handle) {
+                        self.pointer_on_surface = PointerOnSurface::None;
+                    }
+                }
+            };
         }
 
         fn motion(
@@ -1734,7 +1895,15 @@ fn main() {
             surface_x: wl::Fixed,
             surface_y: wl::Fixed,
         ) {
-            // do nothing (surface_x,_y: device independent coordinate)
+            match self.pointer_on_surface {
+                PointerOnSurface::None => (),
+                PointerOnSurface::Main { serial } => unsafe { &mut *self.app_event_queue }
+                    .push_back(AppEvent::MainWindowPointerMove {
+                        enter_serial: serial,
+                        surface_x: surface_x.to_f32(),
+                        surface_y: surface_y.to_f32(),
+                    }),
+            }
         }
 
         fn button(
@@ -1743,9 +1912,28 @@ fn main() {
             serial: u32,
             time: u32,
             button: u32,
-            state: u32,
+            state: wl::PointerButtonState,
         ) {
-            println!("button: {serial} {time} {button} {state}");
+            println!("button: {serial} {time} {button} {}", state as u32);
+
+            match self.pointer_on_surface {
+                PointerOnSurface::None => (),
+                PointerOnSurface::Main { serial } => {
+                    if button == BTN_LEFT && state == wl::PointerButtonState::Pressed {
+                        unsafe { &mut *self.app_event_queue }.push_back(
+                            AppEvent::MainWindowPointerLeftDown {
+                                enter_serial: serial,
+                            },
+                        );
+                    } else if button == BTN_LEFT && state == wl::PointerButtonState::Released {
+                        unsafe { &mut *self.app_event_queue }.push_back(
+                            AppEvent::MainWindowPointerLeftUp {
+                                enter_serial: serial,
+                            },
+                        );
+                    }
+                }
+            }
         }
 
         fn axis(&mut self, _pointer: &mut wl::Pointer, time: u32, axis: u32, value: wl::Fixed) {
@@ -1782,7 +1970,9 @@ fn main() {
         }
     }
     let mut pointer_events = PointerEvents {
-        cursor_shape_device: &mut cursor_shape_device,
+        pointer_on_surface: PointerOnSurface::None,
+        main_surface_handle: &mut *wl_surface as *mut _,
+        app_event_queue: &mut events as *mut _,
     };
     pointer.add_listener(&mut pointer_events).unwrap();
 
@@ -2371,8 +2561,11 @@ fn main() {
         &mut graphics_queue,
         &mut composition_alphamask_surface_atlas,
         surface_events.optimal_buffer_scale,
+        header_size,
         &mut font_set,
+        &mut ht_manager,
     );
+    sprite_list_pane_view.mount(&mut ht_manager, ht_root);
     let sprite_list_window_cr = composite_tree.alloc();
     composite_tree.add_child(0, sprite_list_window_cr);
     {
@@ -2380,12 +2573,13 @@ fn main() {
 
         sprite_list_frame_cr.instance_slot_index = Some(composite_instance_buffer.alloc());
         sprite_list_frame_cr.offset = [
-            8.0 * surface_events.optimal_buffer_scale as f32,
+            SpriteListPaneView::FLOATING_MARGIN * surface_events.optimal_buffer_scale as f32,
             header_size * surface_events.optimal_buffer_scale as f32,
         ];
         sprite_list_frame_cr.size = [
-            320.0 * surface_events.optimal_buffer_scale as f32,
-            -(header_size + 8.0) * surface_events.optimal_buffer_scale as f32,
+            SpriteListPaneView::INIT_WIDTH * surface_events.optimal_buffer_scale as f32,
+            -(header_size + SpriteListPaneView::FLOATING_MARGIN)
+                * surface_events.optimal_buffer_scale as f32,
         ];
         sprite_list_frame_cr.relative_size_adjustment = [0.0, 1.0];
         sprite_list_frame_cr.texatlas_rect = sprite_list_pane_view.frame_image_atlas_rect.clone();
@@ -2436,6 +2630,8 @@ fn main() {
         sprite_list_title_cr.texatlas_rect = sprite_list_pane_view.title_atlas_rect.clone();
         sprite_list_title_cr.composite_mode = CompositeMode::ColorTint([0.1, 0.1, 0.1, 1.0]);
     }
+
+    ht_manager.dump(ht_root);
 
     let n = composite_instance_buffer.memory_stg.native_ptr();
     let ptr = composite_instance_buffer
@@ -2560,17 +2756,15 @@ fn main() {
     let mut last_updating = false;
 
     struct FrameCallback {
-        app_event_sender: std::sync::mpsc::Sender<AppEvent>,
+        app_event_queue: *mut VecDeque<AppEvent>,
     }
     impl wl::CallbackEventListener for FrameCallback {
         fn done(&mut self, _: &mut wl::Callback, _: u32) {
-            self.app_event_sender
-                .send(AppEvent::ToplevelWindowFrameTiming)
-                .unwrap();
+            unsafe { &mut *self.app_event_queue }.push_back(AppEvent::ToplevelWindowFrameTiming);
         }
     }
     let mut frame_callback = FrameCallback {
-        app_event_sender: app_event_sender.clone(),
+        app_event_queue: &mut events as *mut _,
     };
 
     let mut frame = wl_surface.frame().expect("Failed to request next frame");
@@ -2651,9 +2845,10 @@ fn main() {
     let mut frame_resize_request = None;
     let mut last_render_scale = surface_events.optimal_buffer_scale;
     let mut last_render_size = sc_size;
+    let mut last_pointer_pos = (0.0f32, 0.0f32);
     'app: loop {
         dp.dispatch().expect("Failed to dispatch");
-        while let Ok(e) = app_event_receiver.try_recv() {
+        for e in events.drain(..) {
             match e {
                 AppEvent::ToplevelWindowClose => break 'app,
                 AppEvent::ToplevelWindowFrameTiming => {
@@ -2802,6 +2997,7 @@ fn main() {
                         if w != sc_size.width || h != sc_size.height {
                             println!("frame resize: {w} {h}");
 
+                            client_size.set((w as f32, h as f32));
                             sc_size.width = w * surface_events.optimal_buffer_scale;
                             sc_size.height = h * surface_events.optimal_buffer_scale;
 
@@ -2959,6 +3155,86 @@ fn main() {
                     xdg_surface
                         .ack_configure(serial)
                         .expect("Failed to ack configure");
+                }
+                AppEvent::MainWindowPointerMove {
+                    enter_serial,
+                    surface_x,
+                    surface_y,
+                } => {
+                    let (cw, ch) = client_size.get();
+                    pointer_input_manager.handle_mouse_move(
+                        surface_x,
+                        surface_y,
+                        cw,
+                        ch,
+                        &mut ht_manager,
+                        &mut app_state,
+                        ht_root,
+                    );
+                    let shape = pointer_input_manager.cursor_shape(&mut ht_manager, &mut app_state);
+                    cursor_shape_device
+                        .set_shape(
+                            enter_serial,
+                            match shape {
+                                CursorShape::Default => WpCursorShapeDeviceV1Shape::Default,
+                                CursorShape::ResizeHorizontal => {
+                                    WpCursorShapeDeviceV1Shape::EwResize
+                                }
+                            },
+                        )
+                        .unwrap();
+
+                    last_pointer_pos = (surface_x, surface_y);
+                }
+                AppEvent::MainWindowPointerLeftDown { enter_serial } => {
+                    let (cw, ch) = client_size.get();
+                    pointer_input_manager.handle_mouse_left_down(
+                        last_pointer_pos.0,
+                        last_pointer_pos.1,
+                        cw,
+                        ch,
+                        &mut ht_manager,
+                        &mut app_state,
+                        ht_root,
+                    );
+
+                    let shape = pointer_input_manager.cursor_shape(&mut ht_manager, &mut app_state);
+                    cursor_shape_device
+                        .set_shape(
+                            enter_serial,
+                            match shape {
+                                CursorShape::Default => WpCursorShapeDeviceV1Shape::Default,
+                                CursorShape::ResizeHorizontal => {
+                                    WpCursorShapeDeviceV1Shape::EwResize
+                                }
+                            },
+                        )
+                        .unwrap();
+                }
+                AppEvent::MainWindowPointerLeftUp { enter_serial } => {
+                    let (cw, ch) = client_size.get();
+                    pointer_input_manager.handle_mouse_left_up(
+                        last_pointer_pos.0,
+                        last_pointer_pos.1,
+                        cw,
+                        ch,
+                        &mut ht_manager,
+                        &mut app_state,
+                        ht_root,
+                    );
+
+                    let shape = pointer_input_manager.cursor_shape(&mut ht_manager, &mut app_state);
+                    cursor_shape_device
+                        .set_shape(
+                            enter_serial,
+                            match shape {
+                                CursorShape::Default => WpCursorShapeDeviceV1Shape::Default,
+                                CursorShape::ResizeHorizontal => {
+                                    WpCursorShapeDeviceV1Shape::EwResize
+                                }
+                            },
+                        )
+                        .unwrap();
                 }
             }
         }

@@ -9,19 +9,10 @@ mod xdg_shell;
 use ffi::wl_proxy_destroy;
 
 pub use self::cursor_shape::*;
+pub use self::ffi::Fixed;
 pub use self::xdg_shell::*;
 
 const NEWID_ARG: ffi::Argument = ffi::Argument { n: 0 };
-
-/// Fixed-point number
-#[repr(transparent)]
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct Fixed(i32);
-impl Fixed {
-    pub const fn to_f32(&self) -> f32 {
-        self.0 as f32 / 256.0
-    }
-}
 
 #[repr(transparent)]
 pub struct OwnedProxy(NonNull<ffi::Proxy>);
@@ -658,7 +649,7 @@ impl Pointer {
             serial: u32,
             time: u32,
             button: u32,
-            state: u32,
+            state: PointerButtonState,
         ) {
             unsafe { &mut *(data as *mut L) }.button(
                 unsafe { core::mem::transmute(&mut *pointer) },
@@ -764,7 +755,14 @@ impl Pointer {
             ),
             leave: extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy, u32, *mut ffi::Proxy),
             motion: extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy, u32, Fixed, Fixed),
-            button: extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy, u32, u32, u32, u32),
+            button: extern "C" fn(
+                *mut core::ffi::c_void,
+                *mut ffi::Proxy,
+                u32,
+                u32,
+                u32,
+                PointerButtonState,
+            ),
             axis: extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy, u32, u32, Fixed),
             frame: extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy),
             axis_source: extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy, u32),
@@ -805,7 +803,14 @@ pub trait PointerEventListener {
     );
     fn leave(&mut self, pointer: &mut Pointer, serial: u32, surface: &mut Surface);
     fn motion(&mut self, pointer: &mut Pointer, time: u32, surface_x: Fixed, surface_y: Fixed);
-    fn button(&mut self, pointer: &mut Pointer, serial: u32, time: u32, button: u32, state: u32);
+    fn button(
+        &mut self,
+        pointer: &mut Pointer,
+        serial: u32,
+        time: u32,
+        button: u32,
+        state: PointerButtonState,
+    );
     fn axis(&mut self, pointer: &mut Pointer, time: u32, axis: u32, value: Fixed);
     // v5
     fn frame(&mut self, pointer: &mut Pointer);
@@ -816,6 +821,13 @@ pub trait PointerEventListener {
     fn axis_value120(&mut self, pointer: &mut Pointer, axis: u32, value120: i32);
     // v9
     fn axis_relative_direction(&mut self, pointer: &mut Pointer, axis: u32, direction: u32);
+}
+
+#[repr(u32)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PointerButtonState {
+    Released = 0,
+    Pressed = 1,
 }
 
 #[repr(transparent)]

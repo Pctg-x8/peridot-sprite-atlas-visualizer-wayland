@@ -14,3 +14,4 @@ freetype2 = { git = "https://github.com/Pctg-x8/ft2-rs" }
 fontconfig = { git = "https://github.com/Pctg-x8/fc-rs", features = [
     "with-freetype",
 ] }
+bitflags = "2.9.0"

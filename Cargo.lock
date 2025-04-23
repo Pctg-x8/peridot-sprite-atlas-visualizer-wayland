@@ -105,6 +105,7 @@ name = "peridot-sprite-atlas-visualizer-wayland"
 version = "0.1.0"
 dependencies = [
  "bedrock",
+ "bitflags",
  "fontconfig",
  "freetype2",
 ]

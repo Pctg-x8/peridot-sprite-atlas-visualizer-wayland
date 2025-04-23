@@ -3,13 +3,25 @@ use core::{
     ptr::NonNull,
 };
 
+mod cursor_shape;
 mod ffi;
 mod xdg_shell;
 use ffi::wl_proxy_destroy;
 
+pub use self::cursor_shape::*;
 pub use self::xdg_shell::*;
 
 const NEWID_ARG: ffi::Argument = ffi::Argument { n: 0 };
+
+/// Fixed-point number
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct Fixed(i32);
+impl Fixed {
+    pub const fn to_f32(&self) -> f32 {
+        self.0 as f32 / 256.0
+    }
+}
 
 #[repr(transparent)]
 pub struct OwnedProxy(NonNull<ffi::Proxy>);
@@ -500,6 +512,313 @@ pub trait SurfaceEventListener {
 }
 
 #[repr(transparent)]
+pub struct Seat(Proxy);
+unsafe impl Interface for Seat {
+    fn def() -> &'static ffi::Interface {
+        unsafe { &wl_seat_interface }
+    }
+
+    unsafe fn destruct(&mut self) {
+        if self.0.version() < 5 {
+            // no destruction method implemented
+            return;
+        }
+
+        if let Err(e) = unsafe { self.destroy() } {
+            let de = unsafe {
+                ffi::wl_display_get_error(ffi::wl_proxy_get_display(&mut self.0 as *mut _ as _))
+            };
+
+            panic!("Failed to call destroy: {de} {e:?}");
+        }
+    }
+}
+impl Seat {
+    #[inline]
+    pub fn get_pointer(&mut self) -> Result<Owned<Pointer>, std::io::Error> {
+        let proxy_ptr =
+            self.0
+                .marshal_array_flags(0, Pointer::def(), self.0.version(), 0, &mut [NEWID_ARG])?;
+
+        Ok(unsafe { Owned::from_untyped_unchecked(proxy_ptr) })
+    }
+
+    // v5
+    #[inline]
+    pub unsafe fn destroy(&mut self) -> Result<(), std::io::Error> {
+        self.0.marshal_array_flags_void(3, 0, &mut [])
+    }
+
+    pub fn add_listener<'l, L: SeatEventListener + 'l>(
+        &'l mut self,
+        listener: &'l mut L,
+    ) -> Result<(), ()> {
+        extern "C" fn capabilities<L: SeatEventListener>(
+            data: *mut core::ffi::c_void,
+            seat: *mut ffi::Proxy,
+            capabilities: u32,
+        ) {
+            let listener = unsafe { &mut *(data as *mut L) };
+
+            listener.capabilities(unsafe { core::mem::transmute(&mut *seat) }, capabilities)
+        }
+        extern "C" fn name<L: SeatEventListener>(
+            data: *mut core::ffi::c_void,
+            seat: *mut ffi::Proxy,
+            name: *const core::ffi::c_char,
+        ) {
+            let listener = unsafe { &mut *(data as *mut L) };
+
+            listener.name(unsafe { core::mem::transmute(&mut *seat) }, unsafe {
+                core::ffi::CStr::from_ptr(name)
+            })
+        }
+        #[repr(C)]
+        struct FunctionPointer {
+            capabilities: extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy, u32),
+            name: extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy, *const core::ffi::c_char),
+        }
+        let fp: &'static FunctionPointer = &FunctionPointer {
+            capabilities: capabilities::<L>,
+            name: name::<L>,
+        };
+
+        unsafe {
+            self.0
+                .add_listener(fp as *const _ as _, listener as *mut _ as _)
+        }
+    }
+}
+
+pub trait SeatEventListener {
+    fn capabilities(&mut self, seat: &mut Seat, capabilities: u32);
+    // v2
+    fn name(&mut self, seat: &mut Seat, name: &core::ffi::CStr);
+}
+
+#[repr(transparent)]
+pub struct Pointer(Proxy);
+unsafe impl Interface for Pointer {
+    fn def() -> &'static ffi::Interface {
+        unsafe { &wl_pointer_interface }
+    }
+}
+impl Pointer {
+    pub fn add_listener<'l, L: PointerEventListener + 'l>(
+        &'l mut self,
+        listener: &'l mut L,
+    ) -> Result<(), ()> {
+        extern "C" fn enter<L: PointerEventListener>(
+            data: *mut core::ffi::c_void,
+            pointer: *mut ffi::Proxy,
+            serial: u32,
+            surface: *mut ffi::Proxy,
+            surface_x: Fixed,
+            surface_y: Fixed,
+        ) {
+            let listener = unsafe { &mut *(data as *mut L) };
+
+            listener.enter(
+                unsafe { core::mem::transmute(&mut *pointer) },
+                serial,
+                unsafe { core::mem::transmute(&mut *surface) },
+                surface_x,
+                surface_y,
+            )
+        }
+        extern "C" fn leave<L: PointerEventListener>(
+            data: *mut core::ffi::c_void,
+            pointer: *mut ffi::Proxy,
+            serial: u32,
+            surface: *mut ffi::Proxy,
+        ) {
+            unsafe { &mut *(data as *mut L) }.leave(
+                unsafe { core::mem::transmute(&mut *pointer) },
+                serial,
+                unsafe { core::mem::transmute(&mut *surface) },
+            )
+        }
+        extern "C" fn motion<L: PointerEventListener>(
+            data: *mut core::ffi::c_void,
+            pointer: *mut ffi::Proxy,
+            time: u32,
+            surface_x: Fixed,
+            surface_y: Fixed,
+        ) {
+            unsafe { &mut *(data as *mut L) }.motion(
+                unsafe { core::mem::transmute(&mut *pointer) },
+                time,
+                surface_x,
+                surface_y,
+            )
+        }
+        extern "C" fn button<L: PointerEventListener>(
+            data: *mut core::ffi::c_void,
+            pointer: *mut ffi::Proxy,
+            serial: u32,
+            time: u32,
+            button: u32,
+            state: u32,
+        ) {
+            unsafe { &mut *(data as *mut L) }.button(
+                unsafe { core::mem::transmute(&mut *pointer) },
+                serial,
+                time,
+                button,
+                state,
+            )
+        }
+        extern "C" fn axis<L: PointerEventListener>(
+            data: *mut core::ffi::c_void,
+            pointer: *mut ffi::Proxy,
+            time: u32,
+            axis: u32,
+            value: Fixed,
+        ) {
+            unsafe { &mut *(data as *mut L) }.axis(
+                unsafe { core::mem::transmute(&mut *pointer) },
+                time,
+                axis,
+                value,
+            )
+        }
+        extern "C" fn frame<L: PointerEventListener>(
+            data: *mut core::ffi::c_void,
+            pointer: *mut ffi::Proxy,
+        ) {
+            unsafe { &mut *(data as *mut L) }.frame(unsafe { core::mem::transmute(&mut *pointer) })
+        }
+        extern "C" fn axis_source<L: PointerEventListener>(
+            data: *mut core::ffi::c_void,
+            pointer: *mut ffi::Proxy,
+            axis_source: u32,
+        ) {
+            L::axis_source(
+                unsafe { core::mem::transmute(&mut *data) },
+                unsafe { core::mem::transmute(&mut *pointer) },
+                axis_source,
+            )
+        }
+        extern "C" fn axis_stop<L: PointerEventListener>(
+            data: *mut core::ffi::c_void,
+            pointer: *mut ffi::Proxy,
+            time: u32,
+            axis: u32,
+        ) {
+            L::axis_stop(
+                unsafe { core::mem::transmute(&mut *data) },
+                unsafe { core::mem::transmute(&mut *pointer) },
+                time,
+                axis,
+            )
+        }
+        extern "C" fn axis_discrete<L: PointerEventListener>(
+            data: *mut core::ffi::c_void,
+            pointer: *mut ffi::Proxy,
+            axis: u32,
+            discrete: i32,
+        ) {
+            L::axis_discrete(
+                unsafe { core::mem::transmute(&mut *data) },
+                unsafe { core::mem::transmute(&mut *pointer) },
+                axis,
+                discrete,
+            )
+        }
+        extern "C" fn axis_value120<L: PointerEventListener>(
+            data: *mut core::ffi::c_void,
+            pointer: *mut ffi::Proxy,
+            axis: u32,
+            value120: i32,
+        ) {
+            L::axis_value120(
+                unsafe { core::mem::transmute(&mut *data) },
+                unsafe { core::mem::transmute(&mut *pointer) },
+                axis,
+                value120,
+            )
+        }
+        extern "C" fn axis_relative_direction<L: PointerEventListener>(
+            data: *mut core::ffi::c_void,
+            pointer: *mut ffi::Proxy,
+            axis: u32,
+            direction: u32,
+        ) {
+            L::axis_relative_direction(
+                unsafe { core::mem::transmute(&mut *data) },
+                unsafe { core::mem::transmute(&mut *pointer) },
+                axis,
+                direction,
+            )
+        }
+
+        #[repr(C)]
+        struct FunctionPointers {
+            enter: extern "C" fn(
+                *mut core::ffi::c_void,
+                *mut ffi::Proxy,
+                u32,
+                *mut ffi::Proxy,
+                Fixed,
+                Fixed,
+            ),
+            leave: extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy, u32, *mut ffi::Proxy),
+            motion: extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy, u32, Fixed, Fixed),
+            button: extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy, u32, u32, u32, u32),
+            axis: extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy, u32, u32, Fixed),
+            frame: extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy),
+            axis_source: extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy, u32),
+            axis_stop: extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy, u32, u32),
+            axis_discrete: extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy, u32, i32),
+            axis_value120: extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy, u32, i32),
+            axis_relative_direction:
+                extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy, u32, u32),
+        }
+        let fp: &'static FunctionPointers = &FunctionPointers {
+            enter: enter::<L>,
+            leave: leave::<L>,
+            motion: motion::<L>,
+            button: button::<L>,
+            axis: axis::<L>,
+            frame: frame::<L>,
+            axis_source: axis_source::<L>,
+            axis_stop: axis_stop::<L>,
+            axis_discrete: axis_discrete::<L>,
+            axis_value120: axis_value120::<L>,
+            axis_relative_direction: axis_relative_direction::<L>,
+        };
+        unsafe {
+            self.0
+                .add_listener(fp as *const _ as _, listener as *mut _ as _)
+        }
+    }
+}
+
+pub trait PointerEventListener {
+    fn enter(
+        &mut self,
+        pointer: &mut Pointer,
+        serial: u32,
+        surface: &mut Surface,
+        surface_x: Fixed,
+        surface_y: Fixed,
+    );
+    fn leave(&mut self, pointer: &mut Pointer, serial: u32, surface: &mut Surface);
+    fn motion(&mut self, pointer: &mut Pointer, time: u32, surface_x: Fixed, surface_y: Fixed);
+    fn button(&mut self, pointer: &mut Pointer, serial: u32, time: u32, button: u32, state: u32);
+    fn axis(&mut self, pointer: &mut Pointer, time: u32, axis: u32, value: Fixed);
+    // v5
+    fn frame(&mut self, pointer: &mut Pointer);
+    fn axis_source(&mut self, pointer: &mut Pointer, axis_source: u32);
+    fn axis_stop(&mut self, pointer: &mut Pointer, time: u32, axis: u32);
+    fn axis_discrete(&mut self, pointer: &mut Pointer, axis: u32, discrete: i32);
+    // v8
+    fn axis_value120(&mut self, pointer: &mut Pointer, axis: u32, value120: i32);
+    // v9
+    fn axis_relative_direction(&mut self, pointer: &mut Pointer, axis: u32, direction: u32);
+}
+
+#[repr(transparent)]
 pub struct Output(Proxy);
 unsafe impl Interface for Output {
     fn def() -> &'static ffi::Interface {
@@ -524,6 +843,7 @@ unsafe extern "C" {
     static wl_seat_interface: ffi::Interface;
     static wl_output_interface: ffi::Interface;
     static wl_callback_interface: ffi::Interface;
+    static wl_pointer_interface: ffi::Interface;
 }
 
 const fn message(

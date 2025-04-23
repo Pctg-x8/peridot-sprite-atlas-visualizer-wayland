@@ -16,6 +16,7 @@ use freetype2::{
     FT_Bitmap, FT_Bool, FT_GlyphSlotRec, FT_LOAD_DEFAULT, FT_RENDER_MODE_LIGHT,
     FT_RENDER_MODE_NORMAL,
 };
+use wl::{WpCursorShapeDeviceV1, WpCursorShapeDeviceV1Shape, WpCursorShapeManagerV1};
 
 pub enum AppEvent {
     ToplevelWindowConfigure { width: u32, height: u32 },
@@ -1505,6 +1506,8 @@ fn main() {
     struct RegistryListener {
         compositor: Option<wl::Owned<wl::Compositor>>,
         xdg_wm_base: Option<wl::Owned<wl::XdgWmBase>>,
+        seat: Option<wl::Owned<wl::Seat>>,
+        cursor_shape_manager: Option<wl::Owned<WpCursorShapeManagerV1>>,
     }
     impl wl::RegistryListener for RegistryListener {
         fn global(
@@ -1531,6 +1534,22 @@ fn main() {
                         .expect("Failed to bind xdg wm base interface"),
                 );
             }
+
+            if interface == c"wl_seat" {
+                self.seat = Some(
+                    registry
+                        .bind(name, version)
+                        .expect("Failed to bind seat interface"),
+                );
+            }
+
+            if interface == c"wp_cursor_shape_manager_v1" {
+                self.cursor_shape_manager = Some(
+                    registry
+                        .bind(name, version)
+                        .expect("Failed to bind wp_cursor_shape_manager_v1 interface"),
+                );
+            }
         }
 
         fn global_remove(&mut self, _registry: &mut wl::Registry, name: u32) {
@@ -1540,6 +1559,8 @@ fn main() {
     let mut rl = RegistryListener {
         compositor: None,
         xdg_wm_base: None,
+        seat: None,
+        cursor_shape_manager: None,
     };
     registry
         .add_listener(&mut rl)
@@ -1548,6 +1569,31 @@ fn main() {
 
     let mut compositor = rl.compositor.expect("no wl_compositor");
     let mut xdg_wm_base = rl.xdg_wm_base.expect("no xdg_wm_base");
+    let mut seat = rl.seat.expect("no seat?");
+    let mut cursor_shape_manager = rl
+        .cursor_shape_manager
+        .expect("no wp_cursor_shape_manager_v1");
+
+    struct SeatListener {
+        pointer: Option<wl::Owned<wl::Pointer>>,
+    }
+    impl wl::SeatEventListener for SeatListener {
+        fn capabilities(&mut self, seat: &mut wl::Seat, capabilities: u32) {
+            println!("seat cb: 0x{capabilities:04x}");
+
+            if (capabilities & 0x01) != 0 {
+                // pointer
+                self.pointer = Some(seat.get_pointer().expect("Failed to get pointer"));
+            }
+        }
+
+        fn name(&mut self, _seat: &mut wl::Seat, name: &core::ffi::CStr) {
+            println!("seat name: {name:?}");
+        }
+    }
+    let mut seat_listener = SeatListener { pointer: None };
+    seat.add_listener(&mut seat_listener).unwrap();
+
     let mut wl_surface = compositor
         .create_surface()
         .expect("Failed to create wl_surface");
@@ -1656,6 +1702,89 @@ fn main() {
 
     wl_surface.commit().expect("Failed to commit surface");
     dp.roundtrip().expect("Failed to sync");
+
+    let mut pointer = seat_listener.pointer.expect("no pointer from seat");
+    let mut cursor_shape_device = cursor_shape_manager
+        .get_pointer(&mut pointer)
+        .expect("Failed to get cursor shape device");
+    struct PointerEvents<'x> {
+        cursor_shape_device: &'x mut WpCursorShapeDeviceV1,
+    }
+    impl wl::PointerEventListener for PointerEvents<'_> {
+        fn enter(
+            &mut self,
+            _pointer: &mut wl::Pointer,
+            serial: u32,
+            surface: &mut wl::Surface,
+            surface_x: wl::Fixed,
+            surface_y: wl::Fixed,
+        ) {
+            self.cursor_shape_device
+                .set_shape(serial, WpCursorShapeDeviceV1Shape::Default)
+                .expect("Failed to set cursor shape");
+        }
+        fn leave(&mut self, _pointer: &mut wl::Pointer, serial: u32, surface: &mut wl::Surface) {
+            // do nothing
+        }
+
+        fn motion(
+            &mut self,
+            _pointer: &mut wl::Pointer,
+            _time: u32,
+            surface_x: wl::Fixed,
+            surface_y: wl::Fixed,
+        ) {
+            // do nothing (surface_x,_y: device independent coordinate)
+        }
+
+        fn button(
+            &mut self,
+            _pointer: &mut wl::Pointer,
+            serial: u32,
+            time: u32,
+            button: u32,
+            state: u32,
+        ) {
+            println!("button: {serial} {time} {button} {state}");
+        }
+
+        fn axis(&mut self, _pointer: &mut wl::Pointer, time: u32, axis: u32, value: wl::Fixed) {
+            println!("axis: {time} {axis} {}", value.to_f32());
+        }
+
+        fn frame(&mut self, _pointer: &mut wl::Pointer) {
+            // do nothing
+        }
+
+        fn axis_source(&mut self, _pointer: &mut wl::Pointer, axis_source: u32) {
+            println!("axis source: {axis_source}");
+        }
+
+        fn axis_stop(&mut self, _pointer: &mut wl::Pointer, _time: u32, axis: u32) {
+            println!("axis stop: {axis}");
+        }
+
+        fn axis_discrete(&mut self, _pointer: &mut wl::Pointer, axis: u32, discrete: i32) {
+            println!("axis discrete: {axis} {discrete}");
+        }
+
+        fn axis_value120(&mut self, _pointer: &mut wl::Pointer, axis: u32, value120: i32) {
+            println!("axis value120: {axis} {value120}");
+        }
+
+        fn axis_relative_direction(
+            &mut self,
+            _pointer: &mut wl::Pointer,
+            axis: u32,
+            direction: u32,
+        ) {
+            println!("axis relative direction: {axis} {direction}");
+        }
+    }
+    let mut pointer_events = PointerEvents {
+        cursor_shape_device: &mut cursor_shape_device,
+    };
+    pointer.add_listener(&mut pointer_events).unwrap();
 
     for x in br::instance_extension_properties(None).unwrap() {
         println!(

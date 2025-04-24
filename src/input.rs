@@ -82,6 +82,9 @@ impl PointerInputManager {
                     p = ht.parent_of(ht_ref);
                 }
 
+                // leaveイベントを発行したときはclick状態もなかったことにする
+                self.click_base_client_pointer_pos = None;
+
                 if let Some(ht_ref) = new_hit {
                     let mut p = Some(ht_ref);
                     while let Some(ht_ref) = p {

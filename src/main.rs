@@ -14,23 +14,19 @@ use std::{
     rc::Rc,
 };
 
-use ::fontconfig::{FC_FAMILY, FcMatchPattern};
 use bedrock::{
     self as br, CommandBufferMut, CommandPoolMut, DescriptorPoolMut, Device, DeviceMemoryMut,
-    Fence, FenceMut, Image, ImageChild, ImageSubresourceSlice, Instance, MemoryBound,
-    PhysicalDevice, QueueMut, RenderPass, Swapchain, VkHandle, VkHandleMut, VulkanStructure,
+    Fence, FenceMut, Image, ImageChild, Instance, MemoryBound, PhysicalDevice, QueueMut,
+    RenderPass, ShaderModule, Swapchain, VkHandle, VkHandleMut, VulkanStructure,
 };
 use freetype::FreeType;
-use freetype2::{
-    FT_Bitmap, FT_Bool, FT_GlyphSlotRec, FT_LOAD_DEFAULT, FT_RENDER_MODE_LIGHT,
-    FT_RENDER_MODE_NORMAL,
-};
+use freetype2::{FT_GlyphSlotRec, FT_LOAD_DEFAULT, FT_RENDER_MODE_NORMAL};
 use hittest::{
     CursorShape, HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef,
 };
 use input::{EventContinueControl, PointerInputManager};
 use linux_input_event_codes::BTN_LEFT;
-use wl::{WpCursorShapeDeviceV1, WpCursorShapeDeviceV1Shape, WpCursorShapeManagerV1};
+use wl::{WpCursorShapeDeviceV1Shape, WpCursorShapeManagerV1};
 
 pub enum AppEvent {
     ToplevelWindowConfigure {
@@ -356,6 +352,561 @@ impl<'d> AtlasView<'d> {
     }
 }
 
+pub struct SpriteListToggleButtonView {
+    icon_atlas_rect: AtlasRect,
+    circle_atlas_rect: AtlasRect,
+    ct_root: usize,
+    ct_icon: usize,
+    ht_root: HitTestTreeRef,
+    ui_scale_factor: Cell<f32>,
+    hovering: Cell<bool>,
+    pressing: Cell<bool>,
+}
+impl SpriteListToggleButtonView {
+    const SIZE: f32 = 20.0;
+    const ICON_SIZE: f32 = 7.0;
+    const ICON_THICKNESS: f32 = 1.5;
+
+    pub fn new(
+        device: &br::DeviceObject<&br::InstanceObject>,
+        adapter_memory_info: &br::MemoryProperties,
+        graphics_queue_family_index: u32,
+        graphics_queue: &mut impl br::QueueMut,
+        atlas: &mut CompositionSurfaceAtlas,
+        bitmap_scale: f32,
+        composite_tree: &mut CompositeTree,
+        composite_instance_manager: &mut CompositeInstanceManager,
+        ht: &mut HitTestTreeManager<AppUpdateContext>,
+    ) -> Self {
+        let icon_size_px = (Self::ICON_SIZE * bitmap_scale) as u32;
+        let icon_atlas_rect = atlas.alloc(icon_size_px, icon_size_px);
+        let circle_atlas_rect = atlas.alloc(
+            (Self::SIZE * bitmap_scale) as _,
+            (Self::SIZE * bitmap_scale) as _,
+        );
+
+        let top_left: (f32, f32) = (0.4 - (0.5 * Self::ICON_THICKNESS / Self::ICON_SIZE), 0.0);
+        let top_right: (f32, f32) = (0.4 + (0.5 * Self::ICON_THICKNESS / Self::ICON_SIZE), 0.0);
+        let middle_left: (f32, f32) = (0.0, 0.5);
+        let middle_right: (f32, f32) = (Self::ICON_THICKNESS / Self::ICON_SIZE, 0.5);
+        let bottom_left: (f32, f32) = (0.4 - (0.5 * Self::ICON_THICKNESS / Self::ICON_SIZE), 1.0);
+        let bottom_right: (f32, f32) = (0.4 + (0.5 * Self::ICON_THICKNESS / Self::ICON_SIZE), 1.0);
+        let vertices = [
+            [top_left.0 * 2.0 - 1.0, top_left.1 * 2.0 - 1.0],
+            [top_right.0 * 2.0 - 1.0, top_right.1 * 2.0 - 1.0],
+            [middle_left.0 * 2.0 - 1.0, middle_left.1 * 2.0 - 1.0],
+            [middle_right.0 * 2.0 - 1.0, middle_right.1 * 2.0 - 1.0],
+            [bottom_left.0 * 2.0 - 1.0, bottom_left.1 * 2.0 - 1.0],
+            [bottom_right.0 * 2.0 - 1.0, bottom_right.1 * 2.0 - 1.0],
+            [(top_left.0 + 0.6) * 2.0 - 1.0, top_left.1 * 2.0 - 1.0],
+            [(top_right.0 + 0.6) * 2.0 - 1.0, top_right.1 * 2.0 - 1.0],
+            [(middle_left.0 + 0.6) * 2.0 - 1.0, middle_left.1 * 2.0 - 1.0],
+            [
+                (middle_right.0 + 0.6) * 2.0 - 1.0,
+                middle_right.1 * 2.0 - 1.0,
+            ],
+            [(bottom_left.0 + 0.6) * 2.0 - 1.0, bottom_left.1 * 2.0 - 1.0],
+            [
+                (bottom_right.0 + 0.6) * 2.0 - 1.0,
+                bottom_right.1 * 2.0 - 1.0,
+            ],
+        ];
+        let indices = [
+            0u16, 1, 2, 2, 1, 3, 2, 3, 4, 4, 3, 5, 6, 7, 8, 8, 7, 9, 8, 9, 10, 10, 9, 11,
+        ];
+        let bufsize = vertices.len() * core::mem::size_of::<[f32; 2]>()
+            + indices.len() * core::mem::size_of::<u16>();
+        let mut buf = br::BufferObject::new(
+            device,
+            &br::BufferCreateInfo::new(
+                bufsize,
+                br::BufferUsage::VERTEX_BUFFER | br::BufferUsage::INDEX_BUFFER,
+            ),
+        )
+        .unwrap();
+        let mreq = buf.requirements();
+        let memindex = adapter_memory_info
+            .types()
+            .iter()
+            .enumerate()
+            .find(|(n, t)| {
+                (mreq.memoryTypeBits & (1 << n)) != 0
+                    && t.property_flags()
+                        .has(br::MemoryPropertyFlags::DEVICE_LOCAL)
+                    && t.property_flags()
+                        .has(br::MemoryPropertyFlags::HOST_VISIBLE)
+            })
+            .expect("no suitable memory")
+            .0 as u32;
+        let mut mem =
+            br::DeviceMemoryObject::new(device, &br::MemoryAllocateInfo::new(mreq.size, memindex))
+                .unwrap();
+        buf.bind(&mem, 0).unwrap();
+        let n = mem.native_ptr();
+        let ptr = mem.map(0..bufsize).unwrap();
+        unsafe {
+            core::ptr::copy_nonoverlapping(vertices.as_ptr(), ptr.addr_of_mut(0), vertices.len());
+            core::ptr::copy_nonoverlapping(
+                indices.as_ptr(),
+                ptr.addr_of_mut(vertices.len() * core::mem::size_of::<[f32; 2]>()),
+                indices.len(),
+            );
+        }
+        if !adapter_memory_info.is_coherent(memindex) {
+            unsafe {
+                device
+                    .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(
+                        n,
+                        0,
+                        bufsize as _,
+                    )])
+                    .unwrap();
+            }
+        }
+        ptr.end();
+
+        let mut msaa_buffer = br::ImageObject::new(
+            device,
+            &br::ImageCreateInfo::new(icon_atlas_rect.extent(), br::vk::VK_FORMAT_R8_UNORM)
+                .as_color_attachment()
+                .usage_with(br::ImageUsageFlags::TRANSFER_SRC)
+                .sample_counts(4),
+        )
+        .unwrap();
+        let mreq = msaa_buffer.requirements();
+        let memindex = adapter_memory_info
+            .find_device_local_index(mreq.memoryTypeBits)
+            .expect("no suitable memory for msaa buffer");
+        let msaa_mem =
+            br::DeviceMemoryObject::new(device, &br::MemoryAllocateInfo::new(mreq.size, memindex))
+                .unwrap();
+        msaa_buffer.bind(&msaa_mem, 0).unwrap();
+        let msaa_buffer = br::ImageViewBuilder::new(
+            msaa_buffer,
+            br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+        )
+        .create()
+        .unwrap();
+
+        let rp = br::RenderPassObject::new(
+            device,
+            &br::RenderPassCreateInfo2::new(
+                &[br::AttachmentDescription2::new(br::vk::VK_FORMAT_R8_UNORM)
+                    .color_memory_op(br::LoadOp::Clear, br::StoreOp::Store)
+                    .layout_transition(br::ImageLayout::Undefined, br::ImageLayout::TransferSrcOpt)
+                    .samples(4)],
+                &[
+                    br::SubpassDescription2::new().colors(&[br::AttachmentReference2::color(
+                        0,
+                        br::ImageLayout::ColorAttachmentOpt,
+                    )]),
+                ],
+                &[br::SubpassDependency2::new(
+                    br::SubpassIndex::Internal(0),
+                    br::SubpassIndex::External,
+                )
+                .of_memory(
+                    br::AccessFlags::COLOR_ATTACHMENT.write,
+                    br::AccessFlags::TRANSFER.read,
+                )
+                .of_execution(
+                    br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    br::PipelineStageFlags::TRANSFER,
+                )],
+            ),
+        )
+        .unwrap();
+        let fb = br::FramebufferObject::new(
+            device,
+            &br::FramebufferCreateInfo::new(
+                &rp,
+                &[msaa_buffer.as_transparent_ref()],
+                icon_atlas_rect.width(),
+                icon_atlas_rect.height(),
+            ),
+        )
+        .unwrap();
+        let rp_direct = br::RenderPassObject::new(
+            device,
+            &br::RenderPassCreateInfo2::new(
+                &[br::AttachmentDescription2::new(br::vk::VK_FORMAT_R8_UNORM)
+                    .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store)
+                    .layout_transition(
+                        br::ImageLayout::Undefined,
+                        br::ImageLayout::ShaderReadOnlyOpt,
+                    )],
+                &[
+                    br::SubpassDescription2::new().colors(&[br::AttachmentReference2::color(
+                        0,
+                        br::ImageLayout::ColorAttachmentOpt,
+                    )]),
+                ],
+                &[br::SubpassDependency2::new(
+                    br::SubpassIndex::Internal(0),
+                    br::SubpassIndex::External,
+                )
+                .of_memory(
+                    br::AccessFlags::COLOR_ATTACHMENT.write,
+                    br::AccessFlags::SHADER.read,
+                )
+                .of_execution(
+                    br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    br::PipelineStageFlags::FRAGMENT_SHADER,
+                )],
+            ),
+        )
+        .unwrap();
+        let fb_direct = br::FramebufferObject::new(
+            device,
+            &br::FramebufferCreateInfo::new(
+                &rp_direct,
+                &[atlas.resource.as_transparent_ref()],
+                atlas.size,
+                atlas.size,
+            ),
+        )
+        .unwrap();
+
+        let vsh = br::ShaderModuleObject::new(
+            device,
+            &br::ShaderModuleCreateInfo::new(&load_spv_file("resources/notrans.vert").unwrap()),
+        )
+        .unwrap();
+        let fsh = br::ShaderModuleObject::new(
+            device,
+            &br::ShaderModuleCreateInfo::new(&load_spv_file("resources/fillcolor_r.frag").unwrap()),
+        )
+        .unwrap();
+        let vsh_circle = br::ShaderModuleObject::new(
+            device,
+            &br::ShaderModuleCreateInfo::new(&load_spv_file("resources/filltri.vert").unwrap()),
+        )
+        .unwrap();
+        let fsh_circle = br::ShaderModuleObject::new(
+            device,
+            &br::ShaderModuleCreateInfo::new(&load_spv_file("resources/aa_circle.frag").unwrap()),
+        )
+        .unwrap();
+        let pl =
+            br::PipelineLayoutObject::new(device, &br::PipelineLayoutCreateInfo::new(&[], &[]))
+                .unwrap();
+        #[derive(br::SpecializationConstants)]
+        struct FragmentShaderParams {
+            #[constant_id = 0]
+            pub r: f32,
+        }
+        #[derive(br::SpecializationConstants)]
+        struct CircleFragmentShaderParams {
+            #[constant_id = 0]
+            pub softness: f32,
+        }
+        let [pipeline, pipeline_circle] = device
+            .new_graphics_pipeline_array(
+                &[
+                    br::GraphicsPipelineCreateInfo::new(
+                        &pl,
+                        rp.subpass(0),
+                        &[
+                            vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+                            fsh.on_stage(br::ShaderStage::Fragment, c"main")
+                                .with_specialization_info(&br::SpecializationInfo::new(
+                                    &FragmentShaderParams { r: 1.0 },
+                                )),
+                        ],
+                        &br::PipelineVertexInputStateCreateInfo::new(
+                            &[br::VertexInputBindingDescription::per_vertex_typed::<
+                                [f32; 2],
+                            >(0)],
+                            &[br::VertexInputAttributeDescription {
+                                location: 0,
+                                binding: 0,
+                                format: br::vk::VK_FORMAT_R32G32_SFLOAT,
+                                offset: 0,
+                            }],
+                        ),
+                        &IA_STATE_TRILIST,
+                        &br::PipelineViewportStateCreateInfo::new(
+                            &[icon_atlas_rect
+                                .extent()
+                                .into_rect(br::Offset2D::ZERO)
+                                .make_viewport(0.0..1.0)],
+                            &[icon_atlas_rect.extent().into_rect(br::Offset2D::ZERO)],
+                        ),
+                        &RASTER_STATE_DEFAULT_FILL_NOCULL,
+                        &BLEND_STATE_SINGLE_NONE,
+                    )
+                    .multisample_state(
+                        &br::PipelineMultisampleStateCreateInfo::new().rasterization_samples(4),
+                    ),
+                    br::GraphicsPipelineCreateInfo::new(
+                        &pl,
+                        rp_direct.subpass(0),
+                        &[
+                            vsh_circle.on_stage(br::ShaderStage::Vertex, c"main"),
+                            fsh_circle
+                                .on_stage(br::ShaderStage::Fragment, c"main")
+                                .with_specialization_info(&br::SpecializationInfo::new(
+                                    &CircleFragmentShaderParams { softness: 0.0 },
+                                )),
+                        ],
+                        &VI_STATE_EMPTY,
+                        &IA_STATE_TRILIST,
+                        &br::PipelineViewportStateCreateInfo::new(
+                            &[circle_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
+                            &[circle_atlas_rect.vk_rect()],
+                        ),
+                        &RASTER_STATE_DEFAULT_FILL_NOCULL,
+                        &BLEND_STATE_SINGLE_NONE,
+                    )
+                    .multisample_state(&MS_STATE_EMPTY),
+                ],
+                None::<&br::PipelineCacheObject<&br::DeviceObject<&br::InstanceObject>>>,
+            )
+            .unwrap();
+
+        let mut cp = br::CommandPoolObject::new(
+            device,
+            &br::CommandPoolCreateInfo::new(graphics_queue_family_index).transient(),
+        )
+        .unwrap();
+        let [mut cb] = br::CommandBufferObject::alloc_array(
+            device,
+            &br::CommandBufferFixedCountAllocateInfo::new(&mut cp, br::CommandBufferLevel::Primary),
+        )
+        .unwrap();
+        unsafe {
+            cb.begin(&br::CommandBufferBeginInfo::new().onetime_submit(), device)
+                .unwrap()
+        }
+        .begin_render_pass2(
+            &br::RenderPassBeginInfo::new(
+                &rp,
+                &fb,
+                icon_atlas_rect.extent().into_rect(br::Offset2D::ZERO),
+                &[br::ClearValue::color_f32([0.0; 4])],
+            ),
+            &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+        )
+        .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline)
+        .bind_vertex_buffer_array(0, &[buf.as_transparent_ref()], &[0])
+        .bind_index_buffer(
+            &buf,
+            vertices.len() * core::mem::size_of::<[f32; 2]>(),
+            br::IndexType::U16,
+        )
+        .draw_indexed(indices.len() as _, 1, 0, 0, 0)
+        .end_render_pass2(&br::SubpassEndInfo::new())
+        .begin_render_pass2(
+            &br::RenderPassBeginInfo::new(
+                &rp_direct,
+                &fb_direct,
+                circle_atlas_rect.vk_rect(),
+                &[br::ClearValue::color_f32([0.0; 4])],
+            ),
+            &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+        )
+        .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline_circle)
+        .draw(3, 1, 0, 0)
+        .end_render_pass2(&br::SubpassEndInfo::new())
+        .pipeline_barrier_2(&br::DependencyInfo::new(
+            &[],
+            &[],
+            &[atlas
+                .resource
+                .image()
+                .memory_barrier2(br::ImageSubresourceRange::new(
+                    br::AspectMask::COLOR,
+                    0..1,
+                    0..1,
+                ))
+                .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
+        ))
+        .resolve_image(
+            msaa_buffer.image(),
+            br::ImageLayout::TransferSrcOpt,
+            atlas.resource.image(),
+            br::ImageLayout::TransferDestOpt,
+            &[br::vk::VkImageResolve {
+                srcSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
+                srcOffset: br::Offset3D::ZERO,
+                dstSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
+                dstOffset: icon_atlas_rect.lt_offset().with_z(0),
+                extent: icon_atlas_rect.extent().with_depth(1),
+            }],
+        )
+        .pipeline_barrier_2(&br::DependencyInfo::new(
+            &[],
+            &[],
+            &[atlas
+                .resource
+                .image()
+                .memory_barrier2(br::ImageSubresourceRange::new(
+                    br::AspectMask::COLOR,
+                    0..1,
+                    0..1,
+                ))
+                .from(
+                    br::PipelineStageFlags2::RESOLVE,
+                    br::AccessFlags2::TRANSFER.write,
+                )
+                .to(
+                    br::PipelineStageFlags2::FRAGMENT_SHADER,
+                    br::AccessFlags2::SHADER_SAMPLED_READ,
+                )
+                .transit_from(
+                    br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt),
+                )],
+        ))
+        .end()
+        .unwrap();
+
+        graphics_queue
+            .submit2(
+                &[br::SubmitInfo2::new(
+                    &[],
+                    &[br::CommandBufferSubmitInfo::new(&cb)],
+                    &[],
+                )],
+                None,
+            )
+            .unwrap();
+        graphics_queue.wait().unwrap();
+
+        let ct_root = composite_tree.alloc();
+        {
+            let ct_root = composite_tree.get_mut(ct_root);
+
+            ct_root.size = [Self::SIZE * bitmap_scale, Self::SIZE * bitmap_scale];
+            ct_root.offset = [0.0, 8.0 * bitmap_scale];
+            ct_root.relative_offset_adjustment = [1.0, 0.0];
+
+            ct_root.instance_slot_index = Some(composite_instance_manager.alloc());
+            ct_root.texatlas_rect = circle_atlas_rect.clone();
+            ct_root.composite_mode = CompositeMode::ColorTint([1.0, 1.0, 1.0, 0.0]);
+        }
+        let ct_icon = composite_tree.alloc();
+        composite_tree.add_child(ct_root, ct_icon);
+        {
+            let ct_icon = composite_tree.get_mut(ct_icon);
+
+            ct_icon.offset = [
+                -Self::ICON_SIZE * 0.5 * bitmap_scale,
+                -Self::ICON_SIZE * 0.5 * bitmap_scale,
+            ];
+            ct_icon.relative_offset_adjustment = [0.5, 0.5];
+            ct_icon.size = [
+                Self::ICON_SIZE * bitmap_scale,
+                Self::ICON_SIZE * bitmap_scale,
+            ];
+            ct_icon.instance_slot_index = Some(composite_instance_manager.alloc());
+            ct_icon.texatlas_rect = icon_atlas_rect.clone();
+            ct_icon.composite_mode = CompositeMode::ColorTint([0.9, 0.9, 0.9, 1.0]);
+        }
+
+        let ht_root = ht.create(HitTestTreeData {
+            width: Self::SIZE,
+            height: Self::SIZE,
+            top: 8.0,
+            left_adjustment_factor: 1.0,
+            ..Default::default()
+        });
+
+        Self {
+            icon_atlas_rect,
+            circle_atlas_rect,
+            ct_root,
+            ct_icon,
+            ht_root,
+            ui_scale_factor: Cell::new(bitmap_scale),
+            hovering: Cell::new(false),
+            pressing: Cell::new(false),
+        }
+    }
+
+    pub fn mount(
+        &self,
+        composite_tree: &mut CompositeTree,
+        ct_parent: usize,
+        ht: &mut HitTestTreeManager<AppUpdateContext>,
+        ht_parent: HitTestTreeRef,
+    ) {
+        composite_tree.add_child(ct_parent, self.ct_root);
+        ht.add_child(ht_parent, self.ht_root);
+    }
+
+    pub fn place_inner(
+        &self,
+        ct: &mut CompositeTree,
+        ht: &mut HitTestTreeManager<AppUpdateContext>,
+    ) {
+        let ui_scale_factor = self.ui_scale_factor.get();
+
+        ct.get_mut(self.ct_root).offset[0] = (-Self::SIZE - 8.0) * ui_scale_factor;
+        ct.mark_dirty(self.ct_root);
+        ht.get_data_mut(self.ht_root).left = -Self::SIZE - 8.0;
+    }
+
+    pub fn place_outer(
+        &self,
+        ct: &mut CompositeTree,
+        ht: &mut HitTestTreeManager<AppUpdateContext>,
+    ) {
+        let ui_scale_factor = self.ui_scale_factor.get();
+
+        ct.get_mut(self.ct_root).offset[0] = 8.0 * ui_scale_factor;
+        ct.mark_dirty(self.ct_root);
+        ht.get_data_mut(self.ht_root).left = 8.0;
+    }
+
+    pub fn flip_icon(&self, flipped: bool, ct: &mut CompositeTree) {
+        let ct_icon = ct.get_mut(self.ct_icon);
+        ct_icon.texatlas_rect = self.icon_atlas_rect.clone();
+        if flipped {
+            core::mem::swap(
+                &mut ct_icon.texatlas_rect.left,
+                &mut ct_icon.texatlas_rect.right,
+            );
+        }
+
+        ct.mark_dirty(self.ct_icon);
+    }
+
+    fn update_button_bg_opacity(&self, composite_tree: &mut CompositeTree) {
+        let opacity = match (self.hovering.get(), self.pressing.get()) {
+            (_, true) => 0.375,
+            (true, _) => 0.25,
+            _ => 0.0,
+        };
+
+        composite_tree.get_mut(self.ct_root).composite_mode =
+            CompositeMode::ColorTint([1.0, 1.0, 1.0, opacity]);
+        composite_tree.mark_dirty(self.ct_root);
+    }
+
+    pub fn on_hover(&self, composite_tree: &mut CompositeTree) {
+        self.hovering.set(true);
+        self.update_button_bg_opacity(composite_tree);
+    }
+
+    pub fn on_leave(&self, composite_tree: &mut CompositeTree) {
+        self.hovering.set(false);
+        // はずれたらpressingもなかったことにする
+        self.pressing.set(false);
+
+        self.update_button_bg_opacity(composite_tree);
+    }
+
+    pub fn on_press(&self, composite_tree: &mut CompositeTree) {
+        self.pressing.set(true);
+        self.update_button_bg_opacity(composite_tree);
+    }
+
+    pub fn on_release(&self, composite_tree: &mut CompositeTree) {
+        self.pressing.set(false);
+        self.update_button_bg_opacity(composite_tree);
+    }
+}
+
 pub struct SpriteListPaneView {
     pub frame_image_atlas_rect: AtlasRect,
     pub title_atlas_rect: AtlasRect,
@@ -419,11 +970,12 @@ impl SpriteListPaneView {
         title_blurred_work_image
             .bind(&title_blurred_work_image_mem, 0)
             .unwrap();
-        let title_blurred_work_image_view = title_blurred_work_image
-            .subresource_range(br::AspectMask::COLOR, 0..1, 0..1)
-            .view_builder()
-            .create()
-            .unwrap();
+        let title_blurred_work_image_view = br::ImageViewBuilder::new(
+            title_blurred_work_image,
+            br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+        )
+        .create()
+        .unwrap();
 
         let render_pass = br::RenderPassObject::new(
             device,
@@ -502,6 +1054,11 @@ impl SpriteListPaneView {
             ),
         )
         .unwrap();
+        #[derive(br::SpecializationConstants)]
+        struct ConvolutionFragmentShaderParams {
+            #[constant_id = 0]
+            max_count: u32,
+        }
 
         let dsl_tex1 = br::DescriptorSetLayoutObject::new(
             device,
@@ -595,22 +1152,14 @@ impl SpriteListPaneView {
                         &blur_pipeline_layout,
                         render_pass.subpass(0),
                         &[
-                            br::PipelineShaderStage::new(
-                                br::ShaderStage::Vertex,
-                                &vsh_blur,
-                                c"main",
-                            ),
-                            br::PipelineShaderStage::new(
-                                br::ShaderStage::Fragment,
-                                &fsh_blur,
-                                c"main",
-                            )
-                            .with_specialization_info(
-                                &br::SpecializationInfo::from_any_type(
-                                    &[br::vk::VkSpecializationMapEntry::for_type::<u32>(0, 0)],
-                                    &title_blur_pixels,
-                                ),
-                            ),
+                            vsh_blur.on_stage(br::ShaderStage::Vertex, c"main"),
+                            fsh_blur
+                                .on_stage(br::ShaderStage::Fragment, c"main")
+                                .with_specialization_info(&br::SpecializationInfo::new(
+                                    &ConvolutionFragmentShaderParams {
+                                        max_count: title_blur_pixels,
+                                    },
+                                )),
                         ],
                         VI_STATE_EMPTY,
                         IA_STATE_TRILIST,
@@ -631,22 +1180,14 @@ impl SpriteListPaneView {
                         &blur_pipeline_layout,
                         render_pass.subpass(0),
                         &[
-                            br::PipelineShaderStage::new(
-                                br::ShaderStage::Vertex,
-                                &vsh_blur,
-                                c"main",
-                            ),
-                            br::PipelineShaderStage::new(
-                                br::ShaderStage::Fragment,
-                                &fsh_blur,
-                                c"main",
-                            )
-                            .with_specialization_info(
-                                &br::SpecializationInfo::from_any_type(
-                                    &[br::vk::VkSpecializationMapEntry::for_type::<u32>(0, 0)],
-                                    &title_blur_pixels,
-                                ),
-                            ),
+                            vsh_blur.on_stage(br::ShaderStage::Vertex, c"main"),
+                            fsh_blur
+                                .on_stage(br::ShaderStage::Fragment, c"main")
+                                .with_specialization_info(&br::SpecializationInfo::new(
+                                    &ConvolutionFragmentShaderParams {
+                                        max_count: title_blur_pixels,
+                                    },
+                                )),
                         ],
                         VI_STATE_EMPTY,
                         IA_STATE_TRILIST,
@@ -712,9 +1253,11 @@ impl SpriteListPaneView {
             &[],
             &[
                 title_stg_image
-                    .by_ref()
-                    .subresource_range(br::AspectMask::COLOR, 0..1, 0..1)
-                    .memory_barrier2()
+                    .memory_barrier2(br::ImageSubresourceRange::new(
+                        br::AspectMask::COLOR,
+                        0..1,
+                        0..1,
+                    ))
                     .from(br::PipelineStageFlags2::HOST, br::AccessFlags2::HOST.write)
                     .to(
                         br::PipelineStageFlags2::COPY,
@@ -724,8 +1267,11 @@ impl SpriteListPaneView {
                 atlas
                     .resource
                     .image()
-                    .subresource_range(br::AspectMask::COLOR, 0..1, 0..1)
-                    .memory_barrier2()
+                    .memory_barrier2(br::ImageSubresourceRange::new(
+                        br::AspectMask::COLOR,
+                        0..1,
+                        0..1,
+                    ))
                     .transit_to(br::ImageLayout::TransferDestOpt.from_undefined()),
             ],
         ))
@@ -748,8 +1294,11 @@ impl SpriteListPaneView {
             &[atlas
                 .resource
                 .image()
-                .subresource_range(br::AspectMask::COLOR, 0..1, 0..1)
-                .memory_barrier2()
+                .memory_barrier2(br::ImageSubresourceRange::new(
+                    br::AspectMask::COLOR,
+                    0..1,
+                    0..1,
+                ))
                 .from(
                     br::PipelineStageFlags2::COPY,
                     br::AccessFlags2::TRANSFER.write,
@@ -971,12 +1520,26 @@ impl SpriteListPaneView {
 
         self.width.set(width);
     }
+
+    pub fn show(&self, ct: &mut CompositeTree, ht: &mut HitTestTreeManager<AppUpdateContext>) {
+        ct.get_mut(self.ct_root).offset[0] = Self::FLOATING_MARGIN * self.ui_scale_factor.get();
+        ct.mark_dirty(self.ct_root);
+        ht.get_data_mut(self.ht_frame).left = Self::FLOATING_MARGIN;
+    }
+
+    pub fn hide(&self, ct: &mut CompositeTree, ht: &mut HitTestTreeManager<AppUpdateContext>) {
+        ct.get_mut(self.ct_root).offset[0] = -self.width.get() * self.ui_scale_factor.get();
+        ct.mark_dirty(self.ct_root);
+        ht.get_data_mut(self.ht_frame).left = -self.width.get();
+    }
 }
 
 pub struct SpriteListPaneActionHandler {
     view: Rc<SpriteListPaneView>,
+    toggle_button_view: Rc<SpriteListToggleButtonView>,
     ht_resize_area: HitTestTreeRef,
     resize_state: Cell<Option<(f32, f32)>>,
+    shown: Cell<bool>,
 }
 impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
     type Context = AppUpdateContext;
@@ -989,10 +1552,44 @@ impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
         CursorShape::Default
     }
 
+    fn on_pointer_enter(
+        &self,
+        sender: HitTestTreeRef,
+        context: &mut Self::Context,
+        _ht: &mut HitTestTreeManager<Self::Context>,
+        _args: hittest::PointerActionArgs,
+    ) -> EventContinueControl {
+        if sender == self.toggle_button_view.ht_root {
+            self.toggle_button_view
+                .on_hover(&mut context.composite_tree);
+
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_pointer_leave(
+        &self,
+        sender: HitTestTreeRef,
+        context: &mut Self::Context,
+        _ht: &mut HitTestTreeManager<Self::Context>,
+        _args: hittest::PointerActionArgs,
+    ) -> EventContinueControl {
+        if sender == self.toggle_button_view.ht_root {
+            self.toggle_button_view
+                .on_leave(&mut context.composite_tree);
+
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        EventContinueControl::empty()
+    }
+
     fn on_pointer_down(
         &self,
         sender: HitTestTreeRef,
-        _context: &mut Self::Context,
+        context: &mut Self::Context,
         _ht: &mut HitTestTreeManager<Self::Context>,
         args: hittest::PointerActionArgs,
     ) -> input::EventContinueControl {
@@ -1001,6 +1598,13 @@ impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
                 .set(Some((self.view.width.get(), args.client_x)));
 
             return EventContinueControl::CAPTURE_ELEMENT | EventContinueControl::STOP_PROPAGATION;
+        }
+
+        if sender == self.toggle_button_view.ht_root {
+            self.toggle_button_view
+                .on_press(&mut context.composite_tree);
+
+            return EventContinueControl::STOP_PROPAGATION;
         }
 
         EventContinueControl::empty()
@@ -1041,12 +1645,51 @@ impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
             }
         }
 
+        if sender == self.toggle_button_view.ht_root {
+            self.toggle_button_view
+                .on_release(&mut context.composite_tree);
+
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_click(
+        &self,
+        sender: HitTestTreeRef,
+        context: &mut Self::Context,
+        ht: &mut HitTestTreeManager<Self::Context>,
+        _args: hittest::PointerActionArgs,
+    ) -> EventContinueControl {
+        if sender == self.toggle_button_view.ht_root {
+            let show = !self.shown.get();
+            self.shown.set(show);
+
+            if show {
+                self.view.show(&mut context.composite_tree, ht);
+                self.toggle_button_view
+                    .place_inner(&mut context.composite_tree, ht);
+            } else {
+                self.view.hide(&mut context.composite_tree, ht);
+                self.toggle_button_view
+                    .place_outer(&mut context.composite_tree, ht);
+            }
+
+            self.toggle_button_view
+                .flip_icon(!show, &mut context.composite_tree);
+
+            return EventContinueControl::STOP_PROPAGATION
+                | EventContinueControl::RECOMPUTE_POINTER_ENTER;
+        }
+
         EventContinueControl::empty()
     }
 }
 
 pub struct SpriteListPanePresenter {
     view: Rc<SpriteListPaneView>,
+    toggle_button_view: Rc<SpriteListToggleButtonView>,
     _ht_action_handler: Rc<SpriteListPaneActionHandler>,
 }
 impl SpriteListPanePresenter {
@@ -1076,17 +1719,36 @@ impl SpriteListPanePresenter {
             composite_instance_manager,
             ht,
         ));
+        let toggle_button_view = Rc::new(SpriteListToggleButtonView::new(
+            device,
+            adapter_memory_info,
+            graphics_queue_family_index,
+            graphics_queue,
+            atlas,
+            bitmap_scale as _,
+            composite_tree,
+            composite_instance_manager,
+            ht,
+        ));
+
+        toggle_button_view.mount(composite_tree, view.ct_root, ht, view.ht_frame);
+        toggle_button_view.place_inner(composite_tree, ht);
 
         let ht_action_handler = Rc::new(SpriteListPaneActionHandler {
             view: view.clone(),
+            toggle_button_view: toggle_button_view.clone(),
             ht_resize_area: view.ht_resize_area,
             resize_state: Cell::new(None),
+            shown: Cell::new(true),
         });
         ht.get_data_mut(view.ht_resize_area).action_handler =
+            Some(Rc::downgrade(&ht_action_handler) as _);
+        ht.get_data_mut(toggle_button_view.ht_root).action_handler =
             Some(Rc::downgrade(&ht_action_handler) as _);
 
         Self {
             view,
+            toggle_button_view,
             _ht_action_handler: ht_action_handler,
         }
     }
@@ -1111,11 +1773,11 @@ pub struct AtlasRect {
 }
 impl AtlasRect {
     pub const fn width(&self) -> u32 {
-        self.right - self.left
+        self.right.abs_diff(self.left)
     }
 
     pub const fn height(&self) -> u32 {
-        self.bottom - self.top
+        self.bottom.abs_diff(self.top)
     }
 
     pub const fn lt_offset(&self) -> br::Offset2D {
@@ -1178,11 +1840,12 @@ impl<'d> CompositionSurfaceAtlas<'d> {
             .flags(br::ImageFlags::SPARSE_BINDING | br::ImageFlags::SPARSE_RESIDENCY),
         )
         .unwrap();
-        let resource = image
-            .subresource_range(br::AspectMask::COLOR, 0..1, 0..1)
-            .view_builder()
-            .create()
-            .unwrap();
+        let resource = br::ImageViewBuilder::new(
+            image,
+            br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+        )
+        .create()
+        .unwrap();
         assert!(size % Self::GRANULARITY == 0);
         let bitmap_div = size / Self::GRANULARITY;
         let mut residency_bitmap = vec![0; (bitmap_div * bitmap_div) as usize];
@@ -1229,17 +1892,9 @@ impl<'d> CompositionSurfaceAtlas<'d> {
                             image: resource.image().native_ptr(),
                             bindCount: 1,
                             pBinds: [br::vk::VkSparseImageMemoryBind {
-                                subresource: br::vk::VkImageSubresource {
-                                    aspectMask: br::AspectMask::COLOR.bits(),
-                                    mipLevel: 0,
-                                    arrayLayer: 0,
-                                },
+                                subresource: br::ImageSubresource::new(br::AspectMask::COLOR, 0, 0),
                                 offset: br::Offset3D::ZERO,
-                                extent: br::Extent3D {
-                                    width: Self::GRANULARITY,
-                                    height: Self::GRANULARITY,
-                                    depth: 1,
-                                },
+                                extent: br::Extent2D::spread1(Self::GRANULARITY).with_depth(1),
                                 memory: memory.native_ptr(),
                                 memoryOffset: 0,
                                 flags: 0,
@@ -1527,11 +2182,13 @@ impl CompositeTree {
         }
 
         self.rects[parent].children.push(child);
+        self.dirty = true;
     }
 
     pub fn remove_child(&mut self, child: usize) {
         if let Some(p) = self.rects[child].parent.take() {
             self.rects[p].children.retain(|&x| x != child);
+            self.dirty = true;
         }
     }
 
@@ -1568,8 +2225,10 @@ impl CompositeTree {
                             CompositeInstanceData {
                                 pos_st: [w, h, left, top],
                                 uv_st: [
-                                    r.texatlas_rect.width() as f32 / tex_size.width as f32,
-                                    r.texatlas_rect.height() as f32 / tex_size.height as f32,
+                                    (r.texatlas_rect.right as f32 - r.texatlas_rect.left as f32)
+                                        / tex_size.width as f32,
+                                    (r.texatlas_rect.bottom as f32 - r.texatlas_rect.top as f32)
+                                        / tex_size.height as f32,
                                     r.texatlas_rect.left as f32 / tex_size.width as f32,
                                     r.texatlas_rect.top as f32 / tex_size.height as f32,
                                 ],
@@ -1745,10 +2404,8 @@ impl TextLayout {
         )
         .expect("Failed to allocate text surface stg memory");
         img.bind(&mem, 0).expect("Failed to bind stg memory");
-        let subresource_layout = img
-            .by_ref()
-            .subresource(br::AspectMask::COLOR, 0, 0)
-            .layout_info();
+        let subresource_layout =
+            img.layout_info(&br::ImageSubresource::new(br::AspectMask::COLOR, 0, 0));
 
         let n = mem.native_ptr();
         let ptr = mem
@@ -2433,9 +3090,11 @@ fn main() {
         &[],
         &[
             title_stg_image
-                .by_ref()
-                .subresource_range(br::AspectMask::COLOR, 0..1, 0..1)
-                .memory_barrier2()
+                .memory_barrier2(br::ImageSubresourceRange::new(
+                    br::AspectMask::COLOR,
+                    0..1,
+                    0..1,
+                ))
                 .from(br::PipelineStageFlags2::HOST, br::AccessFlags2::HOST.write)
                 .to(
                     br::PipelineStageFlags2::COPY,
@@ -2445,8 +3104,11 @@ fn main() {
             composition_alphamask_surface_atlas
                 .resource
                 .image()
-                .subresource_range(br::AspectMask::COLOR, 0..1, 0..1)
-                .memory_barrier2()
+                .memory_barrier2(br::ImageSubresourceRange::new(
+                    br::AspectMask::COLOR,
+                    0..1,
+                    0..1,
+                ))
                 .transit_to(br::ImageLayout::TransferDestOpt.from_undefined()),
         ],
     ))
@@ -2469,8 +3131,11 @@ fn main() {
         &[composition_alphamask_surface_atlas
             .resource
             .image()
-            .subresource_range(br::AspectMask::COLOR, 0..1, 0..1)
-            .memory_barrier2()
+            .memory_barrier2(br::ImageSubresourceRange::new(
+                br::AspectMask::COLOR,
+                0..1,
+                0..1,
+            ))
             .from(
                 br::PipelineStageFlags2::COPY,
                 br::AccessFlags2::TRANSFER.write,
@@ -2533,11 +3198,12 @@ fn main() {
         .unwrap()
         .into_iter()
         .map(|bb| {
-            bb.clone_parent()
-                .subresource_range(br::AspectMask::COLOR, 0..1, 0..1)
-                .view_builder()
-                .create()
-                .unwrap()
+            br::ImageViewBuilder::new(
+                bb.clone_parent(),
+                br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+            )
+            .create()
+            .unwrap()
         })
         .collect::<Vec<_>>();
     let mut main_fbs = backbuffer_views
@@ -2768,6 +3434,7 @@ fn main() {
     }
     ptr.end();
     let mut composite_instance_buffer_dirty = true;
+    composite_tree.take_dirty(); // mark processed
 
     let mut main_cp = br::CommandPoolObject::new(
         &device,
@@ -3145,11 +3812,16 @@ fn main() {
                                 .unwrap()
                                 .into_iter()
                                 .map(|bb| {
-                                    bb.clone_parent()
-                                        .subresource_range(br::AspectMask::COLOR, 0..1, 0..1)
-                                        .view_builder()
-                                        .create()
-                                        .unwrap()
+                                    br::ImageViewBuilder::new(
+                                        bb.clone_parent(),
+                                        br::ImageSubresourceRange::new(
+                                            br::AspectMask::COLOR,
+                                            0..1,
+                                            0..1,
+                                        ),
+                                    )
+                                    .create()
+                                    .unwrap()
                                 })
                                 .collect::<Vec<_>>();
                             main_fbs = backbuffer_views

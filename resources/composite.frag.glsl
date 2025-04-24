@@ -35,9 +35,9 @@ float rel_uv_9s_axis(in float relativePixelCoord, in float renderSizePixels, in 
 
 vec4 tex_9s(in vec2 relativePixelCoord, in vec2 renderSizePixels, in vec2 uvOffset, in vec2 texSizePixels, in vec4 sliceBordersLTRB, in vec2 texSlicedSizePixels) {
     const vec2 uv = vec2(
-        rel_uv_9s_axis(relativePixelCoord.x, renderSizePixels.x, texSizePixels.x, sliceBordersLTRB.x, sliceBordersLTRB.z, texSlicedSizePixels.x),
-        rel_uv_9s_axis(relativePixelCoord.y, renderSizePixels.y, texSizePixels.y, sliceBordersLTRB.y, sliceBordersLTRB.w, texSlicedSizePixels.y)
-    );
+            rel_uv_9s_axis(relativePixelCoord.x, renderSizePixels.x, texSizePixels.x, sliceBordersLTRB.x, sliceBordersLTRB.z, texSlicedSizePixels.x),
+            rel_uv_9s_axis(relativePixelCoord.y, renderSizePixels.y, texSizePixels.y, sliceBordersLTRB.y, sliceBordersLTRB.w, texSlicedSizePixels.y)
+        );
 
     return texture(tex, uvOffset + uv);
 }

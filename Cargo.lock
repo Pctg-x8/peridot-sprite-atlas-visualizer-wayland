@@ -11,7 +11,7 @@ checksum = "ace50bade8e6234aa140d9a2f552bbee1db4d353f69b8217bc503490fc1a9f26"
 [[package]]
 name = "bedrock"
 version = "0.1.0-vk1.4.305"
-source = "git+https://github.com/Pctg-x8/bedrock?branch=peridot#2e6981576d910f6c9fd8830f1d07091e13b9147d"
+source = "git+https://github.com/Pctg-x8/bedrock?branch=peridot#7af0aa22b9fa3ea0f1f5ac1ffbf8a567a746c70e"
 dependencies = [
  "cfg-if",
  "derives",
@@ -34,7 +34,7 @@ checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 [[package]]
 name = "derives"
 version = "0.1.0"
-source = "git+https://github.com/Pctg-x8/bedrock?branch=peridot#2e6981576d910f6c9fd8830f1d07091e13b9147d"
+source = "git+https://github.com/Pctg-x8/bedrock?branch=peridot#7af0aa22b9fa3ea0f1f5ac1ffbf8a567a746c70e"
 dependencies = [
  "proc-macro2",
  "quote",

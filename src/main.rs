@@ -1,31 +1,33 @@
+mod composite;
 mod fontconfig;
 mod freetype;
 mod harfbuzz;
 mod hittest;
 mod input;
 mod linux_input_event_codes;
+mod subsystem;
+mod text;
 mod wl;
 
-use std::{
-    cell::Cell,
-    collections::{BTreeSet, VecDeque},
-    io::Read,
-    path::Path,
-    rc::Rc,
-};
+use std::{cell::Cell, collections::VecDeque, rc::Rc};
 
 use bedrock::{
     self as br, CommandBufferMut, CommandPoolMut, DescriptorPoolMut, Device, DeviceMemoryMut,
-    Fence, FenceMut, Image, ImageChild, Instance, MemoryBound, PhysicalDevice, QueueMut,
-    RenderPass, ShaderModule, Swapchain, VkHandle, VkHandleMut, VulkanStructure,
+    Fence, FenceMut, Image, ImageChild, InstanceChild, MemoryBound, PhysicalDevice, RenderPass,
+    ShaderModule, SurfaceCreateInfo, Swapchain, VkHandle, VkHandleMut,
+};
+use composite::{
+    AtlasRect, CompositeInstanceData, CompositeInstanceManager, CompositeMode, CompositeTree,
+    CompositeTreeRef, CompositionSurfaceAtlas,
 };
 use freetype::FreeType;
-use freetype2::{FT_GlyphSlotRec, FT_LOAD_DEFAULT, FT_RENDER_MODE_NORMAL};
 use hittest::{
     CursorShape, HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef,
 };
 use input::{EventContinueControl, PointerInputManager};
 use linux_input_event_codes::BTN_LEFT;
+use subsystem::Subsystem;
+use text::TextLayout;
 use wl::{WpCursorShapeDeviceV1Shape, WpCursorShapeManagerV1};
 
 pub enum AppEvent {
@@ -49,18 +51,6 @@ pub enum AppEvent {
     MainWindowPointerLeftUp {
         enter_serial: u32,
     },
-}
-
-fn load_spv_file(path: impl AsRef<Path>) -> std::io::Result<Vec<u32>> {
-    let mut f = std::fs::File::open(path)?;
-    let byte_length = f.metadata()?.len();
-    assert!((byte_length & 0x03) == 0);
-    let mut words = vec![0u32; byte_length as usize >> 2];
-    f.read_exact(unsafe {
-        core::slice::from_raw_parts_mut(words.as_mut_ptr() as *mut u8, words.len() << 2)
-    })?;
-
-    Ok(words)
 }
 
 const MS_STATE_EMPTY: &'static br::PipelineMultisampleStateCreateInfo =
@@ -91,56 +81,60 @@ struct AtlasViewGridParams {
 }
 
 pub struct AtlasView<'d> {
-    pub param_buffer: br::BufferObject<&'d br::DeviceObject<&'d br::InstanceObject>>,
-    _param_buffer_memory: br::DeviceMemoryObject<&'d br::DeviceObject<&'d br::InstanceObject>>,
-    grid_vsh: br::ShaderModuleObject<&'d br::DeviceObject<&'d br::InstanceObject>>,
-    grid_fsh: br::ShaderModuleObject<&'d br::DeviceObject<&'d br::InstanceObject>>,
-    pub render_pipeline_layout:
-        br::PipelineLayoutObject<&'d br::DeviceObject<&'d br::InstanceObject>>,
-    pub render_pipeline: br::PipelineObject<&'d br::DeviceObject<&'d br::InstanceObject>>,
-    pub dsl_param: br::DescriptorSetLayoutObject<&'d br::DeviceObject<&'d br::InstanceObject>>,
-    pub dp: br::DescriptorPoolObject<&'d br::DeviceObject<&'d br::InstanceObject>>,
+    pub param_buffer: br::BufferObject<&'d Subsystem>,
+    _param_buffer_memory: br::DeviceMemoryObject<&'d Subsystem>,
+    grid_vsh: br::ShaderModuleObject<&'d Subsystem>,
+    grid_fsh: br::ShaderModuleObject<&'d Subsystem>,
+    pub render_pipeline_layout: br::PipelineLayoutObject<&'d Subsystem>,
+    pub render_pipeline: br::PipelineObject<&'d Subsystem>,
+    pub dsl_param: br::DescriptorSetLayoutObject<&'d Subsystem>,
+    pub dp: br::DescriptorPoolObject<&'d Subsystem>,
     pub ds_param: br::DescriptorSet,
 }
 impl<'d> AtlasView<'d> {
     pub fn new(
-        device: &'d br::DeviceObject<&'d br::InstanceObject>,
-        adapter_memory_info: &br::MemoryProperties,
-        graphics_queue_family_index: u32,
-        graphics_queue: &mut impl br::QueueMut,
+        init: &mut ViewInitContext<'d, '_>,
         rendered_pass: br::SubpassRef<impl br::RenderPass>,
         main_buffer_size: br::Extent2D,
     ) -> Self {
         let mut param_buffer = br::BufferObject::new(
-            device,
+            init.subsystem,
             &br::BufferCreateInfo::new_for_type::<AtlasViewGridParams>(
                 br::BufferUsage::UNIFORM_BUFFER | br::BufferUsage::TRANSFER_DEST,
             ),
         )
         .unwrap();
         let mreq = param_buffer.requirements();
-        let memindex = adapter_memory_info
+        let memindex = init
+            .subsystem
+            .adapter_memory_info
             .find_device_local_index(mreq.memoryTypeBits)
             .expect("no suitable memory property");
-        let param_buffer_memory =
-            br::DeviceMemoryObject::new(device, &br::MemoryAllocateInfo::new(mreq.size, memindex))
-                .unwrap();
+        let param_buffer_memory = br::DeviceMemoryObject::new(
+            init.subsystem,
+            &br::MemoryAllocateInfo::new(mreq.size, memindex),
+        )
+        .unwrap();
         param_buffer.bind(&param_buffer_memory, 0).unwrap();
 
         let mut param_buffer_stg = br::BufferObject::new(
-            device,
+            init.subsystem,
             &br::BufferCreateInfo::new_for_type::<AtlasViewGridParams>(
                 br::BufferUsage::TRANSFER_SRC,
             ),
         )
         .unwrap();
         let mreq = param_buffer_stg.requirements();
-        let memindex = adapter_memory_info
+        let memindex = init
+            .subsystem
+            .adapter_memory_info
             .find_host_visible_index(mreq.memoryTypeBits)
             .expect("no suitable memory property");
-        let mut param_buffer_stg_memory =
-            br::DeviceMemoryObject::new(device, &br::MemoryAllocateInfo::new(mreq.size, memindex))
-                .unwrap();
+        let mut param_buffer_stg_memory = br::DeviceMemoryObject::new(
+            init.subsystem,
+            &br::MemoryAllocateInfo::new(mreq.size, memindex),
+        )
+        .unwrap();
         param_buffer_stg.bind(&param_buffer_stg_memory, 0).unwrap();
         let n = param_buffer_stg_memory.native_ptr();
         let ptr = param_buffer_stg_memory
@@ -155,9 +149,9 @@ impl<'d> AtlasView<'d> {
                 },
             );
         }
-        if !adapter_memory_info.is_coherent(memindex) {
+        if !init.subsystem.adapter_memory_info.is_coherent(memindex) {
             unsafe {
-                device
+                init.subsystem
                     .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new(
                         &br::VkHandleRef::dangling(n),
                         0..core::mem::size_of::<AtlasViewGridParams>() as _,
@@ -168,17 +162,17 @@ impl<'d> AtlasView<'d> {
         ptr.end();
 
         let mut cp = br::CommandPoolObject::new(
-            device,
-            &br::CommandPoolCreateInfo::new(graphics_queue_family_index),
+            init.subsystem,
+            &br::CommandPoolCreateInfo::new(init.subsystem.graphics_queue_family_index),
         )
         .unwrap();
         let [mut cb] = br::CommandBufferObject::alloc_array(
-            device,
+            init.subsystem,
             &br::CommandBufferFixedCountAllocateInfo::new(&mut cp, br::CommandBufferLevel::Primary),
         )
         .unwrap();
         unsafe {
-            cb.begin(&br::CommandBufferBeginInfo::new(), device)
+            cb.begin(&br::CommandBufferBeginInfo::new(), init.subsystem)
                 .unwrap()
         }
         .pipeline_barrier_2(&br::DependencyInfo::new(
@@ -211,27 +205,19 @@ impl<'d> AtlasView<'d> {
         ))
         .end()
         .unwrap();
-        graphics_queue
-            .submit2(
-                &[br::SubmitInfo2::new(
-                    &[],
-                    &[br::CommandBufferSubmitInfo::new(&cb)],
-                    &[],
-                )],
-                None,
-            )
+        init.subsystem
+            .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&cb)])
             .unwrap();
-        graphics_queue.wait().unwrap();
 
         let dsl_param = br::DescriptorSetLayoutObject::new(
-            device,
+            init.subsystem,
             &br::DescriptorSetLayoutCreateInfo::new(&[
                 br::DescriptorType::UniformBuffer.make_binding(0, 1)
             ]),
         )
         .unwrap();
         let mut dp = br::DescriptorPoolObject::new(
-            device,
+            init.subsystem,
             &br::DescriptorPoolCreateInfo::new(
                 1,
                 &[br::DescriptorType::UniformBuffer.make_size(1)],
@@ -239,7 +225,7 @@ impl<'d> AtlasView<'d> {
         )
         .unwrap();
         let [ds_param] = dp.alloc_array(&[dsl_param.as_transparent_ref()]).unwrap();
-        device.update_descriptor_sets(
+        init.subsystem.update_descriptor_sets(
             &[ds_param
                 .binding_at(0)
                 .write(br::DescriptorContents::uniform_buffer(
@@ -249,36 +235,32 @@ impl<'d> AtlasView<'d> {
             &[],
         );
 
-        let vsh = br::ShaderModuleObject::new(
-            device,
-            &br::ShaderModuleCreateInfo::new(&load_spv_file("resources/filltri.vert").unwrap()),
-        )
-        .unwrap();
-        let fsh = br::ShaderModuleObject::new(
-            device,
-            &br::ShaderModuleCreateInfo::new(&load_spv_file("resources/grid.frag").unwrap()),
-        )
-        .unwrap();
+        let vsh = init
+            .subsystem
+            .load_shader("resources/filltri.vert")
+            .unwrap();
+        let fsh = init.subsystem.load_shader("resources/grid.frag").unwrap();
 
         let render_pipeline_layout = br::PipelineLayoutObject::new(
-            device,
+            init.subsystem,
             &br::PipelineLayoutCreateInfo::new(
                 &[dsl_param.as_transparent_ref()],
-                &[br::vk::VkPushConstantRange::for_type::<[f32; 2]>(
+                &[br::PushConstantRange::for_type::<[f32; 2]>(
                     br::vk::VK_SHADER_STAGE_FRAGMENT_BIT,
                     0,
                 )],
             ),
         )
         .unwrap();
-        let [render_pipeline] = device
+        let [render_pipeline] = init
+            .subsystem
             .new_graphics_pipeline_array(
                 &[br::GraphicsPipelineCreateInfo::new(
                     &render_pipeline_layout,
                     rendered_pass,
                     &[
-                        br::PipelineShaderStage::new(br::ShaderStage::Vertex, &vsh, c"main"),
-                        br::PipelineShaderStage::new(br::ShaderStage::Fragment, &fsh, c"main"),
+                        vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+                        fsh.on_stage(br::ShaderStage::Fragment, c"main"),
                     ],
                     VI_STATE_EMPTY,
                     IA_STATE_TRILIST,
@@ -311,7 +293,7 @@ impl<'d> AtlasView<'d> {
 
     pub fn recreate(
         &mut self,
-        device: &'d br::DeviceObject<&'d br::InstanceObject>,
+        device: &'d Subsystem,
         rendered_pass: br::SubpassRef<impl br::RenderPass>,
         main_buffer_size: br::Extent2D,
     ) {
@@ -321,16 +303,8 @@ impl<'d> AtlasView<'d> {
                     &self.render_pipeline_layout,
                     rendered_pass,
                     &[
-                        br::PipelineShaderStage::new(
-                            br::ShaderStage::Vertex,
-                            &self.grid_vsh,
-                            c"main",
-                        ),
-                        br::PipelineShaderStage::new(
-                            br::ShaderStage::Fragment,
-                            &self.grid_fsh,
-                            c"main",
-                        ),
+                        self.grid_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+                        self.grid_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
                     ],
                     VI_STATE_EMPTY,
                     IA_STATE_TRILIST,
@@ -352,11 +326,21 @@ impl<'d> AtlasView<'d> {
     }
 }
 
+pub struct ViewInitContext<'d, 'r> {
+    pub subsystem: &'d Subsystem,
+    pub atlas: &'r mut CompositionSurfaceAtlas<'d>,
+    pub ui_scale_factor: f32,
+    pub composite_tree: &'r mut CompositeTree,
+    pub composite_instance_manager: &'r mut CompositeInstanceManager<'d>,
+    pub ht: &'r mut HitTestTreeManager<AppUpdateContext>,
+    pub fonts: &'r mut FontSet,
+}
+
 pub struct SpriteListToggleButtonView {
     icon_atlas_rect: AtlasRect,
     circle_atlas_rect: AtlasRect,
-    ct_root: usize,
-    ct_icon: usize,
+    ct_root: CompositeTreeRef,
+    ct_icon: CompositeTreeRef,
     ht_root: HitTestTreeRef,
     ui_scale_factor: Cell<f32>,
     hovering: Cell<bool>,
@@ -367,22 +351,12 @@ impl SpriteListToggleButtonView {
     const ICON_SIZE: f32 = 7.0;
     const ICON_THICKNESS: f32 = 1.5;
 
-    pub fn new(
-        device: &br::DeviceObject<&br::InstanceObject>,
-        adapter_memory_info: &br::MemoryProperties,
-        graphics_queue_family_index: u32,
-        graphics_queue: &mut impl br::QueueMut,
-        atlas: &mut CompositionSurfaceAtlas,
-        bitmap_scale: f32,
-        composite_tree: &mut CompositeTree,
-        composite_instance_manager: &mut CompositeInstanceManager,
-        ht: &mut HitTestTreeManager<AppUpdateContext>,
-    ) -> Self {
-        let icon_size_px = (Self::ICON_SIZE * bitmap_scale) as u32;
-        let icon_atlas_rect = atlas.alloc(icon_size_px, icon_size_px);
-        let circle_atlas_rect = atlas.alloc(
-            (Self::SIZE * bitmap_scale) as _,
-            (Self::SIZE * bitmap_scale) as _,
+    pub fn new(init: &mut ViewInitContext) -> Self {
+        let icon_size_px = (Self::ICON_SIZE * init.ui_scale_factor).ceil() as u32;
+        let icon_atlas_rect = init.atlas.alloc(icon_size_px, icon_size_px);
+        let circle_atlas_rect = init.atlas.alloc(
+            (Self::SIZE * init.ui_scale_factor) as _,
+            (Self::SIZE * init.ui_scale_factor) as _,
         );
 
         let top_left: (f32, f32) = (0.4 - (0.5 * Self::ICON_THICKNESS / Self::ICON_SIZE), 0.0);
@@ -417,7 +391,7 @@ impl SpriteListToggleButtonView {
         let bufsize = vertices.len() * core::mem::size_of::<[f32; 2]>()
             + indices.len() * core::mem::size_of::<u16>();
         let mut buf = br::BufferObject::new(
-            device,
+            &init.subsystem,
             &br::BufferCreateInfo::new(
                 bufsize,
                 br::BufferUsage::VERTEX_BUFFER | br::BufferUsage::INDEX_BUFFER,
@@ -425,7 +399,9 @@ impl SpriteListToggleButtonView {
         )
         .unwrap();
         let mreq = buf.requirements();
-        let memindex = adapter_memory_info
+        let memindex = init
+            .subsystem
+            .adapter_memory_info
             .types()
             .iter()
             .enumerate()
@@ -438,9 +414,11 @@ impl SpriteListToggleButtonView {
             })
             .expect("no suitable memory")
             .0 as u32;
-        let mut mem =
-            br::DeviceMemoryObject::new(device, &br::MemoryAllocateInfo::new(mreq.size, memindex))
-                .unwrap();
+        let mut mem = br::DeviceMemoryObject::new(
+            &init.subsystem,
+            &br::MemoryAllocateInfo::new(mreq.size, memindex),
+        )
+        .unwrap();
         buf.bind(&mem, 0).unwrap();
         let n = mem.native_ptr();
         let ptr = mem.map(0..bufsize).unwrap();
@@ -452,9 +430,9 @@ impl SpriteListToggleButtonView {
                 indices.len(),
             );
         }
-        if !adapter_memory_info.is_coherent(memindex) {
+        if !init.subsystem.adapter_memory_info.is_coherent(memindex) {
             unsafe {
-                device
+                init.subsystem
                     .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(
                         n,
                         0,
@@ -466,7 +444,7 @@ impl SpriteListToggleButtonView {
         ptr.end();
 
         let mut msaa_buffer = br::ImageObject::new(
-            device,
+            &init.subsystem,
             &br::ImageCreateInfo::new(icon_atlas_rect.extent(), br::vk::VK_FORMAT_R8_UNORM)
                 .as_color_attachment()
                 .usage_with(br::ImageUsageFlags::TRANSFER_SRC)
@@ -474,12 +452,16 @@ impl SpriteListToggleButtonView {
         )
         .unwrap();
         let mreq = msaa_buffer.requirements();
-        let memindex = adapter_memory_info
+        let memindex = init
+            .subsystem
+            .adapter_memory_info
             .find_device_local_index(mreq.memoryTypeBits)
             .expect("no suitable memory for msaa buffer");
-        let msaa_mem =
-            br::DeviceMemoryObject::new(device, &br::MemoryAllocateInfo::new(mreq.size, memindex))
-                .unwrap();
+        let msaa_mem = br::DeviceMemoryObject::new(
+            &init.subsystem,
+            &br::MemoryAllocateInfo::new(mreq.size, memindex),
+        )
+        .unwrap();
         msaa_buffer.bind(&msaa_mem, 0).unwrap();
         let msaa_buffer = br::ImageViewBuilder::new(
             msaa_buffer,
@@ -489,7 +471,7 @@ impl SpriteListToggleButtonView {
         .unwrap();
 
         let rp = br::RenderPassObject::new(
-            device,
+            &init.subsystem,
             &br::RenderPassCreateInfo2::new(
                 &[br::AttachmentDescription2::new(br::vk::VK_FORMAT_R8_UNORM)
                     .color_memory_op(br::LoadOp::Clear, br::StoreOp::Store)
@@ -517,7 +499,7 @@ impl SpriteListToggleButtonView {
         )
         .unwrap();
         let fb = br::FramebufferObject::new(
-            device,
+            &init.subsystem,
             &br::FramebufferCreateInfo::new(
                 &rp,
                 &[msaa_buffer.as_transparent_ref()],
@@ -527,7 +509,7 @@ impl SpriteListToggleButtonView {
         )
         .unwrap();
         let rp_direct = br::RenderPassObject::new(
-            device,
+            &init.subsystem,
             &br::RenderPassCreateInfo2::new(
                 &[br::AttachmentDescription2::new(br::vk::VK_FORMAT_R8_UNORM)
                     .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store)
@@ -557,39 +539,37 @@ impl SpriteListToggleButtonView {
         )
         .unwrap();
         let fb_direct = br::FramebufferObject::new(
-            device,
+            &init.subsystem,
             &br::FramebufferCreateInfo::new(
                 &rp_direct,
-                &[atlas.resource.as_transparent_ref()],
-                atlas.size,
-                atlas.size,
+                &[init.atlas.resource().as_transparent_ref()],
+                init.atlas.size(),
+                init.atlas.size(),
             ),
         )
         .unwrap();
 
-        let vsh = br::ShaderModuleObject::new(
-            device,
-            &br::ShaderModuleCreateInfo::new(&load_spv_file("resources/notrans.vert").unwrap()),
+        let vsh = init
+            .subsystem
+            .load_shader("resources/notrans.vert")
+            .unwrap();
+        let fsh = init
+            .subsystem
+            .load_shader("resources/fillcolor_r.frag")
+            .unwrap();
+        let vsh_circle = init
+            .subsystem
+            .load_shader("resources/filltri.vert")
+            .unwrap();
+        let fsh_circle = init
+            .subsystem
+            .load_shader("resources/aa_circle.frag")
+            .unwrap();
+        let pl = br::PipelineLayoutObject::new(
+            &init.subsystem,
+            &br::PipelineLayoutCreateInfo::new(&[], &[]),
         )
         .unwrap();
-        let fsh = br::ShaderModuleObject::new(
-            device,
-            &br::ShaderModuleCreateInfo::new(&load_spv_file("resources/fillcolor_r.frag").unwrap()),
-        )
-        .unwrap();
-        let vsh_circle = br::ShaderModuleObject::new(
-            device,
-            &br::ShaderModuleCreateInfo::new(&load_spv_file("resources/filltri.vert").unwrap()),
-        )
-        .unwrap();
-        let fsh_circle = br::ShaderModuleObject::new(
-            device,
-            &br::ShaderModuleCreateInfo::new(&load_spv_file("resources/aa_circle.frag").unwrap()),
-        )
-        .unwrap();
-        let pl =
-            br::PipelineLayoutObject::new(device, &br::PipelineLayoutCreateInfo::new(&[], &[]))
-                .unwrap();
         #[derive(br::SpecializationConstants)]
         struct FragmentShaderParams {
             #[constant_id = 0]
@@ -600,7 +580,8 @@ impl SpriteListToggleButtonView {
             #[constant_id = 0]
             pub softness: f32,
         }
-        let [pipeline, pipeline_circle] = device
+        let [pipeline, pipeline_circle] = init
+            .subsystem
             .new_graphics_pipeline_array(
                 &[
                     br::GraphicsPipelineCreateInfo::new(
@@ -665,18 +646,21 @@ impl SpriteListToggleButtonView {
             .unwrap();
 
         let mut cp = br::CommandPoolObject::new(
-            device,
-            &br::CommandPoolCreateInfo::new(graphics_queue_family_index).transient(),
+            &init.subsystem,
+            &br::CommandPoolCreateInfo::new(init.subsystem.graphics_queue_family_index).transient(),
         )
         .unwrap();
         let [mut cb] = br::CommandBufferObject::alloc_array(
-            device,
+            &init.subsystem,
             &br::CommandBufferFixedCountAllocateInfo::new(&mut cp, br::CommandBufferLevel::Primary),
         )
         .unwrap();
         unsafe {
-            cb.begin(&br::CommandBufferBeginInfo::new().onetime_submit(), device)
-                .unwrap()
+            cb.begin(
+                &br::CommandBufferBeginInfo::new().onetime_submit(),
+                &init.subsystem,
+            )
+            .unwrap()
         }
         .begin_render_pass2(
             &br::RenderPassBeginInfo::new(
@@ -711,8 +695,9 @@ impl SpriteListToggleButtonView {
         .pipeline_barrier_2(&br::DependencyInfo::new(
             &[],
             &[],
-            &[atlas
-                .resource
+            &[init
+                .atlas
+                .resource()
                 .image()
                 .memory_barrier2(br::ImageSubresourceRange::new(
                     br::AspectMask::COLOR,
@@ -724,7 +709,7 @@ impl SpriteListToggleButtonView {
         .resolve_image(
             msaa_buffer.image(),
             br::ImageLayout::TransferSrcOpt,
-            atlas.resource.image(),
+            init.atlas.resource().image(),
             br::ImageLayout::TransferDestOpt,
             &[br::vk::VkImageResolve {
                 srcSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
@@ -737,8 +722,9 @@ impl SpriteListToggleButtonView {
         .pipeline_barrier_2(&br::DependencyInfo::new(
             &[],
             &[],
-            &[atlas
-                .resource
+            &[init
+                .atlas
+                .resource()
                 .image()
                 .memory_barrier2(br::ImageSubresourceRange::new(
                     br::AspectMask::COLOR,
@@ -760,50 +746,45 @@ impl SpriteListToggleButtonView {
         .end()
         .unwrap();
 
-        graphics_queue
-            .submit2(
-                &[br::SubmitInfo2::new(
-                    &[],
-                    &[br::CommandBufferSubmitInfo::new(&cb)],
-                    &[],
-                )],
-                None,
-            )
+        init.subsystem
+            .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&cb)])
             .unwrap();
-        graphics_queue.wait().unwrap();
 
-        let ct_root = composite_tree.alloc();
+        let ct_root = init.composite_tree.alloc();
         {
-            let ct_root = composite_tree.get_mut(ct_root);
+            let ct_root = init.composite_tree.get_mut(ct_root);
 
-            ct_root.size = [Self::SIZE * bitmap_scale, Self::SIZE * bitmap_scale];
-            ct_root.offset = [0.0, 8.0 * bitmap_scale];
+            ct_root.size = [
+                Self::SIZE * init.ui_scale_factor,
+                Self::SIZE * init.ui_scale_factor,
+            ];
+            ct_root.offset = [0.0, 8.0 * init.ui_scale_factor];
             ct_root.relative_offset_adjustment = [1.0, 0.0];
 
-            ct_root.instance_slot_index = Some(composite_instance_manager.alloc());
+            ct_root.instance_slot_index = Some(init.composite_instance_manager.alloc());
             ct_root.texatlas_rect = circle_atlas_rect.clone();
             ct_root.composite_mode = CompositeMode::ColorTint([1.0, 1.0, 1.0, 0.0]);
         }
-        let ct_icon = composite_tree.alloc();
-        composite_tree.add_child(ct_root, ct_icon);
+        let ct_icon = init.composite_tree.alloc();
+        init.composite_tree.add_child(ct_root, ct_icon);
         {
-            let ct_icon = composite_tree.get_mut(ct_icon);
+            let ct_icon = init.composite_tree.get_mut(ct_icon);
 
             ct_icon.offset = [
-                -Self::ICON_SIZE * 0.5 * bitmap_scale,
-                -Self::ICON_SIZE * 0.5 * bitmap_scale,
+                -Self::ICON_SIZE * 0.5 * init.ui_scale_factor,
+                -Self::ICON_SIZE * 0.5 * init.ui_scale_factor,
             ];
             ct_icon.relative_offset_adjustment = [0.5, 0.5];
             ct_icon.size = [
-                Self::ICON_SIZE * bitmap_scale,
-                Self::ICON_SIZE * bitmap_scale,
+                Self::ICON_SIZE * init.ui_scale_factor,
+                Self::ICON_SIZE * init.ui_scale_factor,
             ];
-            ct_icon.instance_slot_index = Some(composite_instance_manager.alloc());
+            ct_icon.instance_slot_index = Some(init.composite_instance_manager.alloc());
             ct_icon.texatlas_rect = icon_atlas_rect.clone();
             ct_icon.composite_mode = CompositeMode::ColorTint([0.9, 0.9, 0.9, 1.0]);
         }
 
-        let ht_root = ht.create(HitTestTreeData {
+        let ht_root = init.ht.create(HitTestTreeData {
             width: Self::SIZE,
             height: Self::SIZE,
             top: 8.0,
@@ -817,7 +798,7 @@ impl SpriteListToggleButtonView {
             ct_root,
             ct_icon,
             ht_root,
-            ui_scale_factor: Cell::new(bitmap_scale),
+            ui_scale_factor: Cell::new(init.ui_scale_factor),
             hovering: Cell::new(false),
             pressing: Cell::new(false),
         }
@@ -826,7 +807,7 @@ impl SpriteListToggleButtonView {
     pub fn mount(
         &self,
         composite_tree: &mut CompositeTree,
-        ct_parent: usize,
+        ct_parent: CompositeTreeRef,
         ht: &mut HitTestTreeManager<AppUpdateContext>,
         ht_parent: HitTestTreeRef,
     ) {
@@ -911,7 +892,7 @@ pub struct SpriteListPaneView {
     pub frame_image_atlas_rect: AtlasRect,
     pub title_atlas_rect: AtlasRect,
     pub title_blurred_atlas_rect: AtlasRect,
-    ct_root: usize,
+    ct_root: CompositeTreeRef,
     ht_frame: HitTestTreeRef,
     ht_resize_area: HitTestTreeRef,
     width: Cell<f32>,
@@ -924,34 +905,25 @@ impl SpriteListPaneView {
     const INIT_WIDTH: f32 = 320.0;
     const RESIZE_AREA_WIDTH: f32 = 8.0;
 
-    pub fn new(
-        device: &br::DeviceObject<&br::InstanceObject>,
-        adapter_memory_info: &br::MemoryProperties,
-        graphics_queue_family_index: u32,
-        graphics_queue: &mut impl br::QueueMut,
-        atlas: &mut CompositionSurfaceAtlas,
-        bitmap_scale: u32,
-        header_height: f32,
-        fonts: &mut FontSet,
-        composite_tree: &mut CompositeTree,
-        composite_instance_manager: &mut CompositeInstanceManager,
-        ht: &mut HitTestTreeManager<AppUpdateContext>,
-    ) -> Self {
-        let render_size_px = ((Self::CORNER_RADIUS * 2.0 + 1.0) * bitmap_scale as f32) as u32;
-        let frame_image_atlas_rect = atlas.alloc(render_size_px, render_size_px);
+    pub fn new(init: &mut ViewInitContext, header_height: f32) -> Self {
+        let render_size_px = ((Self::CORNER_RADIUS * 2.0 + 1.0) * init.ui_scale_factor) as u32;
+        let frame_image_atlas_rect = init.atlas.alloc(render_size_px, render_size_px);
 
-        let title_blur_pixels = Self::BLUR_AMOUNT_ONEDIR * bitmap_scale;
-        let title_layout = TextLayout::build_simple("Sprites", &mut fonts.ui_default);
-        let title_atlas_rect = atlas.alloc(title_layout.width_px(), title_layout.height_px());
-        let title_blurred_atlas_rect = atlas.alloc(
+        let title_blur_pixels =
+            (Self::BLUR_AMOUNT_ONEDIR as f32 * init.ui_scale_factor).ceil() as _;
+        let title_layout = TextLayout::build_simple("Sprites", &mut init.fonts.ui_default);
+        let title_atlas_rect = init
+            .atlas
+            .alloc(title_layout.width_px(), title_layout.height_px());
+        let title_blurred_atlas_rect = init.atlas.alloc(
             title_layout.width_px() + (title_blur_pixels * 2 + 1),
             title_layout.height_px() + (title_blur_pixels * 2 + 1),
         );
         let (title_stg_image, _title_stg_image_mem) =
-            title_layout.build_stg_image(device, adapter_memory_info);
+            title_layout.build_stg_image(&init.subsystem, &init.subsystem.adapter_memory_info);
 
         let mut title_blurred_work_image = br::ImageObject::new(
-            device,
+            &init.subsystem,
             &br::ImageCreateInfo::new(
                 title_blurred_atlas_rect.extent(),
                 br::vk::VK_FORMAT_R8_UNORM,
@@ -961,12 +933,16 @@ impl SpriteListPaneView {
         )
         .unwrap();
         let mreq = title_blurred_work_image.requirements();
-        let memindex = adapter_memory_info
+        let memindex = init
+            .subsystem
+            .adapter_memory_info
             .find_device_local_index(mreq.memoryTypeBits)
             .expect("no suitable memory index");
-        let title_blurred_work_image_mem =
-            br::DeviceMemoryObject::new(device, &br::MemoryAllocateInfo::new(mreq.size, memindex))
-                .unwrap();
+        let title_blurred_work_image_mem = br::DeviceMemoryObject::new(
+            &init.subsystem,
+            &br::MemoryAllocateInfo::new(mreq.size, memindex),
+        )
+        .unwrap();
         title_blurred_work_image
             .bind(&title_blurred_work_image_mem, 0)
             .unwrap();
@@ -978,7 +954,7 @@ impl SpriteListPaneView {
         .unwrap();
 
         let render_pass = br::RenderPassObject::new(
-            device,
+            &init.subsystem,
             &br::RenderPassCreateInfo2::new(
                 &[br::AttachmentDescription2::new(br::vk::VK_FORMAT_R8_UNORM)
                     .layout_transition(
@@ -1008,17 +984,17 @@ impl SpriteListPaneView {
         )
         .unwrap();
         let framebuffer = br::FramebufferObject::new(
-            device,
+            &init.subsystem,
             &br::FramebufferCreateInfo::new(
                 &render_pass,
-                &[atlas.resource.as_transparent_ref()],
-                atlas.size,
-                atlas.size,
+                &[init.atlas.resource().as_transparent_ref()],
+                init.atlas.size(),
+                init.atlas.size(),
             ),
         )
         .unwrap();
         let title_blurred_work_framebuffer = br::FramebufferObject::new(
-            device,
+            &init.subsystem,
             &br::FramebufferCreateInfo::new(
                 &render_pass,
                 &[title_blurred_work_image_view.as_transparent_ref()],
@@ -1028,32 +1004,22 @@ impl SpriteListPaneView {
         )
         .unwrap();
 
-        let vsh = br::ShaderModuleObject::new(
-            device,
-            &br::ShaderModuleCreateInfo::new(&load_spv_file("resources/filltri.vert").unwrap()),
-        )
-        .unwrap();
-        let fsh = br::ShaderModuleObject::new(
-            device,
-            &br::ShaderModuleCreateInfo::new(
-                &load_spv_file("resources/rounded_rect.frag").unwrap(),
-            ),
-        )
-        .unwrap();
-        let vsh_blur = br::ShaderModuleObject::new(
-            device,
-            &br::ShaderModuleCreateInfo::new(
-                &load_spv_file("resources/filltri_uvmod.vert").unwrap(),
-            ),
-        )
-        .unwrap();
-        let fsh_blur = br::ShaderModuleObject::new(
-            device,
-            &br::ShaderModuleCreateInfo::new(
-                &load_spv_file("resources/blit_axis_convolved.frag").unwrap(),
-            ),
-        )
-        .unwrap();
+        let vsh = init
+            .subsystem
+            .load_shader("resources/filltri.vert")
+            .unwrap();
+        let fsh = init
+            .subsystem
+            .load_shader("resources/rounded_rect.frag")
+            .unwrap();
+        let vsh_blur = init
+            .subsystem
+            .load_shader("resources/filltri_uvmod.vert")
+            .unwrap();
+        let fsh_blur = init
+            .subsystem
+            .load_shader("resources/blit_axis_convolved.frag")
+            .unwrap();
         #[derive(br::SpecializationConstants)]
         struct ConvolutionFragmentShaderParams {
             #[constant_id = 0]
@@ -1061,15 +1027,15 @@ impl SpriteListPaneView {
         }
 
         let dsl_tex1 = br::DescriptorSetLayoutObject::new(
-            device,
+            &init.subsystem,
             &br::DescriptorSetLayoutCreateInfo::new(&[
                 br::DescriptorType::CombinedImageSampler.make_binding(0, 1)
             ]),
         )
         .unwrap();
-        let smp = br::SamplerObject::new(device, &br::SamplerCreateInfo::new()).unwrap();
+        let smp = br::SamplerObject::new(&init.subsystem, &br::SamplerCreateInfo::new()).unwrap();
         let mut dp = br::DescriptorPoolObject::new(
-            device,
+            &init.subsystem,
             &br::DescriptorPoolCreateInfo::new(
                 2,
                 &[br::DescriptorType::CombinedImageSampler.make_size(2)],
@@ -1079,13 +1045,13 @@ impl SpriteListPaneView {
         let [ds_title, ds_title2] = dp
             .alloc_array(&[dsl_tex1.as_transparent_ref(), dsl_tex1.as_transparent_ref()])
             .unwrap();
-        device.update_descriptor_sets(
+        init.subsystem.update_descriptor_sets(
             &[
                 ds_title
                     .binding_at(0)
                     .write(br::DescriptorContents::CombinedImageSampler(vec![
                         br::DescriptorImageInfo::new(
-                            &atlas.resource.as_transparent_ref(),
+                            &init.atlas.resource().as_transparent_ref(),
                             br::ImageLayout::ShaderReadOnlyOpt,
                         )
                         .with_sampler(&smp),
@@ -1103,11 +1069,13 @@ impl SpriteListPaneView {
             &[],
         );
 
-        let pipeline_layout =
-            br::PipelineLayoutObject::new(device, &br::PipelineLayoutCreateInfo::new(&[], &[]))
-                .unwrap();
+        let pipeline_layout = br::PipelineLayoutObject::new(
+            &init.subsystem,
+            &br::PipelineLayoutCreateInfo::new(&[], &[]),
+        )
+        .unwrap();
         let blur_pipeline_layout = br::PipelineLayoutObject::new(
-            device,
+            &init.subsystem,
             &br::PipelineLayoutCreateInfo::new(
                 &[dsl_tex1.as_transparent_ref()],
                 &[
@@ -1128,7 +1096,8 @@ impl SpriteListPaneView {
             ),
         )
         .unwrap();
-        let [pipeline, pipeline_blur1, pipeline_blur] = device
+        let [pipeline, pipeline_blur1, pipeline_blur] = init
+            .subsystem
             .new_graphics_pipeline_array(
                 &[
                     br::GraphicsPipelineCreateInfo::new(
@@ -1211,14 +1180,14 @@ impl SpriteListPaneView {
         let mut fsh_h_params = vec![0.0f32; title_blur_pixels as usize + 6];
         let mut fsh_v_params = vec![0.0f32; title_blur_pixels as usize + 6];
         // uv_limit
-        fsh_h_params[0] = title_atlas_rect.left as f32 / atlas.size as f32;
-        fsh_h_params[1] = title_atlas_rect.top as f32 / atlas.size as f32;
-        fsh_h_params[2] = title_atlas_rect.right as f32 / atlas.size as f32;
-        fsh_h_params[3] = title_atlas_rect.bottom as f32 / atlas.size as f32;
+        fsh_h_params[0] = init.atlas.uv_from_pixels(title_atlas_rect.left as _);
+        fsh_h_params[1] = init.atlas.uv_from_pixels(title_atlas_rect.top as _);
+        fsh_h_params[2] = init.atlas.uv_from_pixels(title_atlas_rect.right as _);
+        fsh_h_params[3] = init.atlas.uv_from_pixels(title_atlas_rect.bottom as _);
         fsh_v_params[2] = 1.0;
         fsh_v_params[3] = 1.0;
         // uv_step
-        fsh_h_params[4] = 1.0 / atlas.size as f32;
+        fsh_h_params[4] = 1.0 / init.atlas.size() as f32;
         fsh_v_params[5] = 1.0 / title_blurred_atlas_rect.height() as f32;
         // factors
         let mut t = 0.0;
@@ -1235,17 +1204,17 @@ impl SpriteListPaneView {
         }
 
         let mut cp = br::CommandPoolObject::new(
-            device,
-            &br::CommandPoolCreateInfo::new(graphics_queue_family_index).transient(),
+            &init.subsystem,
+            &br::CommandPoolCreateInfo::new(init.subsystem.graphics_queue_family_index).transient(),
         )
         .unwrap();
         let [mut cb] = br::CommandBufferObject::alloc_array(
-            device,
+            &init.subsystem,
             &br::CommandBufferFixedCountAllocateInfo::new(&mut cp, br::CommandBufferLevel::Primary),
         )
         .unwrap();
         unsafe {
-            cb.begin(&br::CommandBufferBeginInfo::new(), device)
+            cb.begin(&br::CommandBufferBeginInfo::new(), &init.subsystem)
                 .unwrap()
         }
         .pipeline_barrier_2(&br::DependencyInfo::new(
@@ -1264,8 +1233,8 @@ impl SpriteListPaneView {
                         br::AccessFlags2::TRANSFER.read,
                     )
                     .transit_to(br::ImageLayout::TransferSrcOpt.from_undefined()),
-                atlas
-                    .resource
+                init.atlas
+                    .resource()
                     .image()
                     .memory_barrier2(br::ImageSubresourceRange::new(
                         br::AspectMask::COLOR,
@@ -1278,7 +1247,7 @@ impl SpriteListPaneView {
         .copy_image(
             &title_stg_image,
             br::ImageLayout::TransferSrcOpt,
-            atlas.resource.image(),
+            init.atlas.resource().image(),
             br::ImageLayout::TransferDestOpt,
             &[br::vk::VkImageCopy {
                 srcSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
@@ -1291,8 +1260,9 @@ impl SpriteListPaneView {
         .pipeline_barrier_2(&br::DependencyInfo::new(
             &[],
             &[],
-            &[atlas
-                .resource
+            &[init
+                .atlas
+                .resource()
                 .image()
                 .memory_barrier2(br::ImageSubresourceRange::new(
                     br::AspectMask::COLOR,
@@ -1347,11 +1317,14 @@ impl SpriteListPaneView {
             br::vk::VK_SHADER_STAGE_VERTEX_BIT,
             0,
             &[
-                ((title_atlas_rect.width() + title_blur_pixels * 2 + 1) as f32 / atlas.size as f32),
-                ((title_atlas_rect.height() + title_blur_pixels * 2 + 1) as f32
-                    / atlas.size as f32),
-                ((title_atlas_rect.left as f32 - title_blur_pixels as f32) / atlas.size as f32),
-                ((title_atlas_rect.top as f32 - title_blur_pixels as f32) / atlas.size as f32),
+                init.atlas
+                    .uv_from_pixels((title_atlas_rect.width() + title_blur_pixels * 2 + 1) as _),
+                init.atlas
+                    .uv_from_pixels((title_atlas_rect.height() + title_blur_pixels * 2 + 1) as _),
+                init.atlas
+                    .uv_from_pixels(title_atlas_rect.left as f32 - title_blur_pixels as f32),
+                init.atlas
+                    .uv_from_pixels(title_atlas_rect.top as f32 - title_blur_pixels as f32),
             ],
         )
         .push_constant_slice(
@@ -1396,50 +1369,42 @@ impl SpriteListPaneView {
         .end()
         .unwrap();
 
-        graphics_queue
-            .submit2(
-                &[br::SubmitInfo2::new(
-                    &[],
-                    &[br::CommandBufferSubmitInfo::new(&cb)],
-                    &[],
-                )],
-                None,
-            )
+        init.subsystem
+            .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&cb)])
             .unwrap();
-        graphics_queue.wait().unwrap();
 
-        let ct_root = composite_tree.alloc();
+        let ct_root = init.composite_tree.alloc();
         {
-            let ct_root = composite_tree.get_mut(ct_root);
+            let ct_root = init.composite_tree.get_mut(ct_root);
 
-            ct_root.instance_slot_index = Some(composite_instance_manager.alloc());
+            ct_root.instance_slot_index = Some(init.composite_instance_manager.alloc());
             ct_root.offset = [
-                Self::FLOATING_MARGIN * bitmap_scale as f32,
-                header_height * bitmap_scale as f32,
+                Self::FLOATING_MARGIN * init.ui_scale_factor,
+                header_height * init.ui_scale_factor,
             ];
             ct_root.size = [
-                Self::INIT_WIDTH * bitmap_scale as f32,
-                -(header_height + Self::FLOATING_MARGIN) * bitmap_scale as f32,
+                Self::INIT_WIDTH * init.ui_scale_factor,
+                -(header_height + Self::FLOATING_MARGIN) * init.ui_scale_factor,
             ];
             ct_root.relative_size_adjustment = [0.0, 1.0];
             ct_root.texatlas_rect = frame_image_atlas_rect.clone();
             ct_root.slice_borders = [
-                Self::CORNER_RADIUS * bitmap_scale as f32,
-                Self::CORNER_RADIUS * bitmap_scale as f32,
-                Self::CORNER_RADIUS * bitmap_scale as f32,
-                Self::CORNER_RADIUS * bitmap_scale as f32,
+                Self::CORNER_RADIUS * init.ui_scale_factor,
+                Self::CORNER_RADIUS * init.ui_scale_factor,
+                Self::CORNER_RADIUS * init.ui_scale_factor,
+                Self::CORNER_RADIUS * init.ui_scale_factor,
             ];
             ct_root.composite_mode = CompositeMode::ColorTint([1.0, 1.0, 1.0, 0.5]);
         }
-        let ct_title_blurred = composite_tree.alloc();
-        composite_tree.add_child(ct_root, ct_title_blurred);
+        let ct_title_blurred = init.composite_tree.alloc();
+        init.composite_tree.add_child(ct_root, ct_title_blurred);
         {
-            let ct_title_blurred = composite_tree.get_mut(ct_title_blurred);
+            let ct_title_blurred = init.composite_tree.get_mut(ct_title_blurred);
 
-            ct_title_blurred.instance_slot_index = Some(composite_instance_manager.alloc());
+            ct_title_blurred.instance_slot_index = Some(init.composite_instance_manager.alloc());
             ct_title_blurred.offset = [
                 -(title_blurred_atlas_rect.width() as f32 * 0.5),
-                (8.0 - Self::BLUR_AMOUNT_ONEDIR as f32) * bitmap_scale as f32,
+                (8.0 - Self::BLUR_AMOUNT_ONEDIR as f32) * init.ui_scale_factor,
             ];
             ct_title_blurred.relative_offset_adjustment = [0.5, 0.0];
             ct_title_blurred.size = [
@@ -1449,15 +1414,15 @@ impl SpriteListPaneView {
             ct_title_blurred.texatlas_rect = title_blurred_atlas_rect.clone();
             ct_title_blurred.composite_mode = CompositeMode::ColorTint([0.9, 0.9, 0.9, 1.0]);
         }
-        let ct_title = composite_tree.alloc();
-        composite_tree.add_child(ct_root, ct_title);
+        let ct_title = init.composite_tree.alloc();
+        init.composite_tree.add_child(ct_root, ct_title);
         {
-            let ct_title = composite_tree.get_mut(ct_title);
+            let ct_title = init.composite_tree.get_mut(ct_title);
 
-            ct_title.instance_slot_index = Some(composite_instance_manager.alloc());
+            ct_title.instance_slot_index = Some(init.composite_instance_manager.alloc());
             ct_title.offset = [
                 -(title_atlas_rect.width() as f32 * 0.5),
-                8.0 * bitmap_scale as f32,
+                8.0 * init.ui_scale_factor,
             ];
             ct_title.relative_offset_adjustment = [0.5, 0.0];
             ct_title.size = [
@@ -1468,7 +1433,7 @@ impl SpriteListPaneView {
             ct_title.composite_mode = CompositeMode::ColorTint([0.1, 0.1, 0.1, 1.0]);
         }
 
-        let ht_frame = ht.create(HitTestTreeData {
+        let ht_frame = init.ht.create(HitTestTreeData {
             top: header_height,
             left: Self::FLOATING_MARGIN,
             width: Self::INIT_WIDTH,
@@ -1476,14 +1441,14 @@ impl SpriteListPaneView {
             height_adjustment_factor: 1.0,
             ..Default::default()
         });
-        let ht_resize_area = ht.create(HitTestTreeData {
+        let ht_resize_area = init.ht.create(HitTestTreeData {
             left: -Self::RESIZE_AREA_WIDTH * 0.5,
             left_adjustment_factor: 1.0,
             width: Self::RESIZE_AREA_WIDTH,
             height_adjustment_factor: 1.0,
             ..Default::default()
         });
-        ht.add_child(ht_frame, ht_resize_area);
+        init.ht.add_child(ht_frame, ht_resize_area);
 
         Self {
             frame_image_atlas_rect,
@@ -1493,14 +1458,14 @@ impl SpriteListPaneView {
             ht_frame,
             ht_resize_area,
             width: Cell::new(Self::INIT_WIDTH),
-            ui_scale_factor: Cell::new(bitmap_scale as _),
+            ui_scale_factor: Cell::new(init.ui_scale_factor as _),
         }
     }
 
     pub fn mount(
         &self,
         ct: &mut CompositeTree,
-        ct_parent: usize,
+        ct_parent: CompositeTreeRef,
         ht: &mut HitTestTreeManager<AppUpdateContext>,
         ht_parent: HitTestTreeRef,
     ) {
@@ -1693,46 +1658,12 @@ pub struct SpriteListPanePresenter {
     _ht_action_handler: Rc<SpriteListPaneActionHandler>,
 }
 impl SpriteListPanePresenter {
-    pub fn new(
-        device: &br::DeviceObject<&br::InstanceObject>,
-        adapter_memory_info: &br::MemoryProperties,
-        graphics_queue_family_index: u32,
-        graphics_queue: &mut impl br::QueueMut,
-        atlas: &mut CompositionSurfaceAtlas,
-        bitmap_scale: u32,
-        header_height: f32,
-        fonts: &mut FontSet,
-        composite_tree: &mut CompositeTree,
-        composite_instance_manager: &mut CompositeInstanceManager,
-        ht: &mut HitTestTreeManager<AppUpdateContext>,
-    ) -> Self {
-        let view = Rc::new(SpriteListPaneView::new(
-            device,
-            adapter_memory_info,
-            graphics_queue_family_index,
-            graphics_queue,
-            atlas,
-            bitmap_scale,
-            header_height,
-            fonts,
-            composite_tree,
-            composite_instance_manager,
-            ht,
-        ));
-        let toggle_button_view = Rc::new(SpriteListToggleButtonView::new(
-            device,
-            adapter_memory_info,
-            graphics_queue_family_index,
-            graphics_queue,
-            atlas,
-            bitmap_scale as _,
-            composite_tree,
-            composite_instance_manager,
-            ht,
-        ));
+    pub fn new(init: &mut ViewInitContext, header_height: f32) -> Self {
+        let view = Rc::new(SpriteListPaneView::new(init, header_height));
+        let toggle_button_view = Rc::new(SpriteListToggleButtonView::new(init));
 
-        toggle_button_view.mount(composite_tree, view.ct_root, ht, view.ht_frame);
-        toggle_button_view.place_inner(composite_tree, ht);
+        toggle_button_view.mount(init.composite_tree, view.ct_root, init.ht, view.ht_frame);
+        toggle_button_view.place_inner(init.composite_tree, init.ht);
 
         let ht_action_handler = Rc::new(SpriteListPaneActionHandler {
             view: view.clone(),
@@ -1741,10 +1672,11 @@ impl SpriteListPanePresenter {
             resize_state: Cell::new(None),
             shown: Cell::new(true),
         });
-        ht.get_data_mut(view.ht_resize_area).action_handler =
+        init.ht.get_data_mut(view.ht_resize_area).action_handler =
             Some(Rc::downgrade(&ht_action_handler) as _);
-        ht.get_data_mut(toggle_button_view.ht_root).action_handler =
-            Some(Rc::downgrade(&ht_action_handler) as _);
+        init.ht
+            .get_data_mut(toggle_button_view.ht_root)
+            .action_handler = Some(Rc::downgrade(&ht_action_handler) as _);
 
         Self {
             view,
@@ -1756,690 +1688,11 @@ impl SpriteListPanePresenter {
     pub fn mount(
         &self,
         ct: &mut CompositeTree,
-        ct_parent: usize,
+        ct_parent: CompositeTreeRef,
         ht: &mut HitTestTreeManager<AppUpdateContext>,
         ht_parent: HitTestTreeRef,
     ) {
         self.view.mount(ct, ct_parent, ht, ht_parent);
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct AtlasRect {
-    pub left: u32,
-    pub top: u32,
-    pub right: u32,
-    pub bottom: u32,
-}
-impl AtlasRect {
-    pub const fn width(&self) -> u32 {
-        self.right.abs_diff(self.left)
-    }
-
-    pub const fn height(&self) -> u32 {
-        self.bottom.abs_diff(self.top)
-    }
-
-    pub const fn lt_offset(&self) -> br::Offset2D {
-        br::Offset2D {
-            x: self.left as _,
-            y: self.top as _,
-        }
-    }
-
-    pub const fn extent(&self) -> br::Extent2D {
-        br::Extent2D {
-            width: self.width(),
-            height: self.height(),
-        }
-    }
-
-    pub const fn vk_rect(&self) -> br::Rect2D {
-        self.extent().into_rect(self.lt_offset())
-    }
-}
-
-pub struct CompositionSurfaceAtlas<'d> {
-    resource: br::ImageViewObject<br::ImageObject<&'d br::DeviceObject<&'d br::InstanceObject>>>,
-    memory: br::DeviceMemoryObject<&'d br::DeviceObject<&'d br::InstanceObject>>,
-    residency_bitmap: Vec<u8>,
-    size: u32,
-    used_left: u32,
-    used_top: u32,
-    current_line_top: u32,
-}
-impl<'d> CompositionSurfaceAtlas<'d> {
-    // TODO: できればPhysical Deviceからとれる値をつかったほうがいい
-    // 1024なら大抵は問題ないとは思うが...
-    const GRANULARITY: u32 = 1024;
-
-    pub fn new(
-        device: &'d br::DeviceObject<&'d br::InstanceObject>,
-        queue: &mut br::QueueObject<&'d br::DeviceObject<&'d br::InstanceObject>>,
-        memory_properties: &br::MemoryProperties,
-        size: u32,
-        pixel_format: br::vk::VkFormat,
-    ) -> Self {
-        let bpp = match pixel_format {
-            br::vk::VK_FORMAT_R8_UNORM => 1,
-            _ => unimplemented!("bpp"),
-        };
-
-        let image = br::ImageObject::new(
-            device,
-            &br::ImageCreateInfo::new(
-                br::vk::VkExtent2D {
-                    width: size,
-                    height: size,
-                },
-                pixel_format,
-            )
-            .as_color_attachment()
-            .sampled()
-            .transfer_dest()
-            .flags(br::ImageFlags::SPARSE_BINDING | br::ImageFlags::SPARSE_RESIDENCY),
-        )
-        .unwrap();
-        let resource = br::ImageViewBuilder::new(
-            image,
-            br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
-        )
-        .create()
-        .unwrap();
-        assert!(size % Self::GRANULARITY == 0);
-        let bitmap_div = size / Self::GRANULARITY;
-        let mut residency_bitmap = vec![0; (bitmap_div * bitmap_div) as usize];
-        println!(
-            "ComositionSurfaceAtlas: managing {size}x{size} atlas dividing with {} pixels ({} blocks)",
-            Self::GRANULARITY,
-            bitmap_div * bitmap_div
-        );
-
-        let image_memory_requirements = resource.image().sparse_requirements_alloc();
-        for x in image_memory_requirements.iter() {
-            println!("image memory requirements: {x:?}");
-        }
-
-        let image_memory_requirements = resource.image().requirements();
-        println!("image memory requirements: {image_memory_requirements:?}");
-
-        let memory_index = memory_properties
-            .find_device_local_index(image_memory_requirements.memoryTypeBits)
-            .expect("no suitable memory for surface atlas");
-        let memory = br::DeviceMemoryObject::new(
-            device,
-            &br::MemoryAllocateInfo::new(
-                (Self::GRANULARITY * Self::GRANULARITY * bpp) as _,
-                memory_index,
-            ),
-        )
-        .expect("Failed to allocate first memory block");
-
-        unsafe {
-            queue
-                .bind_sparse_raw(
-                    &[br::vk::VkBindSparseInfo {
-                        sType: br::vk::VkBindSparseInfo::TYPE,
-                        pNext: core::ptr::null(),
-                        waitSemaphoreCount: 0,
-                        pWaitSemaphores: core::ptr::null(),
-                        signalSemaphoreCount: 0,
-                        pSignalSemaphores: core::ptr::null(),
-                        bufferBindCount: 0,
-                        pBufferBinds: core::ptr::null(),
-                        imageBindCount: 1,
-                        pImageBinds: [br::vk::VkSparseImageMemoryBindInfo {
-                            image: resource.image().native_ptr(),
-                            bindCount: 1,
-                            pBinds: [br::vk::VkSparseImageMemoryBind {
-                                subresource: br::ImageSubresource::new(br::AspectMask::COLOR, 0, 0),
-                                offset: br::Offset3D::ZERO,
-                                extent: br::Extent2D::spread1(Self::GRANULARITY).with_depth(1),
-                                memory: memory.native_ptr(),
-                                memoryOffset: 0,
-                                flags: 0,
-                            }]
-                            .as_ptr(),
-                        }]
-                        .as_ptr(),
-                        imageOpaqueBindCount: 0,
-                        pImageOpaqueBinds: core::ptr::null(),
-                    }],
-                    None,
-                )
-                .expect("Failed to bind first memory block");
-        }
-        residency_bitmap[0] = 0x01;
-
-        Self {
-            resource,
-            memory,
-            residency_bitmap,
-            size,
-            used_left: 0,
-            used_top: 0,
-            current_line_top: 0,
-        }
-    }
-
-    pub fn alloc(&mut self, required_width: u32, required_height: u32) -> AtlasRect {
-        if self.used_left + required_width > Self::GRANULARITY {
-            // 横が越える
-            // TODO: 本当はこのあたりでタイルを拡張しないといけない
-            self.used_left = 0;
-            self.used_top += self.current_line_top;
-            self.current_line_top = 0;
-
-            if self.used_top > Self::GRANULARITY {
-                todo!("alloc new tile");
-            }
-        }
-
-        let l = self.used_left;
-        self.used_left += required_width;
-        self.current_line_top = self.current_line_top.max(required_height);
-
-        AtlasRect {
-            left: l,
-            top: self.used_top,
-            right: l + required_width,
-            bottom: self.used_top + required_height,
-        }
-    }
-}
-
-#[repr(C)]
-pub struct CompositeInstanceData {
-    pub pos_st: [f32; 4],
-    pub uv_st: [f32; 4],
-    pub slice_borders: [f32; 4],
-    pub tex_size_pixels_composite_mode: [f32; 4],
-    pub color_tint: [f32; 4],
-}
-
-pub enum CompositeMode {
-    DirectSourceOver,
-    ColorTint([f32; 4]),
-}
-impl CompositeMode {
-    pub const fn shader_mode_value(&self) -> f32 {
-        match self {
-            Self::DirectSourceOver => 0.0,
-            Self::ColorTint(_) => 1.0,
-        }
-    }
-}
-
-pub struct CompositeRect {
-    pub instance_slot_index: Option<usize>,
-    pub offset: [f32; 2],
-    pub size: [f32; 2],
-    pub relative_offset_adjustment: [f32; 2],
-    pub relative_size_adjustment: [f32; 2],
-    pub texatlas_rect: AtlasRect,
-    pub slice_borders: [f32; 4],
-    pub composite_mode: CompositeMode,
-    pub dirty: bool,
-    pub parent: Option<usize>,
-    pub children: Vec<usize>,
-}
-
-pub struct CompositeInstanceManager<'d> {
-    buffer: br::BufferObject<&'d br::DeviceObject<&'d br::InstanceObject>>,
-    memory: br::DeviceMemoryObject<&'d br::DeviceObject<&'d br::InstanceObject>>,
-    buffer_stg: br::BufferObject<&'d br::DeviceObject<&'d br::InstanceObject>>,
-    memory_stg: br::DeviceMemoryObject<&'d br::DeviceObject<&'d br::InstanceObject>>,
-    stg_mem_requires_flush: bool,
-    capacity: usize,
-    count: usize,
-    free: BTreeSet<usize>,
-}
-impl<'d> CompositeInstanceManager<'d> {
-    const INIT_CAP: usize = 1024;
-
-    pub fn new(
-        device: &'d br::DeviceObject<&'d br::InstanceObject>,
-        memory_info: &br::MemoryProperties,
-    ) -> Self {
-        let mut buffer = br::BufferObject::new(
-            device,
-            &br::BufferCreateInfo::new(
-                core::mem::size_of::<CompositeInstanceData>() * Self::INIT_CAP,
-                br::BufferUsage::VERTEX_BUFFER.transfer_dest(),
-            ),
-        )
-        .expect("Failed to create composite instance buffer");
-        let buffer_mreq = buffer.requirements();
-        let memory_index = memory_info
-            .find_device_local_index(buffer_mreq.memoryTypeBits)
-            .expect("no suitable memory");
-        let memory = br::DeviceMemoryObject::new(
-            device,
-            &br::MemoryAllocateInfo::new(buffer_mreq.size, memory_index),
-        )
-        .expect("Failed to allocate composite instance data memory");
-        buffer
-            .bind(&memory, 0)
-            .expect("Failed to bind buffer memory");
-
-        let mut buffer_stg = br::BufferObject::new(
-            device,
-            &br::BufferCreateInfo::new(
-                core::mem::size_of::<CompositeInstanceData>() * Self::INIT_CAP,
-                br::BufferUsage::TRANSFER_SRC,
-            ),
-        )
-        .expect("Failed to create composite instance staging buffer");
-        let buffer_mreq = buffer.requirements();
-        let memory_index = memory_info
-            .find_host_visible_index(buffer_mreq.memoryTypeBits)
-            .expect("no suitable memory");
-        let stg_mem_requires_flush = !memory_info.is_coherent(memory_index);
-        let memory_stg = br::DeviceMemoryObject::new(
-            device,
-            &br::MemoryAllocateInfo::new(buffer_mreq.size, memory_index),
-        )
-        .expect("Failed to allocate composite instance data staging memory");
-        buffer_stg
-            .bind(&memory_stg, 0)
-            .expect("Failed to bind staging buffer memory");
-
-        Self {
-            buffer,
-            memory,
-            buffer_stg,
-            memory_stg,
-            stg_mem_requires_flush,
-            capacity: Self::INIT_CAP,
-            count: 0,
-            free: BTreeSet::new(),
-        }
-    }
-
-    pub fn alloc(&mut self) -> usize {
-        if let Some(x) = self.free.pop_first() {
-            return x;
-        }
-
-        self.count += 1;
-        if self.count >= self.capacity {
-            todo!("instance buffer overflow!");
-        }
-
-        self.count - 1
-    }
-
-    pub const fn range_all(&self) -> core::ops::Range<usize> {
-        0..core::mem::size_of::<CompositeInstanceData>() * self.count
-    }
-}
-
-pub struct CompositeTree {
-    rects: Vec<CompositeRect>,
-    unused: BTreeSet<usize>,
-    dirty: bool,
-}
-impl CompositeTree {
-    pub fn new() -> Self {
-        let mut rects = Vec::new();
-        // root is filling rect
-        rects.push(CompositeRect {
-            instance_slot_index: None,
-            offset: [0.0, 0.0],
-            size: [0.0, 0.0],
-            relative_offset_adjustment: [0.0, 0.0],
-            relative_size_adjustment: [1.0, 1.0],
-            texatlas_rect: AtlasRect {
-                left: 0,
-                top: 0,
-                right: 0,
-                bottom: 0,
-            },
-            slice_borders: [0.0, 0.0, 0.0, 0.0],
-            dirty: false,
-            composite_mode: CompositeMode::DirectSourceOver,
-            parent: None,
-            children: Vec::new(),
-        });
-
-        Self {
-            rects,
-            unused: BTreeSet::new(),
-            dirty: false,
-        }
-    }
-
-    pub fn alloc(&mut self) -> usize {
-        if let Some(x) = self.unused.pop_first() {
-            self.rects[x] = CompositeRect {
-                instance_slot_index: None,
-                offset: [0.0; 2],
-                size: [0.0; 2],
-                relative_offset_adjustment: [0.0; 2],
-                relative_size_adjustment: [0.0; 2],
-                texatlas_rect: AtlasRect {
-                    left: 0,
-                    top: 0,
-                    right: 0,
-                    bottom: 0,
-                },
-                slice_borders: [0.0; 4],
-                composite_mode: CompositeMode::DirectSourceOver,
-                dirty: false,
-                parent: None,
-                children: Vec::new(),
-            };
-
-            return x;
-        }
-
-        self.rects.push(CompositeRect {
-            instance_slot_index: None,
-            offset: [0.0; 2],
-            size: [0.0; 2],
-            relative_offset_adjustment: [0.0; 2],
-            relative_size_adjustment: [0.0; 2],
-            texatlas_rect: AtlasRect {
-                left: 0,
-                top: 0,
-                right: 0,
-                bottom: 0,
-            },
-            slice_borders: [0.0; 4],
-            composite_mode: CompositeMode::DirectSourceOver,
-            dirty: false,
-            parent: None,
-            children: Vec::new(),
-        });
-        self.rects.len() - 1
-    }
-
-    pub fn free(&mut self, index: usize) {
-        self.unused.insert(index);
-    }
-
-    pub fn get(&self, index: usize) -> &CompositeRect {
-        &self.rects[index]
-    }
-
-    pub fn get_mut(&mut self, index: usize) -> &mut CompositeRect {
-        &mut self.rects[index]
-    }
-
-    pub fn mark_dirty(&mut self, index: usize) {
-        self.rects[index].dirty = true;
-        self.dirty = true;
-    }
-
-    pub fn take_dirty(&mut self) -> bool {
-        core::mem::replace(&mut self.dirty, false)
-    }
-
-    pub fn add_child(&mut self, parent: usize, child: usize) {
-        if let Some(p) = self.rects[child].parent.replace(parent) {
-            // unlink from old parent
-            self.rects[p].children.retain(|&x| x != child);
-        }
-
-        self.rects[parent].children.push(child);
-        self.dirty = true;
-    }
-
-    pub fn remove_child(&mut self, child: usize) {
-        if let Some(p) = self.rects[child].parent.take() {
-            self.rects[p].children.retain(|&x| x != child);
-            self.dirty = true;
-        }
-    }
-
-    pub unsafe fn sink_all(
-        &mut self,
-        size: br::Extent2D,
-        tex_size: br::Extent2D,
-        mapped_ptr: &br::MappedMemory<'_, impl br::DeviceMemoryMut + ?Sized>,
-    ) {
-        println!("sink all: {}x{}", size.width, size.height);
-        let mut targets = vec![(0, (0.0, 0.0, size.width as f32, size.height as f32))];
-        while !targets.is_empty() {
-            let current = core::mem::replace(&mut targets, Vec::new());
-            for (r, (effective_base_left, effective_base_top, effective_width, effective_height)) in
-                current
-            {
-                let r = &mut self.rects[r];
-                r.dirty = false;
-                let left = effective_base_left
-                    + (effective_width * r.relative_offset_adjustment[0])
-                    + r.offset[0];
-                let top = effective_base_top
-                    + (effective_height * r.relative_offset_adjustment[1])
-                    + r.offset[1];
-                let w = effective_width * r.relative_size_adjustment[0] + r.size[0];
-                let h = effective_height * r.relative_size_adjustment[1] + r.size[1];
-
-                if let Some(instance_slot_index) = r.instance_slot_index {
-                    unsafe {
-                        core::ptr::write(
-                            mapped_ptr.get_mut(
-                                core::mem::size_of::<CompositeInstanceData>() * instance_slot_index,
-                            ),
-                            CompositeInstanceData {
-                                pos_st: [w, h, left, top],
-                                uv_st: [
-                                    (r.texatlas_rect.right as f32 - r.texatlas_rect.left as f32)
-                                        / tex_size.width as f32,
-                                    (r.texatlas_rect.bottom as f32 - r.texatlas_rect.top as f32)
-                                        / tex_size.height as f32,
-                                    r.texatlas_rect.left as f32 / tex_size.width as f32,
-                                    r.texatlas_rect.top as f32 / tex_size.height as f32,
-                                ],
-                                slice_borders: r.slice_borders,
-                                tex_size_pixels_composite_mode: [
-                                    tex_size.width as _,
-                                    tex_size.height as _,
-                                    r.composite_mode.shader_mode_value(),
-                                    0.0,
-                                ],
-                                color_tint: match r.composite_mode {
-                                    CompositeMode::DirectSourceOver => [0.0; 4],
-                                    CompositeMode::ColorTint(t) => t,
-                                },
-                            },
-                        );
-                    }
-                }
-
-                targets.extend(r.children.iter().map(|&x| (x, (left, top, w, h))));
-            }
-        }
-    }
-}
-
-struct GlyphBitmap {
-    pub buf: Box<[u8]>,
-    pub width: usize,
-    pub pitch: usize,
-    pub rows: usize,
-    pub left_offset: isize,
-    pub ascending_pixels: isize,
-}
-impl GlyphBitmap {
-    pub fn copy_from_ft_glyph_slot(slot: &FT_GlyphSlotRec) -> Self {
-        assert!(
-            slot.bitmap.pitch >= 0,
-            "inverted flow is not supported at this point"
-        );
-        let bytes = slot.bitmap.pitch as usize * slot.bitmap.rows as usize;
-        let mut buf = Vec::with_capacity(bytes);
-        unsafe {
-            buf.set_len(bytes);
-        }
-        let mut buf = buf.into_boxed_slice();
-        unsafe {
-            core::ptr::copy_nonoverlapping(slot.bitmap.buffer, buf.as_mut_ptr(), bytes);
-        }
-
-        Self {
-            buf,
-            width: slot.bitmap.width as _,
-            pitch: slot.bitmap.pitch as _,
-            rows: slot.bitmap.rows as _,
-            left_offset: slot.bitmap_left as _,
-            ascending_pixels: slot.bitmap_top as _,
-        }
-    }
-}
-
-pub struct TextLayout {
-    bitmaps: Vec<GlyphBitmap>,
-    final_left_pos: f32,
-    final_top_pos: f32,
-    max_ascender: i32,
-    max_descender: i32,
-}
-impl TextLayout {
-    pub fn build_simple(text: &str, face: &mut freetype::Face) -> Self {
-        let mut hb_buffer = harfbuzz::Buffer::new();
-        hb_buffer.add(text);
-        hb_buffer.guess_segment_properties();
-        let mut hb_font = harfbuzz::Font::from_ft_face_referenced(face);
-        harfbuzz::shape(&mut hb_font, &mut hb_buffer, &[]);
-        let (glyph_infos, glyph_positions) = hb_buffer.get_shape_results();
-        let mut left_pos = 0.0;
-        let mut top_pos = 0.0;
-        let mut max_ascender = 0;
-        let mut max_descender = 0;
-        // println!(
-        //     "base metrics: {} {}",
-        //     face.ascender_pixels(),
-        //     face.height_pixels()
-        // );
-        let mut glyph_bitmaps = Vec::with_capacity(glyph_infos.len());
-        for (info, pos) in glyph_infos.iter().zip(glyph_positions.iter()) {
-            face.set_transform(
-                None,
-                Some(&freetype2::FT_Vector {
-                    x: (left_pos * 64.0) as _,
-                    y: (top_pos * 64.0) as _,
-                }),
-            );
-            face.load_glyph(info.codepoint, FT_LOAD_DEFAULT).unwrap();
-            face.render_glyph(FT_RENDER_MODE_NORMAL).unwrap();
-            let slot = face.glyph_slot().unwrap();
-
-            // println!(
-            //     "glyph {} {} {} {} {} {} {} {} {} {}",
-            //     info.codepoint,
-            //     pos.x_advance as f32 / 64.0,
-            //     pos.y_advance as f32 / 64.0,
-            //     pos.x_offset,
-            //     pos.y_offset,
-            //     slot.bitmap_left,
-            //     slot.bitmap_top,
-            //     slot.bitmap.width,
-            //     slot.bitmap.rows,
-            //     slot.bitmap.pitch,
-            // );
-
-            glyph_bitmaps.push(GlyphBitmap::copy_from_ft_glyph_slot(slot));
-
-            left_pos += pos.x_advance as f32 / 64.0;
-            top_pos += pos.y_advance as f32 / 64.0;
-            max_ascender = max_ascender.max(slot.bitmap_top);
-            max_descender = max_descender.max(slot.bitmap.rows as i32 - slot.bitmap_top);
-        }
-        // println!("final metrics: {left_pos} {top_pos} {max_ascender} {max_descender}");
-
-        Self {
-            bitmaps: glyph_bitmaps,
-            final_left_pos: left_pos,
-            final_top_pos: top_pos,
-            max_ascender,
-            max_descender,
-        }
-    }
-
-    pub const fn width(&self) -> f32 {
-        self.final_left_pos
-    }
-
-    #[inline]
-    pub fn width_px(&self) -> u32 {
-        self.width().ceil() as _
-    }
-
-    pub const fn height(&self) -> f32 {
-        self.max_ascender as f32 + self.max_descender as f32
-    }
-
-    #[inline]
-    pub fn height_px(&self) -> u32 {
-        self.height().ceil() as _
-    }
-
-    pub fn build_stg_image<'d, D: br::Device + 'd>(
-        &self,
-        device: &'d D,
-        adapter_memory_info: &br::MemoryProperties,
-    ) -> (br::ImageObject<&'d D>, br::DeviceMemoryObject<&'d D>) {
-        let mut img = br::ImageObject::new(
-            device,
-            &br::ImageCreateInfo::new(
-                br::Extent2D {
-                    width: self.width_px(),
-                    height: self.height_px(),
-                },
-                br::vk::VK_FORMAT_R8_UNORM,
-            )
-            .usage_with(br::ImageUsageFlags::TRANSFER_SRC)
-            .use_linear_tiling(),
-        )
-        .expect("Failed to create staging text image");
-        let mreq = img.requirements();
-        let memory_index = adapter_memory_info
-            .find_host_visible_index(mreq.memoryTypeBits)
-            .expect("no suitable memory for image staging");
-        let mut mem = br::DeviceMemoryObject::new(
-            device,
-            &br::MemoryAllocateInfo::new(mreq.size, memory_index),
-        )
-        .expect("Failed to allocate text surface stg memory");
-        img.bind(&mem, 0).expect("Failed to bind stg memory");
-        let subresource_layout =
-            img.layout_info(&br::ImageSubresource::new(br::AspectMask::COLOR, 0, 0));
-
-        let n = mem.native_ptr();
-        let ptr = mem
-            .map(0..(subresource_layout.rowPitch * self.height_px() as br::DeviceSize) as _)
-            .unwrap();
-        for b in self.bitmaps.iter() {
-            for y in 0..b.rows {
-                let dy = y as isize + self.max_ascender as isize - b.ascending_pixels;
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        b.buf.as_ptr().add(b.pitch * y),
-                        ptr.addr_of_mut(
-                            subresource_layout.rowPitch as usize * dy as usize
-                                + b.left_offset as usize,
-                        ),
-                        b.width,
-                    )
-                }
-            }
-        }
-        if !adapter_memory_info.is_coherent(memory_index) {
-            unsafe {
-                device
-                    .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(
-                        n,
-                        0,
-                        subresource_layout.rowPitch * self.height_px() as br::DeviceSize,
-                    )])
-                    .unwrap();
-            }
-        }
-        ptr.end();
-
-        (img, mem)
     }
 }
 
@@ -2803,161 +2056,57 @@ fn main() {
     };
     pointer.add_listener(&mut pointer_events).unwrap();
 
-    for x in br::instance_extension_properties(None).unwrap() {
-        println!(
-            "vkext {:?} version {}",
-            x.extensionName.as_cstr().unwrap(),
-            x.specVersion,
-        );
-    }
-
-    let instance = br::InstanceObject::new(&br::InstanceCreateInfo::new(
-        &br::ApplicationInfo::new(
-            c"Peridot SpriteAtlas Visualizer",
-            br::Version::new(0, 0, 1, 0),
-            c"",
-            br::Version::new(0, 0, 0, 0),
-        )
-        .api_version(br::Version::new(0, 1, 4, 0)),
-        &[c"VK_LAYER_KHRONOS_validation".into()],
-        &[c"VK_KHR_surface".into(), c"VK_KHR_wayland_surface".into()],
-    ))
-    .unwrap();
-    let adapter = instance
-        .iter_physical_devices()
-        .expect("Failed to iterate physical devices")
-        .next()
-        .expect("no physical devices");
-    let adapter_queue_info = adapter.queue_family_properties_alloc();
-    for (n, q) in adapter_queue_info.iter().enumerate() {
-        let mut v = Vec::with_capacity(4);
-        if q.queue_flags().has(br::QueueFlags::GRAPHICS) {
-            v.push("Graphics");
-        }
-        if q.queue_flags().has(br::QueueFlags::COMPUTE) {
-            v.push("Compute");
-        }
-        if q.queue_flags().has(br::QueueFlags::TRANSFER) {
-            v.push("Transfer");
-        }
-        if q.queue_flags().has(br::QueueFlags::SPARSE_BINDING) {
-            v.push("Sparse Binding");
-        }
-
-        println!("Queue #{n}: x{} {}", q.queueCount, v.join(" / "));
-    }
-    let adapter_memory_info = adapter.memory_properties();
-    for (n, p) in adapter_memory_info.types().iter().enumerate() {
-        let h = &adapter_memory_info.heaps()[p.heapIndex as usize];
-
-        let mut v = Vec::with_capacity(6);
-        if p.property_flags()
-            .has(br::MemoryPropertyFlags::DEVICE_LOCAL)
-        {
-            v.push("Device Local");
-        }
-        if p.property_flags()
-            .has(br::MemoryPropertyFlags::HOST_VISIBLE)
-        {
-            v.push("Host Visible");
-        }
-        if p.property_flags()
-            .has(br::MemoryPropertyFlags::HOST_COHERENT)
-        {
-            v.push("Host Coherent");
-        }
-        if p.property_flags().has(br::MemoryPropertyFlags::HOST_CACHED) {
-            v.push("Host Cached");
-        }
-        if p.property_flags()
-            .has(br::MemoryPropertyFlags::LAZILY_ALLOCATED)
-        {
-            v.push("Lazy Allocated");
-        }
-        if p.property_flags().has(br::MemoryPropertyFlags::PROTECTED) {
-            v.push("Protected");
-        }
-
-        let mut hv = Vec::with_capacity(2);
-        if h.flags().has(br::MemoryHeapFlags::DEVICE_LOCAL) {
-            hv.push("Device Local");
-        }
-        if h.flags().has(br::MemoryHeapFlags::MULTI_INSTANCE) {
-            hv.push("Multi Instance");
-        }
-
-        println!(
-            "Memory Type #{n}: {} heap #{} ({}) size {}",
-            v.join(" / "),
-            p.heapIndex,
-            hv.join(" / "),
-            fmt_bytesize(h.size as _)
-        );
-    }
-    let adapter_properties = adapter.properties();
-    println!(
-        "max texture2d size: {}",
-        adapter_properties.limits.maxImageDimension2D
-    );
-    let adapter_sparse_image_format_props = adapter.sparse_image_format_properties_alloc(
-        br::vk::VK_FORMAT_R8_UNORM,
-        br::vk::VK_IMAGE_TYPE_2D,
-        br::vk::VK_SAMPLE_COUNT_1_BIT,
-        br::ImageUsageFlags::SAMPLED | br::ImageUsageFlags::COLOR_ATTACHMENT,
-        br::vk::VK_IMAGE_TILING_OPTIMAL,
-    );
-    for x in adapter_sparse_image_format_props.iter() {
-        println!(
-            "sparse image format property: {:?} 0x{:04x} 0x{:04x}",
-            x.imageGranularity, x.aspectMask, x.flags
-        );
-    }
-    let graphics_queue_family_index = adapter_queue_info
-        .find_matching_index(br::QueueFlags::GRAPHICS)
-        .unwrap();
-    let device = br::DeviceObject::new(
-        &adapter,
-        &br::DeviceCreateInfo::new(
-            &[br::DeviceQueueCreateInfo::new(
-                graphics_queue_family_index,
-                &[1.0],
-            )],
-            &[],
-            &[c"VK_KHR_swapchain".into()],
-        )
-        .with_next(
-            &br::PhysicalDeviceFeatures2::new(br::vk::VkPhysicalDeviceFeatures {
-                sparseBinding: true as _,
-                sparseResidencyImage2D: true as _,
-                ..Default::default()
-            })
-            .with_next(&mut br::vk::VkPhysicalDeviceSynchronization2Features {
-                sType: <br::vk::VkPhysicalDeviceSynchronization2Features as VulkanStructure>::TYPE,
-                pNext: core::ptr::null_mut(),
-                synchronization2: 1,
-            }),
-        ),
-    )
-    .unwrap();
-    let mut graphics_queue = device.queue(graphics_queue_family_index, 0);
+    let subsystem = Subsystem::init();
 
     let mut composition_alphamask_surface_atlas = CompositionSurfaceAtlas::new(
-        &device,
-        &mut graphics_queue,
-        &adapter_memory_info,
-        adapter_properties.limits.maxImageDimension2D,
+        &subsystem,
+        subsystem.adapter_properties.limits.maxImageDimension2D,
         br::vk::VK_FORMAT_R8_UNORM,
     );
 
-    let surface = unsafe {
-        br::SurfaceObject::new(
-            &adapter,
-            &br::vk::VkWaylandSurfaceCreateInfoKHR::new(dp.as_raw() as _, wl_surface.as_raw() as _),
-        )
-        .unwrap()
+    struct SubsystemBoundSurface<'s> {
+        handle: br::vk::VkSurfaceKHR,
+        subsystem: &'s Subsystem,
+    }
+    impl Drop for SubsystemBoundSurface<'_> {
+        fn drop(&mut self) {
+            unsafe {
+                br::vkfn_wrapper::destroy_surface(
+                    self.subsystem.instance().native_ptr(),
+                    self.handle,
+                    None,
+                );
+            }
+        }
+    }
+    impl br::VkHandle for SubsystemBoundSurface<'_> {
+        type Handle = br::vk::VkSurfaceKHR;
+
+        #[inline(always)]
+        fn native_ptr(&self) -> Self::Handle {
+            self.handle
+        }
+    }
+    impl br::InstanceChild for SubsystemBoundSurface<'_> {
+        type ConcreteInstance = <Subsystem as br::InstanceChild>::ConcreteInstance;
+
+        #[inline]
+        fn instance(&self) -> &Self::ConcreteInstance {
+            self.subsystem.instance()
+        }
+    }
+    impl br::Surface for SubsystemBoundSurface<'_> {}
+
+    let surface = SubsystemBoundSurface {
+        handle: unsafe {
+            br::WaylandSurfaceCreateInfo::new(dp.as_raw() as _, wl_surface.as_raw() as _)
+                .execute(subsystem.instance(), None)
+                .unwrap()
+        },
+        subsystem: &subsystem,
     };
-    let surface_caps = adapter.surface_capabilities(&surface).unwrap();
-    let surface_formats = adapter.surface_formats_alloc(&surface).unwrap();
+    let surface_caps = subsystem.adapter().surface_capabilities(&surface).unwrap();
+    let surface_formats = subsystem.adapter().surface_formats_alloc(&surface).unwrap();
     let sc_transform = if surface_caps
         .supported_transforms()
         .has(br::SurfaceTransformFlags::IDENTITY)
@@ -3004,7 +2153,7 @@ fn main() {
         )
         .pre_transform(sc_transform)
         .composite_alpha(sc_composite_alpha)
-        .create(&device)
+        .create(&subsystem)
         .unwrap(),
     );
 
@@ -3061,19 +2210,19 @@ fn main() {
     let title_layout =
         TextLayout::build_simple("Peridot SpriteAtlas Visualizer/Editor", &mut ft_face);
     let (title_stg_image, _title_stg_image_mem) =
-        title_layout.build_stg_image(&device, &adapter_memory_info);
+        title_layout.build_stg_image(&subsystem, &subsystem.adapter_memory_info);
 
     let text_surface_rect = composition_alphamask_surface_atlas
         .alloc(title_layout.width_px(), title_layout.height_px());
     println!("text surface rect: {text_surface_rect:?}");
 
     let mut upload_cp = br::CommandPoolObject::new(
-        &device,
-        &br::CommandPoolCreateInfo::new(graphics_queue_family_index).transient(),
+        &subsystem,
+        &br::CommandPoolCreateInfo::new(subsystem.graphics_queue_family_index).transient(),
     )
     .unwrap();
     let [mut upload_cb] = br::CommandBufferObject::alloc_array(
-        &device,
+        &subsystem,
         &br::CommandBufferFixedCountAllocateInfo::new(
             &mut upload_cp,
             br::CommandBufferLevel::Primary,
@@ -3082,7 +2231,10 @@ fn main() {
     .unwrap();
     unsafe {
         upload_cb
-            .begin(&br::CommandBufferBeginInfo::new().onetime_submit(), &device)
+            .begin(
+                &br::CommandBufferBeginInfo::new().onetime_submit(),
+                &subsystem,
+            )
             .unwrap()
     }
     .pipeline_barrier_2(&br::DependencyInfo::new(
@@ -3102,7 +2254,7 @@ fn main() {
                 )
                 .transit_to(br::ImageLayout::TransferSrcOpt.from_undefined()),
             composition_alphamask_surface_atlas
-                .resource
+                .resource()
                 .image()
                 .memory_barrier2(br::ImageSubresourceRange::new(
                     br::AspectMask::COLOR,
@@ -3115,7 +2267,7 @@ fn main() {
     .copy_image(
         &title_stg_image,
         br::ImageLayout::TransferSrcOpt,
-        composition_alphamask_surface_atlas.resource.image(),
+        composition_alphamask_surface_atlas.resource().image(),
         br::ImageLayout::TransferDestOpt,
         &[br::vk::VkImageCopy {
             srcSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
@@ -3129,7 +2281,7 @@ fn main() {
         &[],
         &[],
         &[composition_alphamask_surface_atlas
-            .resource
+            .resource()
             .image()
             .memory_barrier2(br::ImageSubresourceRange::new(
                 br::AspectMask::COLOR,
@@ -3148,24 +2300,16 @@ fn main() {
     ))
     .end()
     .unwrap();
-    graphics_queue
-        .submit2(
-            &[br::SubmitInfo2::new(
-                &[],
-                &[br::CommandBufferSubmitInfo::new(&upload_cb)],
-                &[],
-            )],
-            None,
-        )
+    subsystem
+        .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&upload_cb)])
         .unwrap();
-    graphics_queue.wait().unwrap();
 
     let mut font_set = FontSet {
         ui_default: ft_face,
     };
 
     let main_rp = br::RenderPassObject::new(
-        &device,
+        &subsystem,
         &br::RenderPassCreateInfo2::new(
             &[br::AttachmentDescription2::new(sc_format.format)
                 .layout_transition(br::ImageLayout::Undefined, br::ImageLayout::PresentSrc)
@@ -3210,7 +2354,7 @@ fn main() {
         .iter()
         .map(|bb| {
             br::FramebufferObject::new(
-                &device,
+                &subsystem,
                 &br::FramebufferCreateInfo::new(
                     &main_rp,
                     &[bb.as_transparent_ref()],
@@ -3222,32 +2366,25 @@ fn main() {
         })
         .collect::<Vec<_>>();
 
-    let composite_sampler = br::SamplerObject::new(&device, &br::SamplerCreateInfo::new()).unwrap();
+    let composite_sampler =
+        br::SamplerObject::new(&subsystem, &br::SamplerCreateInfo::new()).unwrap();
 
-    let composite_vsh = br::ShaderModuleObject::new(
-        &device,
-        &br::ShaderModuleCreateInfo::new(&load_spv_file("resources/composite.vert").unwrap()),
-    )
-    .unwrap();
-    let composite_fsh = br::ShaderModuleObject::new(
-        &device,
-        &br::ShaderModuleCreateInfo::new(&load_spv_file("resources/composite.frag").unwrap()),
-    )
-    .unwrap();
+    let composite_vsh = subsystem.load_shader("resources/composite.vert").unwrap();
+    let composite_fsh = subsystem.load_shader("resources/composite.frag").unwrap();
     let composite_shader_stages = [
         br::PipelineShaderStage::new(br::ShaderStage::Vertex, &composite_vsh, c"main"),
         br::PipelineShaderStage::new(br::ShaderStage::Fragment, &composite_fsh, c"main"),
     ];
 
     let composite_fsh_input_layout = br::DescriptorSetLayoutObject::new(
-        &device,
+        &subsystem,
         &br::DescriptorSetLayoutCreateInfo::new(&[
             br::DescriptorType::CombinedImageSampler.make_binding(0, 1)
         ]),
     )
     .unwrap();
     let mut descriptor_pool = br::DescriptorPoolObject::new(
-        &device,
+        &subsystem,
         &br::DescriptorPoolCreateInfo::new(
             1,
             &[br::DescriptorType::CombinedImageSampler.make_size(1)],
@@ -3257,11 +2394,11 @@ fn main() {
     let [composite_alphamask_tex_descriptor] = descriptor_pool
         .alloc_array(&[composite_fsh_input_layout.as_transparent_ref()])
         .unwrap();
-    device.update_descriptor_sets(
+    subsystem.update_descriptor_sets(
         &[composite_alphamask_tex_descriptor.binding_at(0).write(
             br::DescriptorContents::CombinedImageSampler(vec![
                 br::DescriptorImageInfo::new(
-                    &composition_alphamask_surface_atlas.resource,
+                    composition_alphamask_surface_atlas.resource(),
                     br::ImageLayout::ShaderReadOnlyOpt,
                 )
                 .with_sampler(&composite_sampler),
@@ -3271,7 +2408,7 @@ fn main() {
     );
 
     let composite_pipeline_layout = br::PipelineLayoutObject::new(
-        &device,
+        &subsystem,
         &br::PipelineLayoutCreateInfo::new(
             &[composite_fsh_input_layout.as_transparent_ref()],
             &[br::vk::VkPushConstantRange::for_type::<[f32; 2]>(
@@ -3327,7 +2464,7 @@ fn main() {
         br::FrontFace::CounterClockwise,
     );
 
-    let [mut composite_pipeline] = device
+    let [mut composite_pipeline] = subsystem
         .new_graphics_pipeline_array(
             &[br::GraphicsPipelineCreateInfo::new(
                 &composite_pipeline_layout,
@@ -3356,12 +2493,11 @@ fn main() {
         )
         .unwrap();
 
-    let mut composite_instance_buffer =
-        CompositeInstanceManager::new(&device, &adapter_memory_info);
+    let mut composite_instance_buffer = CompositeInstanceManager::new(&subsystem);
     let mut composite_tree = CompositeTree::new();
 
     let title_cr = composite_tree.alloc();
-    composite_tree.add_child(0, title_cr);
+    composite_tree.add_child(CompositeTree::ROOT, title_cr);
     {
         let title_cr = composite_tree.get_mut(title_cr);
 
@@ -3381,54 +2517,48 @@ fn main() {
     let header_size =
         16.0 + 16.0 + title_layout.height() / surface_events.optimal_buffer_scale as f32;
 
-    let mut atlas_view = AtlasView::new(
-        &device,
-        &adapter_memory_info,
-        graphics_queue_family_index,
-        &mut graphics_queue,
-        main_rp.subpass(0),
-        sc_size,
-    );
+    let mut init_context = ViewInitContext {
+        subsystem: &subsystem,
+        atlas: &mut composition_alphamask_surface_atlas,
+        ui_scale_factor: surface_events.optimal_buffer_scale as _,
+        fonts: &mut font_set,
+        composite_tree: &mut composite_tree,
+        composite_instance_manager: &mut composite_instance_buffer,
+        ht: &mut ht_manager,
+    };
+    let mut atlas_view = AtlasView::new(&mut init_context, main_rp.subpass(0), sc_size);
 
-    let sprite_list_pane = SpriteListPanePresenter::new(
-        &device,
-        &adapter_memory_info,
-        graphics_queue_family_index,
-        &mut graphics_queue,
-        &mut composition_alphamask_surface_atlas,
-        surface_events.optimal_buffer_scale,
-        header_size,
-        &mut font_set,
+    let sprite_list_pane = SpriteListPanePresenter::new(&mut init_context, header_size);
+    sprite_list_pane.mount(
         &mut composite_tree,
-        &mut composite_instance_buffer,
+        CompositeTree::ROOT,
         &mut ht_manager,
+        ht_root,
     );
-    sprite_list_pane.mount(&mut composite_tree, 0, &mut ht_manager, ht_root);
 
     ht_manager.dump(ht_root);
 
-    let n = composite_instance_buffer.memory_stg.native_ptr();
+    let n = composite_instance_buffer.memory_stg().native_ptr();
+    let r = composite_instance_buffer.range_all();
+    let flush_required = composite_instance_buffer.memory_stg_requires_explicit_flush();
     let ptr = composite_instance_buffer
-        .memory_stg
-        .map(0..core::mem::size_of::<CompositeInstanceData>() * composite_instance_buffer.count)
+        .memory_stg_exc()
+        .map(r.clone())
         .unwrap();
     unsafe {
         composite_tree.sink_all(
             sc_size,
             br::Extent2D {
-                width: composition_alphamask_surface_atlas.size,
-                height: composition_alphamask_surface_atlas.size,
+                width: composition_alphamask_surface_atlas.size(),
+                height: composition_alphamask_surface_atlas.size(),
             },
             &ptr,
         );
     }
-    if composite_instance_buffer.stg_mem_requires_flush {
+    if flush_required {
         unsafe {
-            device
-                .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new(
-                    &br::VkHandleRef::dangling(n),
-                    0..core::mem::size_of::<CompositeInstanceData>() as _,
-                )])
+            subsystem
+                .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(n, 0, r.end as _)])
                 .unwrap();
         }
     }
@@ -3437,12 +2567,12 @@ fn main() {
     composite_tree.take_dirty(); // mark processed
 
     let mut main_cp = br::CommandPoolObject::new(
-        &device,
-        &br::CommandPoolCreateInfo::new(graphics_queue_family_index),
+        &subsystem,
+        &br::CommandPoolCreateInfo::new(subsystem.graphics_queue_family_index),
     )
     .unwrap();
     let mut main_cbs = br::CommandBufferObject::alloc(
-        &device,
+        &subsystem,
         &br::CommandBufferAllocateInfo::new(
             &mut main_cp,
             main_fbs.len() as _,
@@ -3453,7 +2583,7 @@ fn main() {
 
     for (cb, fb) in main_cbs.iter_mut().zip(main_fbs.iter()) {
         unsafe {
-            cb.begin(&br::CommandBufferBeginInfo::new(), &device)
+            cb.begin(&br::CommandBufferBeginInfo::new(), &subsystem)
                 .unwrap()
         }
         .begin_render_pass2(
@@ -3483,7 +2613,7 @@ fn main() {
         .bind_pipeline(br::PipelineBindPoint::Graphics, &composite_pipeline)
         .bind_vertex_buffer_array(
             0,
-            &[composite_instance_buffer.buffer.as_transparent_ref()],
+            &[composite_instance_buffer.buffer().as_transparent_ref()],
             &[0],
         )
         .push_constant(
@@ -3499,19 +2629,19 @@ fn main() {
             &[composite_alphamask_tex_descriptor],
             &[],
         )
-        .draw(4, composite_instance_buffer.count as _, 0, 0)
+        .draw(4, composite_instance_buffer.count() as _, 0, 0)
         .end_render_pass2(&br::SubpassEndInfo::new())
         .end()
         .unwrap();
     }
 
     let mut update_cp = br::CommandPoolObject::new(
-        &device,
-        &br::CommandPoolCreateInfo::new(graphics_queue_family_index),
+        &subsystem,
+        &br::CommandPoolCreateInfo::new(subsystem.graphics_queue_family_index),
     )
     .unwrap();
     let [mut update_cb] = br::CommandBufferObject::alloc_array(
-        &device,
+        &subsystem,
         &br::CommandBufferFixedCountAllocateInfo::new(
             &mut update_cp,
             br::CommandBufferLevel::Primary,
@@ -3520,14 +2650,14 @@ fn main() {
     .unwrap();
 
     let mut acquire_completion =
-        br::SemaphoreObject::new(&device, &br::SemaphoreCreateInfo::new()).unwrap();
+        br::SemaphoreObject::new(&subsystem, &br::SemaphoreCreateInfo::new()).unwrap();
     let render_completion =
-        br::SemaphoreObject::new(&device, &br::SemaphoreCreateInfo::new()).unwrap();
+        br::SemaphoreObject::new(&subsystem, &br::SemaphoreCreateInfo::new()).unwrap();
     let mut last_render_command_fence =
-        br::FenceObject::new(&device, &br::FenceCreateInfo::new(0)).unwrap();
+        br::FenceObject::new(&subsystem, &br::FenceCreateInfo::new(0)).unwrap();
     let mut last_rendering;
     let mut last_update_command_fence =
-        br::FenceObject::new(&device, &br::FenceCreateInfo::new(0)).unwrap();
+        br::FenceObject::new(&subsystem, &br::FenceCreateInfo::new(0)).unwrap();
     let mut last_updating = false;
 
     struct FrameCallback {
@@ -3551,17 +2681,10 @@ fn main() {
     if core::mem::replace(&mut composite_instance_buffer_dirty, false) {
         unsafe {
             update_cb
-                .begin(&br::CommandBufferBeginInfo::new(), &device)
+                .begin(&br::CommandBufferBeginInfo::new(), &subsystem)
                 .unwrap()
         }
-        .copy_buffer(
-            &composite_instance_buffer.buffer_stg,
-            &composite_instance_buffer.buffer,
-            &[br::BufferCopy::mirror(
-                0,
-                (core::mem::size_of::<CompositeInstanceData>() * 1024) as _,
-            )],
-        )
+        .inject(|r| composite_instance_buffer.sync_buffer(r))
         .pipeline_barrier_2(&br::DependencyInfo::new(
             &[br::MemoryBarrier2::new()
                 .of_memory(
@@ -3577,8 +2700,8 @@ fn main() {
         ))
         .end()
         .unwrap();
-        graphics_queue
-            .submit2(
+        subsystem
+            .submit_graphics_works(
                 &[br::SubmitInfo2::new(
                     &[],
                     &[br::CommandBufferSubmitInfo::new(&update_cb)],
@@ -3595,8 +2718,8 @@ fn main() {
             br::CompletionHandlerMut::Queue(acquire_completion.as_transparent_ref_mut()),
         )
         .unwrap();
-    graphics_queue
-        .submit2(
+    subsystem
+        .submit_graphics_works(
             &[br::SubmitInfo2::new(
                 &[br::SemaphoreSubmitInfo::new(&acquire_completion).on_color_attachment_output()],
                 &[br::CommandBufferSubmitInfo::new(&main_cbs[next as usize])],
@@ -3606,8 +2729,8 @@ fn main() {
         )
         .unwrap();
     last_rendering = true;
-    graphics_queue
-        .present(&br::PresentInfo::new(
+    subsystem
+        .queue_present(&br::PresentInfo::new(
             &[render_completion.as_transparent_ref()],
             &[sc.as_transparent_ref()],
             &[next],
@@ -3645,22 +2768,27 @@ fn main() {
                         || last_render_scale != surface_events.optimal_buffer_scale
                         || last_render_size != sc_size
                     {
-                        let n = composite_instance_buffer.memory_stg.native_ptr();
+                        let n = composite_instance_buffer.memory_stg().native_ptr();
                         let r = composite_instance_buffer.range_all();
-                        let ptr = composite_instance_buffer.memory_stg.map(r.clone()).unwrap();
+                        let flush_required =
+                            composite_instance_buffer.memory_stg_requires_explicit_flush();
+                        let ptr = composite_instance_buffer
+                            .memory_stg_exc()
+                            .map(r.clone())
+                            .unwrap();
                         unsafe {
                             app_update_context.composite_tree.sink_all(
                                 sc_size,
                                 br::Extent2D {
-                                    width: composition_alphamask_surface_atlas.size as _,
-                                    height: composition_alphamask_surface_atlas.size as _,
+                                    width: composition_alphamask_surface_atlas.size() as _,
+                                    height: composition_alphamask_surface_atlas.size() as _,
                                 },
                                 &ptr,
                             );
                         }
-                        if composite_instance_buffer.stg_mem_requires_flush {
+                        if flush_required {
                             unsafe {
-                                device
+                                subsystem
                                     .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(
                                         n, 0, r.end as _,
                                     )])
@@ -3690,18 +2818,11 @@ fn main() {
                         }
                         let rec = unsafe {
                             update_cb
-                                .begin(&br::CommandBufferBeginInfo::new(), &device)
+                                .begin(&br::CommandBufferBeginInfo::new(), &subsystem)
                                 .unwrap()
                         };
                         let rec = if composite_instance_buffer_dirty {
-                            rec.copy_buffer(
-                                &composite_instance_buffer.buffer_stg,
-                                &composite_instance_buffer.buffer,
-                                &[br::BufferCopy::mirror(
-                                    0,
-                                    (core::mem::size_of::<CompositeInstanceData>() * 1024) as _,
-                                )],
-                            )
+                            composite_instance_buffer.sync_buffer(rec)
                         } else {
                             rec
                         };
@@ -3720,8 +2841,8 @@ fn main() {
                         ))
                         .end()
                         .unwrap();
-                        graphics_queue
-                            .submit2(
+                        subsystem
+                            .submit_graphics_works(
                                 &[br::SubmitInfo2::new(
                                     &[],
                                     &[br::CommandBufferSubmitInfo::new(&update_cb)],
@@ -3742,8 +2863,8 @@ fn main() {
                             ),
                         )
                         .unwrap();
-                    graphics_queue
-                        .submit2(
+                    subsystem
+                        .submit_graphics_works(
                             &[br::SubmitInfo2::new(
                                 &[br::SemaphoreSubmitInfo::new(&acquire_completion)
                                     .on_color_attachment_output()],
@@ -3755,8 +2876,8 @@ fn main() {
                         )
                         .unwrap();
                     last_rendering = true;
-                    graphics_queue
-                        .present(&br::PresentInfo::new(
+                    subsystem
+                        .queue_present(&br::PresentInfo::new(
                             &[render_completion.as_transparent_ref()],
                             &[sc.as_transparent_ref()],
                             &[next],
@@ -3803,7 +2924,7 @@ fn main() {
                                 )
                                 .pre_transform(sc_transform)
                                 .composite_alpha(sc_composite_alpha)
-                                .create(&device)
+                                .create(&subsystem)
                                 .unwrap(),
                             );
 
@@ -3828,7 +2949,7 @@ fn main() {
                                 .iter()
                                 .map(|bb| {
                                     br::FramebufferObject::new(
-                                        &device,
+                                        &subsystem,
                                         &br::FramebufferCreateInfo::new(
                                             &main_rp,
                                             &[bb.as_transparent_ref()],
@@ -3840,7 +2961,7 @@ fn main() {
                                 })
                                 .collect::<Vec<_>>();
 
-                            let [composite_pipeline1] = device
+                            let [composite_pipeline1] = subsystem
                                 .new_graphics_pipeline_array(
                                     &[br::GraphicsPipelineCreateInfo::new(
                                         &composite_pipeline_layout,
@@ -3849,18 +2970,8 @@ fn main() {
                                         &composite_vinput,
                                         &composite_ia_state,
                                         &br::PipelineViewportStateCreateInfo::new(
-                                            &[br::vk::VkViewport {
-                                                x: 0.0,
-                                                y: 0.0,
-                                                width: sc_size.width as _,
-                                                height: sc_size.height as _,
-                                                minDepth: 0.0,
-                                                maxDepth: 1.0,
-                                            }],
-                                            &[br::vk::VkRect2D {
-                                                offset: br::vk::VkOffset2D::ZERO,
-                                                extent: sc_size,
-                                            }],
+                                            &[sc_size.into_rect(br::Offset2D::ZERO).make_viewport(0.0..1.0)],
+                                            &[sc_size.into_rect(br::Offset2D::ZERO)],
                                         ),
                                         &composite_raster_state,
                                         &br::PipelineColorBlendStateCreateInfo::new(&[
@@ -3873,21 +2984,18 @@ fn main() {
                                 .unwrap();
                             composite_pipeline = composite_pipeline1;
 
-                            atlas_view.recreate(&device, main_rp.subpass(0), sc_size);
+                            atlas_view.recreate(&subsystem, main_rp.subpass(0), sc_size);
 
                             for (cb, fb) in main_cbs.iter_mut().zip(main_fbs.iter()) {
                                 unsafe {
-                                    cb.begin(&br::CommandBufferBeginInfo::new(), &device)
+                                    cb.begin(&br::CommandBufferBeginInfo::new(), &subsystem)
                                         .unwrap()
                                 }
                                 .begin_render_pass2(
                                     &br::RenderPassBeginInfo::new(
                                         &main_rp,
                                         fb,
-                                        br::vk::VkRect2D {
-                                            offset: br::vk::VkOffset2D::ZERO,
-                                            extent: sc_size,
-                                        },
+                                        sc_size.into_rect(br::Offset2D::ZERO),
                                         &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 1.0])],
                                     ),
                                     &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
@@ -3926,10 +3034,10 @@ fn main() {
                                 )
                                 .bind_vertex_buffer_array(
                                     0,
-                                    &[composite_instance_buffer.buffer.as_transparent_ref()],
+                                    &[composite_instance_buffer.buffer().as_transparent_ref()],
                                     &[0],
                                 )
-                                .draw(4, composite_instance_buffer.count as _, 0, 0)
+                                .draw(4, composite_instance_buffer.count() as _, 0, 0)
                                 .end_render_pass2(&br::SubpassEndInfo::new())
                                 .end()
                                 .unwrap();
@@ -4030,31 +3138,6 @@ fn main() {
     }
 
     unsafe {
-        device.wait().unwrap();
+        subsystem.wait().unwrap();
     }
-}
-
-fn fmt_bytesize(x: usize) -> String {
-    if x < 1000 {
-        return format!("{x}bytes");
-    }
-
-    let (mut suffix, mut x) = ("KB", x as f64 / 1024.0);
-
-    if x >= 1000.0 {
-        suffix = "MB";
-        x /= 1024.0;
-    }
-
-    if x >= 1000.0 {
-        suffix = "GB";
-        x /= 1024.0;
-    }
-
-    if x >= 1000.0 {
-        suffix = "TB";
-        x /= 1024.0;
-    }
-
-    format!("{x:.3} {suffix}")
 }

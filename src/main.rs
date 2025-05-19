@@ -17,8 +17,9 @@ use bedrock::{
     ShaderModule, SurfaceCreateInfo, Swapchain, VkHandle, VkHandleMut,
 };
 use composite::{
-    AnimationData, AtlasRect, CompositeInstanceData, CompositeInstanceManager, CompositeMode,
-    CompositeStreamingData, CompositeTree, CompositeTreeRef, CompositionSurfaceAtlas,
+    AnimatableColor, AnimationData, AtlasRect, CompositeInstanceData, CompositeInstanceManager,
+    CompositeMode, CompositeStreamingData, CompositeTree, CompositeTreeRef,
+    CompositionSurfaceAtlas,
 };
 use freetype::FreeType;
 use hittest::{
@@ -771,7 +772,8 @@ impl SpriteListToggleButtonView {
 
             ct_root.instance_slot_index = Some(init.composite_instance_manager.alloc());
             ct_root.texatlas_rect = circle_atlas_rect.clone();
-            ct_root.composite_mode = CompositeMode::ColorTint([1.0, 1.0, 1.0, 0.0]);
+            ct_root.composite_mode =
+                CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 0.0]));
         }
         let ct_icon = init.composite_tree.alloc();
         init.composite_tree.add_child(ct_root, ct_icon);
@@ -789,7 +791,8 @@ impl SpriteListToggleButtonView {
             ];
             ct_icon.instance_slot_index = Some(init.composite_instance_manager.alloc());
             ct_icon.texatlas_rect = icon_atlas_rect.clone();
-            ct_icon.composite_mode = CompositeMode::ColorTint([0.9, 0.9, 0.9, 1.0]);
+            ct_icon.composite_mode =
+                CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0]));
         }
 
         let ht_root = init.ht.create(HitTestTreeData {
@@ -827,10 +830,18 @@ impl SpriteListToggleButtonView {
         &self,
         ct: &mut CompositeTree,
         ht: &mut HitTestTreeManager<AppUpdateContext>,
+        current_sec: f32,
     ) {
         let ui_scale_factor = self.ui_scale_factor.get();
 
-        ct.get_mut(self.ct_root).offset[0] = (-Self::SIZE - 8.0) * ui_scale_factor;
+        ct.get_mut(self.ct_root).offset[0] = 8.0 * ui_scale_factor;
+        ct.get_mut(self.ct_root).animation_data_left = Some(AnimationData {
+            to_value: (-Self::SIZE - 8.0) * ui_scale_factor,
+            start_sec: current_sec,
+            end_sec: current_sec + 0.25,
+            curve_p1: (0.25, 0.8),
+            curve_p2: (0.5, 1.0),
+        });
         ct.mark_dirty(self.ct_root);
         ht.get_data_mut(self.ht_root).left = -Self::SIZE - 8.0;
     }
@@ -839,10 +850,18 @@ impl SpriteListToggleButtonView {
         &self,
         ct: &mut CompositeTree,
         ht: &mut HitTestTreeManager<AppUpdateContext>,
+        current_sec: f32,
     ) {
         let ui_scale_factor = self.ui_scale_factor.get();
 
-        ct.get_mut(self.ct_root).offset[0] = 8.0 * ui_scale_factor;
+        ct.get_mut(self.ct_root).offset[0] = (-Self::SIZE - 8.0) * ui_scale_factor;
+        ct.get_mut(self.ct_root).animation_data_left = Some(AnimationData {
+            to_value: 8.0 * ui_scale_factor,
+            start_sec: current_sec,
+            end_sec: current_sec + 0.25,
+            curve_p1: (0.25, 0.8),
+            curve_p2: (0.5, 1.0),
+        });
         ct.mark_dirty(self.ct_root);
         ht.get_data_mut(self.ht_root).left = 8.0;
     }
@@ -860,39 +879,52 @@ impl SpriteListToggleButtonView {
         ct.mark_dirty(self.ct_icon);
     }
 
-    fn update_button_bg_opacity(&self, composite_tree: &mut CompositeTree) {
+    fn update_button_bg_opacity(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
         let opacity = match (self.hovering.get(), self.pressing.get()) {
             (_, true) => 0.375,
             (true, _) => 0.25,
             _ => 0.0,
         };
 
+        let current = match composite_tree.get(self.ct_root).composite_mode {
+            CompositeMode::ColorTint(ref x) => x.compute(current_sec),
+            _ => unreachable!(),
+        };
         composite_tree.get_mut(self.ct_root).composite_mode =
-            CompositeMode::ColorTint([1.0, 1.0, 1.0, opacity]);
+            CompositeMode::ColorTint(AnimatableColor::Animated(
+                current,
+                AnimationData {
+                    to_value: [1.0, 1.0, 1.0, opacity],
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.1,
+                    curve_p1: (0.5, 0.0),
+                    curve_p2: (0.5, 1.0),
+                },
+            ));
         composite_tree.mark_dirty(self.ct_root);
     }
 
-    pub fn on_hover(&self, composite_tree: &mut CompositeTree) {
+    pub fn on_hover(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
         self.hovering.set(true);
-        self.update_button_bg_opacity(composite_tree);
+        self.update_button_bg_opacity(composite_tree, current_sec);
     }
 
-    pub fn on_leave(&self, composite_tree: &mut CompositeTree) {
+    pub fn on_leave(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
         self.hovering.set(false);
         // はずれたらpressingもなかったことにする
         self.pressing.set(false);
 
-        self.update_button_bg_opacity(composite_tree);
+        self.update_button_bg_opacity(composite_tree, current_sec);
     }
 
-    pub fn on_press(&self, composite_tree: &mut CompositeTree) {
+    pub fn on_press(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
         self.pressing.set(true);
-        self.update_button_bg_opacity(composite_tree);
+        self.update_button_bg_opacity(composite_tree, current_sec);
     }
 
-    pub fn on_release(&self, composite_tree: &mut CompositeTree) {
+    pub fn on_release(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
         self.pressing.set(false);
-        self.update_button_bg_opacity(composite_tree);
+        self.update_button_bg_opacity(composite_tree, current_sec);
     }
 }
 
@@ -1402,7 +1434,8 @@ impl SpriteListPaneView {
                 Self::CORNER_RADIUS * init.ui_scale_factor,
                 Self::CORNER_RADIUS * init.ui_scale_factor,
             ];
-            ct_root.composite_mode = CompositeMode::ColorTint([1.0, 1.0, 1.0, 0.5]);
+            ct_root.composite_mode =
+                CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 0.5]));
         }
         let ct_title_blurred = init.composite_tree.alloc();
         init.composite_tree.add_child(ct_root, ct_title_blurred);
@@ -1420,7 +1453,8 @@ impl SpriteListPaneView {
                 title_blurred_atlas_rect.height() as f32,
             ];
             ct_title_blurred.texatlas_rect = title_blurred_atlas_rect.clone();
-            ct_title_blurred.composite_mode = CompositeMode::ColorTint([0.9, 0.9, 0.9, 1.0]);
+            ct_title_blurred.composite_mode =
+                CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0]));
         }
         let ct_title = init.composite_tree.alloc();
         init.composite_tree.add_child(ct_root, ct_title);
@@ -1438,7 +1472,8 @@ impl SpriteListPaneView {
                 title_atlas_rect.height() as f32,
             ];
             ct_title.texatlas_rect = title_atlas_rect.clone();
-            ct_title.composite_mode = CompositeMode::ColorTint([0.1, 0.1, 0.1, 1.0]);
+            ct_title.composite_mode =
+                CompositeMode::ColorTint(AnimatableColor::Value([0.1, 0.1, 0.1, 1.0]));
         }
 
         let ht_frame = init.ht.create(HitTestTreeData {
@@ -1558,7 +1593,7 @@ impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
     ) -> EventContinueControl {
         if sender == self.toggle_button_view.ht_root {
             self.toggle_button_view
-                .on_hover(&mut context.composite_tree);
+                .on_hover(&mut context.composite_tree, context.current_sec);
 
             return EventContinueControl::STOP_PROPAGATION;
         }
@@ -1575,7 +1610,7 @@ impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
     ) -> EventContinueControl {
         if sender == self.toggle_button_view.ht_root {
             self.toggle_button_view
-                .on_leave(&mut context.composite_tree);
+                .on_leave(&mut context.composite_tree, context.current_sec);
 
             return EventContinueControl::STOP_PROPAGATION;
         }
@@ -1599,7 +1634,7 @@ impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
 
         if sender == self.toggle_button_view.ht_root {
             self.toggle_button_view
-                .on_press(&mut context.composite_tree);
+                .on_press(&mut context.composite_tree, context.current_sec);
 
             return EventContinueControl::STOP_PROPAGATION;
         }
@@ -1644,7 +1679,7 @@ impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
 
         if sender == self.toggle_button_view.ht_root {
             self.toggle_button_view
-                .on_release(&mut context.composite_tree);
+                .on_release(&mut context.composite_tree, context.current_sec);
 
             return EventContinueControl::STOP_PROPAGATION;
         }
@@ -1666,13 +1701,19 @@ impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
             if show {
                 self.view
                     .show(&mut context.composite_tree, ht, context.current_sec);
-                self.toggle_button_view
-                    .place_inner(&mut context.composite_tree, ht);
+                self.toggle_button_view.place_inner(
+                    &mut context.composite_tree,
+                    ht,
+                    context.current_sec,
+                );
             } else {
                 self.view
                     .hide(&mut context.composite_tree, ht, context.current_sec);
-                self.toggle_button_view
-                    .place_outer(&mut context.composite_tree, ht);
+                self.toggle_button_view.place_outer(
+                    &mut context.composite_tree,
+                    ht,
+                    context.current_sec,
+                );
             }
 
             self.toggle_button_view
@@ -1697,7 +1738,7 @@ impl SpriteListPanePresenter {
         let toggle_button_view = Rc::new(SpriteListToggleButtonView::new(init));
 
         toggle_button_view.mount(init.composite_tree, view.ct_root, init.ht, view.ht_frame);
-        toggle_button_view.place_inner(init.composite_tree, init.ht);
+        toggle_button_view.place_inner(init.composite_tree, init.ht, -0.25);
 
         let ht_action_handler = Rc::new(SpriteListPaneActionHandler {
             view: view.clone(),
@@ -2537,7 +2578,8 @@ fn main() {
             text_surface_rect.height() as _,
         ];
         title_cr.texatlas_rect = text_surface_rect.clone();
-        title_cr.composite_mode = CompositeMode::ColorTint([1.0, 1.0, 1.0, 1.0]);
+        title_cr.composite_mode =
+            CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 1.0]));
     }
 
     let header_size =
@@ -3107,6 +3149,7 @@ fn main() {
                     surface_x,
                     surface_y,
                 } => {
+                    app_update_context.current_sec = t.elapsed().as_secs_f32();
                     let (cw, ch) = client_size.get();
                     pointer_input_manager.handle_mouse_move(
                         surface_x,

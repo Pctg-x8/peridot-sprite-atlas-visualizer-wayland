@@ -41,7 +41,7 @@ pub struct CompositeStreamingData {
 
 pub enum CompositeMode {
     DirectSourceOver,
-    ColorTint([f32; 4]),
+    ColorTint(AnimatableColor),
 }
 impl CompositeMode {
     const fn shader_mode_value(&self) -> f32 {
@@ -52,14 +52,37 @@ impl CompositeMode {
     }
 }
 
-pub struct AnimationData {
+const fn lerp(x: f32, a: f32, b: f32) -> f32 {
+    a + (b - a) * x
+}
+
+const fn lerp4(x: f32, [a, c, e, g]: [f32; 4], [b, d, f, h]: [f32; 4]) -> [f32; 4] {
+    [lerp(x, a, b), lerp(x, c, d), lerp(x, e, f), lerp(x, g, h)]
+}
+
+pub enum AnimatableColor {
+    Value([f32; 4]),
+    Animated([f32; 4], AnimationData<[f32; 4]>),
+}
+impl AnimatableColor {
+    pub fn compute(&self, current_sec: f32) -> [f32; 4] {
+        match self {
+            &Self::Value(x) => x,
+            &Self::Animated(from_value, ref a) => {
+                lerp4(a.interpolate(current_sec), from_value, a.to_value)
+            }
+        }
+    }
+}
+
+pub struct AnimationData<T> {
     pub start_sec: f32,
     pub end_sec: f32,
-    pub to_value: f32,
+    pub to_value: T,
     pub curve_p1: (f32, f32),
     pub curve_p2: (f32, f32),
 }
-impl AnimationData {
+impl<T> AnimationData<T> {
     fn interpolate(&self, current_sec: f32) -> f32 {
         // out of limits
         if current_sec < self.start_sec {
@@ -228,10 +251,10 @@ pub struct CompositeRect {
     pub texatlas_rect: AtlasRect,
     pub slice_borders: [f32; 4],
     pub composite_mode: CompositeMode,
-    pub animation_data_left: Option<AnimationData>,
-    pub animation_data_top: Option<AnimationData>,
-    pub animation_data_width: Option<AnimationData>,
-    pub animation_data_height: Option<AnimationData>,
+    pub animation_data_left: Option<AnimationData<f32>>,
+    pub animation_data_top: Option<AnimationData<f32>>,
+    pub animation_data_width: Option<AnimationData<f32>>,
+    pub animation_data_height: Option<AnimationData<f32>>,
     pub dirty: bool,
     pub parent: Option<usize>,
     pub children: Vec<usize>,
@@ -624,7 +647,7 @@ impl CompositeTree {
                                 ],
                                 color_tint: match r.composite_mode {
                                     CompositeMode::DirectSourceOver => [0.0; 4],
-                                    CompositeMode::ColorTint(t) => t,
+                                    CompositeMode::ColorTint(ref t) => t.compute(current_sec),
                                 },
                                 pos_x_animation_data: [0.0; 4],
                                 pos_x_curve_control_points: [0.0; 4],

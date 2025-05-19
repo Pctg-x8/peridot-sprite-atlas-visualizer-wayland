@@ -7,7 +7,7 @@ layout(location = 3) in vec4 sliceBordersLTRB;
 layout(location = 4) in vec4 colorTint;
 layout(location = 5) in vec4 texSlicedSizePixels;
 
-layout(set = 0, binding = 0) uniform sampler2D tex;
+layout(set = 0, binding = 2) uniform sampler2D tex;
 
 layout(location = 0) out vec4 col_out;
 

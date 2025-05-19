@@ -9,7 +9,7 @@ mod subsystem;
 mod text;
 mod wl;
 
-use std::{cell::Cell, collections::VecDeque, rc::Rc};
+use std::{cell::Cell, collections::VecDeque, rc::Rc, time::Duration};
 
 use bedrock::{
     self as br, CommandBufferMut, CommandPoolMut, DescriptorPoolMut, Device, DeviceMemoryMut,
@@ -17,8 +17,8 @@ use bedrock::{
     ShaderModule, SurfaceCreateInfo, Swapchain, VkHandle, VkHandleMut,
 };
 use composite::{
-    AtlasRect, CompositeInstanceData, CompositeInstanceManager, CompositeMode, CompositeTree,
-    CompositeTreeRef, CompositionSurfaceAtlas,
+    AnimationData, AtlasRect, CompositeInstanceData, CompositeInstanceManager, CompositeMode,
+    CompositeStreamingData, CompositeTree, CompositeTreeRef, CompositionSurfaceAtlas,
 };
 use freetype::FreeType;
 use hittest::{
@@ -351,21 +351,15 @@ impl SpriteListToggleButtonView {
     const ICON_SIZE: f32 = 7.0;
     const ICON_THICKNESS: f32 = 1.5;
 
-    pub fn new(init: &mut ViewInitContext) -> Self {
-        let icon_size_px = (Self::ICON_SIZE * init.ui_scale_factor).ceil() as u32;
-        let icon_atlas_rect = init.atlas.alloc(icon_size_px, icon_size_px);
-        let circle_atlas_rect = init.atlas.alloc(
-            (Self::SIZE * init.ui_scale_factor) as _,
-            (Self::SIZE * init.ui_scale_factor) as _,
-        );
-
+    const ICON_VERTICES: &'static [[f32; 2]] = const {
         let top_left: (f32, f32) = (0.4 - (0.5 * Self::ICON_THICKNESS / Self::ICON_SIZE), 0.0);
         let top_right: (f32, f32) = (0.4 + (0.5 * Self::ICON_THICKNESS / Self::ICON_SIZE), 0.0);
         let middle_left: (f32, f32) = (0.0, 0.5);
         let middle_right: (f32, f32) = (Self::ICON_THICKNESS / Self::ICON_SIZE, 0.5);
         let bottom_left: (f32, f32) = (0.4 - (0.5 * Self::ICON_THICKNESS / Self::ICON_SIZE), 1.0);
         let bottom_right: (f32, f32) = (0.4 + (0.5 * Self::ICON_THICKNESS / Self::ICON_SIZE), 1.0);
-        let vertices = [
+
+        &[
             [top_left.0 * 2.0 - 1.0, top_left.1 * 2.0 - 1.0],
             [top_right.0 * 2.0 - 1.0, top_right.1 * 2.0 - 1.0],
             [middle_left.0 * 2.0 - 1.0, middle_left.1 * 2.0 - 1.0],
@@ -384,12 +378,22 @@ impl SpriteListToggleButtonView {
                 (bottom_right.0 + 0.6) * 2.0 - 1.0,
                 bottom_right.1 * 2.0 - 1.0,
             ],
-        ];
-        let indices = [
-            0u16, 1, 2, 2, 1, 3, 2, 3, 4, 4, 3, 5, 6, 7, 8, 8, 7, 9, 8, 9, 10, 10, 9, 11,
-        ];
-        let bufsize = vertices.len() * core::mem::size_of::<[f32; 2]>()
-            + indices.len() * core::mem::size_of::<u16>();
+        ]
+    };
+    const ICON_INDICES: &'static [u16] = &[
+        0u16, 1, 2, 2, 1, 3, 2, 3, 4, 4, 3, 5, 6, 7, 8, 8, 7, 9, 8, 9, 10, 10, 9, 11,
+    ];
+
+    pub fn new(init: &mut ViewInitContext) -> Self {
+        let icon_size_px = (Self::ICON_SIZE * init.ui_scale_factor).ceil() as u32;
+        let icon_atlas_rect = init.atlas.alloc(icon_size_px, icon_size_px);
+        let circle_atlas_rect = init.atlas.alloc(
+            (Self::SIZE * init.ui_scale_factor) as _,
+            (Self::SIZE * init.ui_scale_factor) as _,
+        );
+
+        let bufsize = Self::ICON_VERTICES.len() * core::mem::size_of::<[f32; 2]>()
+            + Self::ICON_INDICES.len() * core::mem::size_of::<u16>();
         let mut buf = br::BufferObject::new(
             &init.subsystem,
             &br::BufferCreateInfo::new(
@@ -407,10 +411,10 @@ impl SpriteListToggleButtonView {
             .enumerate()
             .find(|(n, t)| {
                 (mreq.memoryTypeBits & (1 << n)) != 0
-                    && t.property_flags()
-                        .has(br::MemoryPropertyFlags::DEVICE_LOCAL)
-                    && t.property_flags()
-                        .has(br::MemoryPropertyFlags::HOST_VISIBLE)
+                    && t.property_flags().has_all(
+                        br::MemoryPropertyFlags::DEVICE_LOCAL
+                            | br::MemoryPropertyFlags::HOST_VISIBLE,
+                    )
             })
             .expect("no suitable memory")
             .0 as u32;
@@ -423,11 +427,15 @@ impl SpriteListToggleButtonView {
         let n = mem.native_ptr();
         let ptr = mem.map(0..bufsize).unwrap();
         unsafe {
-            core::ptr::copy_nonoverlapping(vertices.as_ptr(), ptr.addr_of_mut(0), vertices.len());
             core::ptr::copy_nonoverlapping(
-                indices.as_ptr(),
-                ptr.addr_of_mut(vertices.len() * core::mem::size_of::<[f32; 2]>()),
-                indices.len(),
+                Self::ICON_VERTICES.as_ptr(),
+                ptr.addr_of_mut(0),
+                Self::ICON_VERTICES.len(),
+            );
+            core::ptr::copy_nonoverlapping(
+                Self::ICON_INDICES.as_ptr(),
+                ptr.addr_of_mut(Self::ICON_VERTICES.len() * core::mem::size_of::<[f32; 2]>()),
+                Self::ICON_INDICES.len(),
             );
         }
         if !init.subsystem.adapter_memory_info.is_coherent(memindex) {
@@ -675,10 +683,10 @@ impl SpriteListToggleButtonView {
         .bind_vertex_buffer_array(0, &[buf.as_transparent_ref()], &[0])
         .bind_index_buffer(
             &buf,
-            vertices.len() * core::mem::size_of::<[f32; 2]>(),
+            Self::ICON_VERTICES.len() * core::mem::size_of::<[f32; 2]>(),
             br::IndexType::U16,
         )
-        .draw_indexed(indices.len() as _, 1, 0, 0, 0)
+        .draw_indexed(Self::ICON_INDICES.len() as _, 1, 0, 0, 0)
         .end_render_pass2(&br::SubpassEndInfo::new())
         .begin_render_pass2(
             &br::RenderPassBeginInfo::new(
@@ -1486,14 +1494,38 @@ impl SpriteListPaneView {
         self.width.set(width);
     }
 
-    pub fn show(&self, ct: &mut CompositeTree, ht: &mut HitTestTreeManager<AppUpdateContext>) {
-        ct.get_mut(self.ct_root).offset[0] = Self::FLOATING_MARGIN * self.ui_scale_factor.get();
+    pub fn show(
+        &self,
+        ct: &mut CompositeTree,
+        ht: &mut HitTestTreeManager<AppUpdateContext>,
+        current_sec: f32,
+    ) {
+        ct.get_mut(self.ct_root).offset[0] = -self.width.get() * self.ui_scale_factor.get();
+        ct.get_mut(self.ct_root).animation_data_left = Some(AnimationData {
+            to_value: Self::FLOATING_MARGIN * self.ui_scale_factor.get(),
+            start_sec: current_sec,
+            end_sec: current_sec + 0.25,
+            curve_p1: (0.4, 1.25),
+            curve_p2: (0.5, 1.0),
+        });
         ct.mark_dirty(self.ct_root);
         ht.get_data_mut(self.ht_frame).left = Self::FLOATING_MARGIN;
     }
 
-    pub fn hide(&self, ct: &mut CompositeTree, ht: &mut HitTestTreeManager<AppUpdateContext>) {
-        ct.get_mut(self.ct_root).offset[0] = -self.width.get() * self.ui_scale_factor.get();
+    pub fn hide(
+        &self,
+        ct: &mut CompositeTree,
+        ht: &mut HitTestTreeManager<AppUpdateContext>,
+        current_sec: f32,
+    ) {
+        ct.get_mut(self.ct_root).offset[0] = Self::FLOATING_MARGIN * self.ui_scale_factor.get();
+        ct.get_mut(self.ct_root).animation_data_left = Some(AnimationData {
+            to_value: -self.width.get() * self.ui_scale_factor.get(),
+            start_sec: current_sec,
+            end_sec: current_sec + 0.25,
+            curve_p1: (0.4, 1.25),
+            curve_p2: (0.5, 1.0),
+        });
         ct.mark_dirty(self.ct_root);
         ht.get_data_mut(self.ht_frame).left = -self.width.get();
     }
@@ -1510,7 +1542,7 @@ impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
     type Context = AppUpdateContext;
 
     fn cursor_shape(&self, sender: HitTestTreeRef, _context: &mut Self::Context) -> CursorShape {
-        if sender == self.ht_resize_area {
+        if sender == self.ht_resize_area && self.shown.get() {
             return CursorShape::ResizeHorizontal;
         }
 
@@ -1558,7 +1590,7 @@ impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
         _ht: &mut HitTestTreeManager<Self::Context>,
         args: hittest::PointerActionArgs,
     ) -> input::EventContinueControl {
-        if sender == self.ht_resize_area {
+        if sender == self.ht_resize_area && self.shown.get() {
             self.resize_state
                 .set(Some((self.view.width.get(), args.client_x)));
 
@@ -1582,7 +1614,7 @@ impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
         ht: &mut HitTestTreeManager<Self::Context>,
         args: hittest::PointerActionArgs,
     ) -> EventContinueControl {
-        if sender == self.ht_resize_area {
+        if sender == self.ht_resize_area && self.shown.get() {
             if let Some((base_width, base_cx)) = self.resize_state.get() {
                 let w = (base_width + (args.client_x - base_cx)).max(16.0);
                 self.view.set_width(w, &mut context.composite_tree, ht);
@@ -1601,7 +1633,7 @@ impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
         ht: &mut HitTestTreeManager<Self::Context>,
         args: hittest::PointerActionArgs,
     ) -> EventContinueControl {
-        if sender == self.ht_resize_area {
+        if sender == self.ht_resize_area && self.shown.get() {
             if let Some((base_width, base_cx)) = self.resize_state.replace(None) {
                 let w = (base_width + (args.client_x - base_cx)).max(16.0);
                 self.view.set_width(w, &mut context.composite_tree, ht);
@@ -1632,11 +1664,13 @@ impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
             self.shown.set(show);
 
             if show {
-                self.view.show(&mut context.composite_tree, ht);
+                self.view
+                    .show(&mut context.composite_tree, ht, context.current_sec);
                 self.toggle_button_view
                     .place_inner(&mut context.composite_tree, ht);
             } else {
-                self.view.hide(&mut context.composite_tree, ht);
+                self.view
+                    .hide(&mut context.composite_tree, ht, context.current_sec);
                 self.toggle_button_view
                     .place_outer(&mut context.composite_tree, ht);
             }
@@ -1701,6 +1735,7 @@ pub struct AppState {}
 pub struct AppUpdateContext {
     composite_tree: CompositeTree,
     state: AppState,
+    current_sec: f32,
 }
 
 fn main() {
@@ -2109,7 +2144,7 @@ fn main() {
     let surface_formats = subsystem.adapter().surface_formats_alloc(&surface).unwrap();
     let sc_transform = if surface_caps
         .supported_transforms()
-        .has(br::SurfaceTransformFlags::IDENTITY)
+        .has_any(br::SurfaceTransformFlags::IDENTITY)
     {
         br::SurfaceTransformFlags::IDENTITY.bits()
     } else {
@@ -2117,7 +2152,7 @@ fn main() {
     };
     let sc_composite_alpha = if surface_caps
         .supported_composite_alpha()
-        .has(br::CompositeAlphaFlags::OPAQUE)
+        .has_any(br::CompositeAlphaFlags::OPAQUE)
     {
         br::CompositeAlphaFlags::OPAQUE.bits()
     } else {
@@ -2308,6 +2343,9 @@ fn main() {
         ui_default: ft_face,
     };
 
+    let mut composite_instance_buffer = CompositeInstanceManager::new(&subsystem);
+    let mut composite_tree = CompositeTree::new();
+
     let main_rp = br::RenderPassObject::new(
         &subsystem,
         &br::RenderPassCreateInfo2::new(
@@ -2376,10 +2414,20 @@ fn main() {
         br::PipelineShaderStage::new(br::ShaderStage::Fragment, &composite_fsh, c"main"),
     ];
 
-    let composite_fsh_input_layout = br::DescriptorSetLayoutObject::new(
+    let composite_descriptor_layout = br::DescriptorSetLayoutObject::new(
         &subsystem,
         &br::DescriptorSetLayoutCreateInfo::new(&[
-            br::DescriptorType::CombinedImageSampler.make_binding(0, 1)
+            br::DescriptorType::StorageBuffer
+                .make_binding(0, 1)
+                .for_shader_stage(
+                    br::vk::VK_SHADER_STAGE_VERTEX_BIT | br::vk::VK_SHADER_STAGE_FRAGMENT_BIT,
+                ),
+            br::DescriptorType::UniformBuffer
+                .make_binding(1, 1)
+                .for_shader_stage(br::vk::VK_SHADER_STAGE_VERTEX_BIT),
+            br::DescriptorType::CombinedImageSampler
+                .make_binding(2, 1)
+                .only_for_fragment(),
         ]),
     )
     .unwrap();
@@ -2387,30 +2435,48 @@ fn main() {
         &subsystem,
         &br::DescriptorPoolCreateInfo::new(
             1,
-            &[br::DescriptorType::CombinedImageSampler.make_size(1)],
+            &[
+                br::DescriptorType::CombinedImageSampler.make_size(1),
+                br::DescriptorType::UniformBuffer.make_size(1),
+                br::DescriptorType::StorageBuffer.make_size(1),
+            ],
         ),
     )
     .unwrap();
-    let [composite_alphamask_tex_descriptor] = descriptor_pool
-        .alloc_array(&[composite_fsh_input_layout.as_transparent_ref()])
+    let [composite_alphamask_group_descriptor] = descriptor_pool
+        .alloc_array(&[composite_descriptor_layout.as_transparent_ref()])
         .unwrap();
     subsystem.update_descriptor_sets(
-        &[composite_alphamask_tex_descriptor.binding_at(0).write(
-            br::DescriptorContents::CombinedImageSampler(vec![
-                br::DescriptorImageInfo::new(
-                    composition_alphamask_surface_atlas.resource(),
-                    br::ImageLayout::ShaderReadOnlyOpt,
-                )
-                .with_sampler(&composite_sampler),
-            ]),
-        )],
+        &[
+            composite_alphamask_group_descriptor.binding_at(0).write(
+                br::DescriptorContents::storage_buffer(
+                    composite_instance_buffer.buffer(),
+                    0..(core::mem::size_of::<CompositeInstanceData>() * 1024) as _,
+                ),
+            ),
+            composite_alphamask_group_descriptor.binding_at(1).write(
+                br::DescriptorContents::uniform_buffer(
+                    composite_instance_buffer.streaming_buffer(),
+                    0..core::mem::size_of::<CompositeStreamingData>() as _,
+                ),
+            ),
+            composite_alphamask_group_descriptor.binding_at(2).write(
+                br::DescriptorContents::CombinedImageSampler(vec![
+                    br::DescriptorImageInfo::new(
+                        composition_alphamask_surface_atlas.resource(),
+                        br::ImageLayout::ShaderReadOnlyOpt,
+                    )
+                    .with_sampler(&composite_sampler),
+                ]),
+            ),
+        ],
         &[],
     );
 
     let composite_pipeline_layout = br::PipelineLayoutObject::new(
         &subsystem,
         &br::PipelineLayoutCreateInfo::new(
-            &[composite_fsh_input_layout.as_transparent_ref()],
+            &[composite_descriptor_layout.as_transparent_ref()],
             &[br::vk::VkPushConstantRange::for_type::<[f32; 2]>(
                 br::vk::VK_SHADER_STAGE_VERTEX_BIT,
                 0,
@@ -2418,44 +2484,7 @@ fn main() {
         ),
     )
     .unwrap();
-    let composite_vbinds =
-        [br::vk::VkVertexInputBindingDescription::per_instance_typed::<CompositeInstanceData>(0)];
-    let composite_vinput = br::PipelineVertexInputStateCreateInfo::new(
-        &composite_vbinds,
-        &[
-            br::vk::VkVertexInputAttributeDescription {
-                location: 0,
-                binding: 0,
-                format: br::vk::VK_FORMAT_R32G32B32A32_SFLOAT,
-                offset: core::mem::offset_of!(CompositeInstanceData, pos_st) as _,
-            },
-            br::vk::VkVertexInputAttributeDescription {
-                location: 1,
-                binding: 0,
-                format: br::vk::VK_FORMAT_R32G32B32A32_SFLOAT,
-                offset: core::mem::offset_of!(CompositeInstanceData, uv_st) as _,
-            },
-            br::vk::VkVertexInputAttributeDescription {
-                location: 2,
-                binding: 0,
-                format: br::vk::VK_FORMAT_R32G32B32A32_SFLOAT,
-                offset: core::mem::offset_of!(CompositeInstanceData, slice_borders) as _,
-            },
-            br::vk::VkVertexInputAttributeDescription {
-                location: 3,
-                binding: 0,
-                format: br::vk::VK_FORMAT_R32G32B32A32_SFLOAT,
-                offset: core::mem::offset_of!(CompositeInstanceData, tex_size_pixels_composite_mode)
-                    as _,
-            },
-            br::vk::VkVertexInputAttributeDescription {
-                location: 4,
-                binding: 0,
-                format: br::vk::VK_FORMAT_R32G32B32A32_SFLOAT,
-                offset: core::mem::offset_of!(CompositeInstanceData, color_tint) as _,
-            },
-        ],
-    );
+    let composite_vinput = br::PipelineVertexInputStateCreateInfo::new(&[], &[]);
     let composite_ia_state =
         br::PipelineInputAssemblyStateCreateInfo::new(br::PrimitiveTopology::TriangleStrip);
     let composite_raster_state = br::PipelineRasterizationStateCreateInfo::new(
@@ -2492,9 +2521,6 @@ fn main() {
             None::<&br::PipelineCacheObject<&br::DeviceObject<&br::InstanceObject>>>,
         )
         .unwrap();
-
-    let mut composite_instance_buffer = CompositeInstanceManager::new(&subsystem);
-    let mut composite_tree = CompositeTree::new();
 
     let title_cr = composite_tree.alloc();
     composite_tree.add_child(CompositeTree::ROOT, title_cr);
@@ -2548,6 +2574,7 @@ fn main() {
     unsafe {
         composite_tree.sink_all(
             sc_size,
+            0.0,
             br::Extent2D {
                 width: composition_alphamask_surface_atlas.size(),
                 height: composition_alphamask_surface_atlas.size(),
@@ -2611,11 +2638,6 @@ fn main() {
         )
         .draw(3, 1, 0, 0)
         .bind_pipeline(br::PipelineBindPoint::Graphics, &composite_pipeline)
-        .bind_vertex_buffer_array(
-            0,
-            &[composite_instance_buffer.buffer().as_transparent_ref()],
-            &[0],
-        )
         .push_constant(
             &composite_pipeline_layout,
             br::vk::VK_SHADER_STAGE_VERTEX_BIT,
@@ -2626,7 +2648,7 @@ fn main() {
             br::PipelineBindPoint::Graphics,
             &composite_pipeline_layout,
             0,
-            &[composite_alphamask_tex_descriptor],
+            &[composite_alphamask_group_descriptor],
             &[],
         )
         .draw(4, composite_instance_buffer.count() as _, 0, 0)
@@ -2687,13 +2709,13 @@ fn main() {
         .inject(|r| composite_instance_buffer.sync_buffer(r))
         .pipeline_barrier_2(&br::DependencyInfo::new(
             &[br::MemoryBarrier2::new()
-                .of_memory(
-                    br::AccessFlags2::TRANSFER.write,
-                    br::AccessFlags2::VERTEX_ATTRIBUTE_READ,
-                )
-                .of_execution(
+                .from(
                     br::PipelineStageFlags2::COPY,
-                    br::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT,
+                    br::AccessFlags2::TRANSFER.write,
+                )
+                .to(
+                    br::PipelineStageFlags2::VERTEX_SHADER,
+                    br::AccessFlags2::SHADER.read,
                 )],
             &[],
             &[],
@@ -2741,10 +2763,12 @@ fn main() {
     let mut app_update_context = AppUpdateContext {
         composite_tree,
         state: app_state,
+        current_sec: 0.0,
     };
 
     dp.flush().unwrap();
-    let mut t = std::time::Instant::now();
+    let t = std::time::Instant::now();
+    let mut last_frame_t = Duration::ZERO;
     let mut frame_resize_request = None;
     let mut last_render_scale = surface_events.optimal_buffer_scale;
     let mut last_render_size = sc_size;
@@ -2755,8 +2779,9 @@ fn main() {
             match e {
                 AppEvent::ToplevelWindowClose => break 'app,
                 AppEvent::ToplevelWindowFrameTiming => {
-                    let dt = t.elapsed();
-                    t = std::time::Instant::now();
+                    let current_t = t.elapsed();
+                    let dt = current_t - last_frame_t;
+                    last_frame_t = current_t;
                     // print!("frame {dt:?}\n");
 
                     if last_rendering {
@@ -2767,6 +2792,7 @@ fn main() {
                     if app_update_context.composite_tree.take_dirty()
                         || last_render_scale != surface_events.optimal_buffer_scale
                         || last_render_size != sc_size
+                        || true
                     {
                         let n = composite_instance_buffer.memory_stg().native_ptr();
                         let r = composite_instance_buffer.range_all();
@@ -2779,10 +2805,10 @@ fn main() {
                         unsafe {
                             app_update_context.composite_tree.sink_all(
                                 sc_size,
-                                br::Extent2D {
-                                    width: composition_alphamask_surface_atlas.size() as _,
-                                    height: composition_alphamask_surface_atlas.size() as _,
-                                },
+                                current_t.as_secs_f32(),
+                                br::Extent2D::spread1(
+                                    composition_alphamask_surface_atlas.size() as _
+                                ),
                                 &ptr,
                             );
                         }
@@ -2828,19 +2854,50 @@ fn main() {
                         };
                         rec.pipeline_barrier_2(&br::DependencyInfo::new(
                             &[br::MemoryBarrier2::new()
-                                .of_memory(
-                                    br::AccessFlags2::TRANSFER.write,
-                                    br::AccessFlags2::VERTEX_ATTRIBUTE_READ,
-                                )
-                                .of_execution(
+                                .from(
                                     br::PipelineStageFlags2::COPY,
-                                    br::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT,
+                                    br::AccessFlags2::TRANSFER.write,
+                                )
+                                .to(
+                                    br::PipelineStageFlags2::VERTEX_SHADER,
+                                    br::AccessFlags2::SHADER.read,
                                 )],
                             &[],
                             &[],
                         ))
                         .end()
                         .unwrap();
+                    }
+
+                    let n = composite_instance_buffer
+                        .streaming_memory_exc()
+                        .native_ptr();
+                    let flush_required =
+                        composite_instance_buffer.streaming_memory_requires_flush();
+                    let mapped = composite_instance_buffer
+                        .streaming_memory_exc()
+                        .map(0..core::mem::size_of::<CompositeStreamingData>())
+                        .unwrap();
+                    unsafe {
+                        core::ptr::write(
+                            &mut (*mapped.addr_of_mut::<CompositeStreamingData>(0)).current_sec,
+                            current_t.as_secs_f32(),
+                        );
+                    }
+                    if flush_required {
+                        unsafe {
+                            subsystem
+                                .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(
+                                    n,
+                                    0,
+                                    core::mem::size_of::<CompositeStreamingData>() as _,
+                                )])
+                                .unwrap();
+                        }
+                    }
+                    mapped.end();
+
+                    if needs_update {
                         subsystem
                             .submit_graphics_works(
                                 &[br::SubmitInfo2::new(
@@ -3029,13 +3086,8 @@ fn main() {
                                     br::PipelineBindPoint::Graphics,
                                     &composite_pipeline_layout,
                                     0,
-                                    &[composite_alphamask_tex_descriptor],
+                                    &[composite_alphamask_group_descriptor],
                                     &[],
-                                )
-                                .bind_vertex_buffer_array(
-                                    0,
-                                    &[composite_instance_buffer.buffer().as_transparent_ref()],
-                                    &[0],
                                 )
                                 .draw(4, composite_instance_buffer.count() as _, 0, 0)
                                 .end_render_pass2(&br::SubpassEndInfo::new())
@@ -3082,6 +3134,7 @@ fn main() {
                     last_pointer_pos = (surface_x, surface_y);
                 }
                 AppEvent::MainWindowPointerLeftDown { enter_serial } => {
+                    app_update_context.current_sec = t.elapsed().as_secs_f32();
                     let (cw, ch) = client_size.get();
                     pointer_input_manager.handle_mouse_left_down(
                         last_pointer_pos.0,
@@ -3108,6 +3161,7 @@ fn main() {
                         .unwrap();
                 }
                 AppEvent::MainWindowPointerLeftUp { enter_serial } => {
+                    app_update_context.current_sec = t.elapsed().as_secs_f32();
                     let (cw, ch) = client_size.get();
                     pointer_input_manager.handle_mouse_left_up(
                         last_pointer_pos.0,

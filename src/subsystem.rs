@@ -98,16 +98,16 @@ impl Subsystem {
         let adapter_queue_info = adapter.queue_family_properties_alloc();
         for (n, q) in adapter_queue_info.iter().enumerate() {
             let mut v = Vec::with_capacity(4);
-            if q.queue_flags().has(br::QueueFlags::GRAPHICS) {
+            if q.queue_flags().has_any(br::QueueFlags::GRAPHICS) {
                 v.push("Graphics");
             }
-            if q.queue_flags().has(br::QueueFlags::COMPUTE) {
+            if q.queue_flags().has_any(br::QueueFlags::COMPUTE) {
                 v.push("Compute");
             }
-            if q.queue_flags().has(br::QueueFlags::TRANSFER) {
+            if q.queue_flags().has_any(br::QueueFlags::TRANSFER) {
                 v.push("Transfer");
             }
-            if q.queue_flags().has(br::QueueFlags::SPARSE_BINDING) {
+            if q.queue_flags().has_any(br::QueueFlags::SPARSE_BINDING) {
                 v.push("Sparse Binding");
             }
 
@@ -119,37 +119,41 @@ impl Subsystem {
 
             let mut v = Vec::with_capacity(6);
             if p.property_flags()
-                .has(br::MemoryPropertyFlags::DEVICE_LOCAL)
+                .has_any(br::MemoryPropertyFlags::DEVICE_LOCAL)
             {
                 v.push("Device Local");
             }
             if p.property_flags()
-                .has(br::MemoryPropertyFlags::HOST_VISIBLE)
+                .has_any(br::MemoryPropertyFlags::HOST_VISIBLE)
             {
                 v.push("Host Visible");
             }
             if p.property_flags()
-                .has(br::MemoryPropertyFlags::HOST_COHERENT)
+                .has_any(br::MemoryPropertyFlags::HOST_COHERENT)
             {
                 v.push("Host Coherent");
             }
-            if p.property_flags().has(br::MemoryPropertyFlags::HOST_CACHED) {
+            if p.property_flags()
+                .has_any(br::MemoryPropertyFlags::HOST_CACHED)
+            {
                 v.push("Host Cached");
             }
             if p.property_flags()
-                .has(br::MemoryPropertyFlags::LAZILY_ALLOCATED)
+                .has_any(br::MemoryPropertyFlags::LAZILY_ALLOCATED)
             {
                 v.push("Lazy Allocated");
             }
-            if p.property_flags().has(br::MemoryPropertyFlags::PROTECTED) {
+            if p.property_flags()
+                .has_any(br::MemoryPropertyFlags::PROTECTED)
+            {
                 v.push("Protected");
             }
 
             let mut hv = Vec::with_capacity(2);
-            if h.flags().has(br::MemoryHeapFlags::DEVICE_LOCAL) {
+            if h.flags().has_any(br::MemoryHeapFlags::DEVICE_LOCAL) {
                 hv.push("Device Local");
             }
-            if h.flags().has(br::MemoryHeapFlags::MULTI_INSTANCE) {
+            if h.flags().has_any(br::MemoryHeapFlags::MULTI_INSTANCE) {
                 hv.push("Multi Instance");
             }
 
@@ -200,7 +204,7 @@ impl Subsystem {
                 })
                 .with_next(&mut br::vk::VkPhysicalDeviceSynchronization2Features {
                     sType:
-                        <br::vk::VkPhysicalDeviceSynchronization2Features as br::VulkanStructure>::TYPE,
+                        <br::vk::VkPhysicalDeviceSynchronization2Features as br::TypedVulkanStructure>::TYPE,
                     pNext: core::ptr::null_mut(),
                     synchronization2: 1,
                 }),

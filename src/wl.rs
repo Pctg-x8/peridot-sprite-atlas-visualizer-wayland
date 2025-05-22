@@ -68,6 +68,20 @@ impl Proxy {
         if r == 0 { Ok(()) } else { Err(()) }
     }
 
+    #[inline(always)]
+    pub unsafe fn add_dispatcher(
+        &mut self,
+        dispatcher: ffi::DispatcherFunc,
+        dispatcher_data: *const core::ffi::c_void,
+        data: *mut core::ffi::c_void,
+    ) -> Result<(), ()> {
+        let r = unsafe {
+            ffi::wl_proxy_add_dispatcher(self as *mut _ as _, dispatcher, dispatcher_data, data)
+        };
+
+        if r == 0 { Ok(()) } else { Err(()) }
+    }
+
     #[inline]
     fn marshal_array_flags(
         &mut self,

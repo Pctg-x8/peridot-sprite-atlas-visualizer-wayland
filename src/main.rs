@@ -2003,101 +2003,467 @@ pub struct AppUpdateContext {
     current_sec: f32,
 }
 
+struct FrameCallback {
+    app_event_queue: *mut VecDeque<AppEvent>,
+}
+impl wl::CallbackEventListener for FrameCallback {
+    fn done(&mut self, _: &mut wl::Callback, _: u32) {
+        unsafe { &mut *self.app_event_queue }.push_back(AppEvent::ToplevelWindowFrameTiming);
+    }
+}
+
+struct AppShell {
+    display: wl::Display,
+    _compositor: wl::Owned<wl::Compositor>,
+    _xdg_wm_base: wl::Owned<wl::XdgWmBase>,
+    _seat: wl::Owned<wl::Seat>,
+    _cursor_shape_manager: wl::Owned<wl::WpCursorShapeManagerV1>,
+    surface: wl::Owned<wl::Surface>,
+    xdg_surface: wl::Owned<wl::XdgSurface>,
+    _xdg_toplevel: wl::Owned<wl::XdgToplevel>,
+    _pointer: wl::Owned<wl::Pointer>,
+    cursor_shape_device: wl::Owned<wl::WpCursorShapeDeviceV1>,
+    frame_callback: wl::Owned<wl::Callback>,
+    frame_callback_data: Box<FrameCallback>,
+    event_bus: *mut VecDeque<AppEvent>,
+    ui_scale_factor: Rc<Cell<f32>>,
+}
+impl AppShell {
+    pub fn new(events: *mut VecDeque<AppEvent>) -> Self {
+        let mut dp = wl::Display::connect().unwrap();
+        let mut registry = dp.get_registry().unwrap();
+        struct RegistryListener {
+            compositor: Option<wl::Owned<wl::Compositor>>,
+            xdg_wm_base: Option<wl::Owned<wl::XdgWmBase>>,
+            seat: Option<wl::Owned<wl::Seat>>,
+            cursor_shape_manager: Option<wl::Owned<WpCursorShapeManagerV1>>,
+        }
+        impl wl::RegistryListener for RegistryListener {
+            fn global(
+                &mut self,
+                registry: &mut wl::Registry,
+                name: u32,
+                interface: &core::ffi::CStr,
+                version: u32,
+            ) {
+                println!("wl global: {name} {interface:?} {version}");
+
+                if interface == c"wl_compositor" {
+                    self.compositor = Some(
+                        registry
+                            .bind(name, version)
+                            .expect("Failed to bind compositor interface"),
+                    );
+                }
+
+                if interface == c"xdg_wm_base" {
+                    self.xdg_wm_base = Some(
+                        registry
+                            .bind(name, version)
+                            .expect("Failed to bind xdg wm base interface"),
+                    );
+                }
+
+                if interface == c"wl_seat" {
+                    self.seat = Some(
+                        registry
+                            .bind(name, version)
+                            .expect("Failed to bind seat interface"),
+                    );
+                }
+
+                if interface == c"wp_cursor_shape_manager_v1" {
+                    self.cursor_shape_manager = Some(
+                        registry
+                            .bind(name, version)
+                            .expect("Failed to bind wp_cursor_shape_manager_v1 interface"),
+                    );
+                }
+            }
+
+            fn global_remove(&mut self, _registry: &mut wl::Registry, name: u32) {
+                unimplemented!("wl global remove: {name}");
+            }
+        }
+        let mut rl = RegistryListener {
+            compositor: None,
+            xdg_wm_base: None,
+            seat: None,
+            cursor_shape_manager: None,
+        };
+        registry
+            .add_listener(&mut rl)
+            .expect("Failed to register listener");
+        dp.roundtrip().expect("Failed to roundtrip events");
+
+        let mut compositor = rl.compositor.take().unwrap();
+        let mut xdg_wm_base = rl.xdg_wm_base.take().unwrap();
+        let mut seat = rl.seat.take().unwrap();
+        let mut cursor_shape_manager = rl.cursor_shape_manager.take().unwrap();
+
+        struct SeatListener {
+            pointer: Option<wl::Owned<wl::Pointer>>,
+        }
+        impl wl::SeatEventListener for SeatListener {
+            fn capabilities(&mut self, seat: &mut wl::Seat, capabilities: u32) {
+                println!("seat cb: 0x{capabilities:04x}");
+
+                if (capabilities & 0x01) != 0 {
+                    // pointer
+                    self.pointer = Some(seat.get_pointer().expect("Failed to get pointer"));
+                }
+            }
+
+            fn name(&mut self, _seat: &mut wl::Seat, name: &core::ffi::CStr) {
+                println!("seat name: {name:?}");
+            }
+        }
+        let mut seat_listener = SeatListener { pointer: None };
+        seat.add_listener(&mut seat_listener).unwrap();
+
+        let mut wl_surface = compositor
+            .create_surface()
+            .expect("Failed to create wl_surface");
+        let mut xdg_surface = xdg_wm_base
+            .get_xdg_surface(&mut wl_surface)
+            .expect("Failed to get xdg surface");
+        let mut xdg_toplevel = xdg_surface
+            .get_toplevel()
+            .expect("Failed to get xdg toplevel");
+        xdg_toplevel
+            .set_app_id(c"io.ct2.peridot.tools.sprite_atlas")
+            .expect("Failed to set app id");
+        xdg_toplevel
+            .set_title(c"Peridot SpriteAtlas Visualizer/Editor")
+            .expect("Failed to set title");
+
+        struct ToplevelSurfaceEventsHandler {
+            app_event_queue: *mut VecDeque<AppEvent>,
+        }
+        impl wl::XdgSurfaceEventListener for ToplevelSurfaceEventsHandler {
+            fn configure(&mut self, _: &mut wl::XdgSurface, serial: u32) {
+                unsafe { &mut *self.app_event_queue }
+                    .push_back(AppEvent::ToplevelWindowSurfaceConfigure { serial });
+            }
+        }
+        struct ToplevelWindowEventsHandler {
+            app_event_queue: *mut VecDeque<AppEvent>,
+        }
+        impl wl::XdgToplevelEventListener for ToplevelWindowEventsHandler {
+            fn configure(
+                &mut self,
+                _: &mut wl::XdgToplevel,
+                width: i32,
+                height: i32,
+                states: &[i32],
+            ) {
+                unsafe { &mut *self.app_event_queue }.push_back(
+                    AppEvent::ToplevelWindowConfigure {
+                        width: width as _,
+                        height: height as _,
+                    },
+                );
+
+                println!(
+                    "configure: {width} {height} {states:?} th: {:?}",
+                    std::thread::current().id()
+                );
+            }
+
+            fn close(&mut self, _: &mut wl::XdgToplevel) {
+                unsafe { &mut *self.app_event_queue }.push_back(AppEvent::ToplevelWindowClose);
+            }
+
+            fn configure_bounds(
+                &mut self,
+                toplevel: &mut wl::XdgToplevel,
+                width: i32,
+                height: i32,
+            ) {
+                println!(
+                    "configure bounds: {width} {height} th: {:?}",
+                    std::thread::current().id()
+                );
+            }
+
+            fn wm_capabilities(&mut self, toplevel: &mut wl::XdgToplevel, capabilities: &[i32]) {
+                println!(
+                    "wm capabilities: {capabilities:?} th: {:?}",
+                    std::thread::current().id()
+                );
+            }
+        }
+        let mut tseh = Box::new(ToplevelSurfaceEventsHandler {
+            app_event_queue: events as *mut _,
+        });
+        let mut tweh = Box::new(ToplevelWindowEventsHandler {
+            app_event_queue: events as *mut _,
+        });
+        xdg_surface
+            .add_listener(&mut *tseh)
+            .expect("Failed to register toplevel surface event");
+        xdg_toplevel
+            .add_listener(&mut *tweh)
+            .expect("Failed to register toplevel window event");
+        Box::leak(tseh);
+        Box::leak(tweh);
+
+        struct SurfaceEvents {
+            optimal_buffer_scale: Rc<Cell<f32>>,
+        }
+        impl wl::SurfaceEventListener for SurfaceEvents {
+            fn enter(&mut self, surface: &mut wl::Surface, output: &mut wl::Output) {
+                println!("enter output");
+            }
+
+            fn leave(&mut self, surface: &mut wl::Surface, output: &mut wl::Output) {
+                println!("leave output");
+            }
+
+            fn preferred_buffer_scale(&mut self, surface: &mut wl::Surface, factor: i32) {
+                println!("preferred buffer scale: {factor}");
+                self.optimal_buffer_scale.set(factor as _);
+                // 同じ値を適用することでdpi-awareになるらしい
+                surface.set_buffer_scale(factor).unwrap();
+                surface.commit().unwrap();
+            }
+
+            fn preferred_buffer_transform(&mut self, surface: &mut wl::Surface, transform: u32) {
+                println!("preferred buffer transform: {transform}");
+            }
+        }
+        let mut surface_events = SurfaceEvents {
+            optimal_buffer_scale: Rc::new(Cell::new(2.0)),
+        };
+        wl_surface.add_listener(&mut surface_events).unwrap();
+
+        wl_surface.commit().expect("Failed to commit surface");
+        dp.roundtrip().expect("Failed to sync");
+
+        let mut pointer = seat_listener.pointer.take().expect("no pointer from seat");
+        let mut cursor_shape_device = cursor_shape_manager
+            .get_pointer(&mut pointer)
+            .expect("Failed to get cursor shape device");
+        enum PointerOnSurface {
+            None,
+            Main { serial: u32 },
+        }
+        struct PointerEvents {
+            pointer_on_surface: PointerOnSurface,
+            main_surface_handle: *mut wl::Surface,
+            app_event_queue: *mut VecDeque<AppEvent>,
+        }
+        impl wl::PointerEventListener for PointerEvents {
+            fn enter(
+                &mut self,
+                _pointer: &mut wl::Pointer,
+                serial: u32,
+                surface: &mut wl::Surface,
+                surface_x: wl::Fixed,
+                surface_y: wl::Fixed,
+            ) {
+                self.pointer_on_surface = if core::ptr::addr_eq(surface, self.main_surface_handle) {
+                    PointerOnSurface::Main { serial }
+                } else {
+                    PointerOnSurface::None
+                };
+
+                match self.pointer_on_surface {
+                    PointerOnSurface::None => (),
+                    PointerOnSurface::Main { serial } => unsafe { &mut *self.app_event_queue }
+                        .push_back(AppEvent::MainWindowPointerMove {
+                            enter_serial: serial,
+                            surface_x: surface_x.to_f32(),
+                            surface_y: surface_y.to_f32(),
+                        }),
+                }
+            }
+            fn leave(
+                &mut self,
+                _pointer: &mut wl::Pointer,
+                _serial: u32,
+                surface: &mut wl::Surface,
+            ) {
+                match self.pointer_on_surface {
+                    PointerOnSurface::None => (),
+                    PointerOnSurface::Main { .. } => {
+                        if core::ptr::addr_eq(surface, self.main_surface_handle) {
+                            self.pointer_on_surface = PointerOnSurface::None;
+                        }
+                    }
+                };
+            }
+
+            fn motion(
+                &mut self,
+                _pointer: &mut wl::Pointer,
+                _time: u32,
+                surface_x: wl::Fixed,
+                surface_y: wl::Fixed,
+            ) {
+                match self.pointer_on_surface {
+                    PointerOnSurface::None => (),
+                    PointerOnSurface::Main { serial } => unsafe { &mut *self.app_event_queue }
+                        .push_back(AppEvent::MainWindowPointerMove {
+                            enter_serial: serial,
+                            surface_x: surface_x.to_f32(),
+                            surface_y: surface_y.to_f32(),
+                        }),
+                }
+            }
+
+            fn button(
+                &mut self,
+                _pointer: &mut wl::Pointer,
+                serial: u32,
+                time: u32,
+                button: u32,
+                state: wl::PointerButtonState,
+            ) {
+                println!("button: {serial} {time} {button} {}", state as u32);
+
+                match self.pointer_on_surface {
+                    PointerOnSurface::None => (),
+                    PointerOnSurface::Main { serial } => {
+                        if button == BTN_LEFT && state == wl::PointerButtonState::Pressed {
+                            unsafe { &mut *self.app_event_queue }.push_back(
+                                AppEvent::MainWindowPointerLeftDown {
+                                    enter_serial: serial,
+                                },
+                            );
+                        } else if button == BTN_LEFT && state == wl::PointerButtonState::Released {
+                            unsafe { &mut *self.app_event_queue }.push_back(
+                                AppEvent::MainWindowPointerLeftUp {
+                                    enter_serial: serial,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+
+            fn axis(&mut self, _pointer: &mut wl::Pointer, time: u32, axis: u32, value: wl::Fixed) {
+                println!("axis: {time} {axis} {}", value.to_f32());
+            }
+
+            fn frame(&mut self, _pointer: &mut wl::Pointer) {
+                // do nothing
+            }
+
+            fn axis_source(&mut self, _pointer: &mut wl::Pointer, axis_source: u32) {
+                println!("axis source: {axis_source}");
+            }
+
+            fn axis_stop(&mut self, _pointer: &mut wl::Pointer, _time: u32, axis: u32) {
+                println!("axis stop: {axis}");
+            }
+
+            fn axis_discrete(&mut self, _pointer: &mut wl::Pointer, axis: u32, discrete: i32) {
+                println!("axis discrete: {axis} {discrete}");
+            }
+
+            fn axis_value120(&mut self, _pointer: &mut wl::Pointer, axis: u32, value120: i32) {
+                println!("axis value120: {axis} {value120}");
+            }
+
+            fn axis_relative_direction(
+                &mut self,
+                _pointer: &mut wl::Pointer,
+                axis: u32,
+                direction: u32,
+            ) {
+                println!("axis relative direction: {axis} {direction}");
+            }
+        }
+        let mut pointer_events = Box::new(PointerEvents {
+            pointer_on_surface: PointerOnSurface::None,
+            main_surface_handle: &mut *wl_surface as *mut _,
+            app_event_queue: events as *mut _,
+        });
+        pointer.add_listener(&mut *pointer_events).unwrap();
+        Box::leak(pointer_events);
+
+        let mut frame = wl_surface.frame().expect("Failed to request next frame");
+        let mut frame_callback_data = Box::new(FrameCallback {
+            app_event_queue: events as *mut _,
+        });
+        frame
+            .add_listener(&mut *frame_callback_data)
+            .expect("Failed to set frame callback");
+
+        Self {
+            display: dp,
+            _compositor: compositor,
+            _xdg_wm_base: xdg_wm_base,
+            _seat: seat,
+            _cursor_shape_manager: cursor_shape_manager,
+            surface: wl_surface,
+            xdg_surface,
+            _xdg_toplevel: xdg_toplevel,
+            _pointer: pointer,
+            cursor_shape_device,
+            frame_callback: frame,
+            frame_callback_data,
+            event_bus: events as *mut _,
+            ui_scale_factor: surface_events.optimal_buffer_scale.clone(),
+        }
+    }
+
+    pub unsafe fn create_vulkan_surface(
+        &mut self,
+        instance: &impl br::Instance,
+    ) -> br::Result<br::vk::VkSurfaceKHR> {
+        unsafe {
+            br::WaylandSurfaceCreateInfo::new(
+                self.display.as_raw() as _,
+                self.surface.as_raw() as _,
+            )
+            .execute(instance, None)
+        }
+    }
+
+    pub fn flush(&mut self) {
+        self.display.flush().unwrap();
+    }
+
+    pub fn process_pending_events(&mut self) {
+        self.display.dispatch().expect("Failed to dispatch");
+    }
+
+    pub fn request_next_frame(&mut self) {
+        self.frame_callback = self.surface.frame().expect("Failed to request next frame");
+        self.frame_callback
+            .add_listener(&mut *self.frame_callback_data)
+            .expect("Failed to set frame callback");
+    }
+
+    pub fn post_configure(&mut self, serial: u32) {
+        println!("ToplevelWindowSurfaceConfigure {serial}");
+        self.xdg_surface
+            .ack_configure(serial)
+            .expect("Failed to ack configure");
+    }
+
+    pub fn set_cursor_shape(&mut self, enter_serial: u32, shape: CursorShape) {
+        self.cursor_shape_device
+            .set_shape(
+                enter_serial,
+                match shape {
+                    CursorShape::Default => WpCursorShapeDeviceV1Shape::Default,
+                    CursorShape::ResizeHorizontal => WpCursorShapeDeviceV1Shape::EwResize,
+                },
+            )
+            .unwrap();
+    }
+
+    pub fn ui_scale_factor(&self) -> f32 {
+        self.ui_scale_factor.get()
+    }
+}
+
 fn main() {
-    let mut dp = wl::Display::connect().expect("Failed to connect to wayland display");
-    let mut registry = dp.get_registry().expect("Failed to get global registry");
-    struct RegistryListener {
-        compositor: Option<wl::Owned<wl::Compositor>>,
-        xdg_wm_base: Option<wl::Owned<wl::XdgWmBase>>,
-        seat: Option<wl::Owned<wl::Seat>>,
-        cursor_shape_manager: Option<wl::Owned<WpCursorShapeManagerV1>>,
-    }
-    impl wl::RegistryListener for RegistryListener {
-        fn global(
-            &mut self,
-            registry: &mut wl::Registry,
-            name: u32,
-            interface: &core::ffi::CStr,
-            version: u32,
-        ) {
-            println!("wl global: {name} {interface:?} {version}");
-
-            if interface == c"wl_compositor" {
-                self.compositor = Some(
-                    registry
-                        .bind(name, version)
-                        .expect("Failed to bind compositor interface"),
-                );
-            }
-
-            if interface == c"xdg_wm_base" {
-                self.xdg_wm_base = Some(
-                    registry
-                        .bind(name, version)
-                        .expect("Failed to bind xdg wm base interface"),
-                );
-            }
-
-            if interface == c"wl_seat" {
-                self.seat = Some(
-                    registry
-                        .bind(name, version)
-                        .expect("Failed to bind seat interface"),
-                );
-            }
-
-            if interface == c"wp_cursor_shape_manager_v1" {
-                self.cursor_shape_manager = Some(
-                    registry
-                        .bind(name, version)
-                        .expect("Failed to bind wp_cursor_shape_manager_v1 interface"),
-                );
-            }
-        }
-
-        fn global_remove(&mut self, _registry: &mut wl::Registry, name: u32) {
-            println!("wl global remove: {name}");
-        }
-    }
-    let mut rl = RegistryListener {
-        compositor: None,
-        xdg_wm_base: None,
-        seat: None,
-        cursor_shape_manager: None,
-    };
-    registry
-        .add_listener(&mut rl)
-        .expect("Failed to register listener");
-    dp.roundtrip().expect("Failed to roundtrip events");
-
-    let mut compositor = rl.compositor.expect("no wl_compositor");
-    let mut xdg_wm_base = rl.xdg_wm_base.expect("no xdg_wm_base");
-    let mut seat = rl.seat.expect("no seat?");
-    let mut cursor_shape_manager = rl
-        .cursor_shape_manager
-        .expect("no wp_cursor_shape_manager_v1");
-
-    struct SeatListener {
-        pointer: Option<wl::Owned<wl::Pointer>>,
-    }
-    impl wl::SeatEventListener for SeatListener {
-        fn capabilities(&mut self, seat: &mut wl::Seat, capabilities: u32) {
-            println!("seat cb: 0x{capabilities:04x}");
-
-            if (capabilities & 0x01) != 0 {
-                // pointer
-                self.pointer = Some(seat.get_pointer().expect("Failed to get pointer"));
-            }
-        }
-
-        fn name(&mut self, _seat: &mut wl::Seat, name: &core::ffi::CStr) {
-            println!("seat name: {name:?}");
-        }
-    }
-    let mut seat_listener = SeatListener { pointer: None };
-    seat.add_listener(&mut seat_listener).unwrap();
-
     let mut events = VecDeque::new();
+    let mut app_shell = AppShell::new(&mut events);
 
     let client_size = Cell::new((640.0f32, 480.0));
     let mut app_state = AppState {};
@@ -2114,247 +2480,6 @@ fn main() {
         height_adjustment_factor: 1.0,
         action_handler: None,
     });
-
-    let mut wl_surface = compositor
-        .create_surface()
-        .expect("Failed to create wl_surface");
-    let mut xdg_surface = xdg_wm_base
-        .get_xdg_surface(&mut wl_surface)
-        .expect("Failed to get xdg surface");
-    let mut xdg_toplevel = xdg_surface
-        .get_toplevel()
-        .expect("Failed to get xdg toplevel");
-    xdg_toplevel
-        .set_app_id(c"io.ct2.peridot.tools.sprite_atlas")
-        .expect("Failed to set app id");
-    xdg_toplevel
-        .set_title(c"Peridot SpriteAtlas Visualizer/Editor")
-        .expect("Failed to set title");
-
-    struct ToplevelSurfaceEventsHandler {
-        app_event_queue: *mut VecDeque<AppEvent>,
-    }
-    impl wl::XdgSurfaceEventListener for ToplevelSurfaceEventsHandler {
-        fn configure(&mut self, _: &mut wl::XdgSurface, serial: u32) {
-            unsafe { &mut *self.app_event_queue }
-                .push_back(AppEvent::ToplevelWindowSurfaceConfigure { serial });
-        }
-    }
-    struct ToplevelWindowEventsHandler {
-        app_event_queue: *mut VecDeque<AppEvent>,
-    }
-    impl wl::XdgToplevelEventListener for ToplevelWindowEventsHandler {
-        fn configure(&mut self, _: &mut wl::XdgToplevel, width: i32, height: i32, states: &[i32]) {
-            unsafe { &mut *self.app_event_queue }.push_back(AppEvent::ToplevelWindowConfigure {
-                width: width as _,
-                height: height as _,
-            });
-
-            println!(
-                "configure: {width} {height} {states:?} th: {:?}",
-                std::thread::current().id()
-            );
-        }
-
-        fn close(&mut self, _: &mut wl::XdgToplevel) {
-            unsafe { &mut *self.app_event_queue }.push_back(AppEvent::ToplevelWindowClose);
-        }
-
-        fn configure_bounds(&mut self, toplevel: &mut wl::XdgToplevel, width: i32, height: i32) {
-            println!(
-                "configure bounds: {width} {height} th: {:?}",
-                std::thread::current().id()
-            );
-        }
-
-        fn wm_capabilities(&mut self, toplevel: &mut wl::XdgToplevel, capabilities: &[i32]) {
-            println!(
-                "wm capabilities: {capabilities:?} th: {:?}",
-                std::thread::current().id()
-            );
-        }
-    }
-    let mut tseh = ToplevelSurfaceEventsHandler {
-        app_event_queue: &mut events as *mut _,
-    };
-    let mut tweh = ToplevelWindowEventsHandler {
-        app_event_queue: &mut events as *mut _,
-    };
-    xdg_surface
-        .add_listener(&mut tseh)
-        .expect("Failed to register toplevel surface event");
-    xdg_toplevel
-        .add_listener(&mut tweh)
-        .expect("Failed to register toplevel window event");
-
-    struct SurfaceEvents {
-        optimal_buffer_scale: u32,
-    }
-    impl wl::SurfaceEventListener for SurfaceEvents {
-        fn enter(&mut self, surface: &mut wl::Surface, output: &mut wl::Output) {
-            println!("enter output");
-        }
-
-        fn leave(&mut self, surface: &mut wl::Surface, output: &mut wl::Output) {
-            println!("leave output");
-        }
-
-        fn preferred_buffer_scale(&mut self, surface: &mut wl::Surface, factor: i32) {
-            println!("preferred buffer scale: {factor}");
-            self.optimal_buffer_scale = factor as _;
-            // 同じ値を適用することでdpi-awareになるらしい
-            surface.set_buffer_scale(factor).unwrap();
-            surface.commit().unwrap();
-        }
-
-        fn preferred_buffer_transform(&mut self, surface: &mut wl::Surface, transform: u32) {
-            println!("preferred buffer transform: {transform}");
-        }
-    }
-    let mut surface_events = SurfaceEvents {
-        optimal_buffer_scale: 2,
-    };
-    wl_surface.add_listener(&mut surface_events).unwrap();
-
-    wl_surface.commit().expect("Failed to commit surface");
-    dp.roundtrip().expect("Failed to sync");
-
-    let mut pointer = seat_listener.pointer.expect("no pointer from seat");
-    let mut cursor_shape_device = cursor_shape_manager
-        .get_pointer(&mut pointer)
-        .expect("Failed to get cursor shape device");
-    enum PointerOnSurface {
-        None,
-        Main { serial: u32 },
-    }
-    struct PointerEvents {
-        pointer_on_surface: PointerOnSurface,
-        main_surface_handle: *mut wl::Surface,
-        app_event_queue: *mut VecDeque<AppEvent>,
-    }
-    impl wl::PointerEventListener for PointerEvents {
-        fn enter(
-            &mut self,
-            _pointer: &mut wl::Pointer,
-            serial: u32,
-            surface: &mut wl::Surface,
-            surface_x: wl::Fixed,
-            surface_y: wl::Fixed,
-        ) {
-            self.pointer_on_surface = if core::ptr::addr_eq(surface, self.main_surface_handle) {
-                PointerOnSurface::Main { serial }
-            } else {
-                PointerOnSurface::None
-            };
-
-            match self.pointer_on_surface {
-                PointerOnSurface::None => (),
-                PointerOnSurface::Main { serial } => unsafe { &mut *self.app_event_queue }
-                    .push_back(AppEvent::MainWindowPointerMove {
-                        enter_serial: serial,
-                        surface_x: surface_x.to_f32(),
-                        surface_y: surface_y.to_f32(),
-                    }),
-            }
-        }
-        fn leave(&mut self, _pointer: &mut wl::Pointer, _serial: u32, surface: &mut wl::Surface) {
-            match self.pointer_on_surface {
-                PointerOnSurface::None => (),
-                PointerOnSurface::Main { .. } => {
-                    if core::ptr::addr_eq(surface, self.main_surface_handle) {
-                        self.pointer_on_surface = PointerOnSurface::None;
-                    }
-                }
-            };
-        }
-
-        fn motion(
-            &mut self,
-            _pointer: &mut wl::Pointer,
-            _time: u32,
-            surface_x: wl::Fixed,
-            surface_y: wl::Fixed,
-        ) {
-            match self.pointer_on_surface {
-                PointerOnSurface::None => (),
-                PointerOnSurface::Main { serial } => unsafe { &mut *self.app_event_queue }
-                    .push_back(AppEvent::MainWindowPointerMove {
-                        enter_serial: serial,
-                        surface_x: surface_x.to_f32(),
-                        surface_y: surface_y.to_f32(),
-                    }),
-            }
-        }
-
-        fn button(
-            &mut self,
-            _pointer: &mut wl::Pointer,
-            serial: u32,
-            time: u32,
-            button: u32,
-            state: wl::PointerButtonState,
-        ) {
-            println!("button: {serial} {time} {button} {}", state as u32);
-
-            match self.pointer_on_surface {
-                PointerOnSurface::None => (),
-                PointerOnSurface::Main { serial } => {
-                    if button == BTN_LEFT && state == wl::PointerButtonState::Pressed {
-                        unsafe { &mut *self.app_event_queue }.push_back(
-                            AppEvent::MainWindowPointerLeftDown {
-                                enter_serial: serial,
-                            },
-                        );
-                    } else if button == BTN_LEFT && state == wl::PointerButtonState::Released {
-                        unsafe { &mut *self.app_event_queue }.push_back(
-                            AppEvent::MainWindowPointerLeftUp {
-                                enter_serial: serial,
-                            },
-                        );
-                    }
-                }
-            }
-        }
-
-        fn axis(&mut self, _pointer: &mut wl::Pointer, time: u32, axis: u32, value: wl::Fixed) {
-            println!("axis: {time} {axis} {}", value.to_f32());
-        }
-
-        fn frame(&mut self, _pointer: &mut wl::Pointer) {
-            // do nothing
-        }
-
-        fn axis_source(&mut self, _pointer: &mut wl::Pointer, axis_source: u32) {
-            println!("axis source: {axis_source}");
-        }
-
-        fn axis_stop(&mut self, _pointer: &mut wl::Pointer, _time: u32, axis: u32) {
-            println!("axis stop: {axis}");
-        }
-
-        fn axis_discrete(&mut self, _pointer: &mut wl::Pointer, axis: u32, discrete: i32) {
-            println!("axis discrete: {axis} {discrete}");
-        }
-
-        fn axis_value120(&mut self, _pointer: &mut wl::Pointer, axis: u32, value120: i32) {
-            println!("axis value120: {axis} {value120}");
-        }
-
-        fn axis_relative_direction(
-            &mut self,
-            _pointer: &mut wl::Pointer,
-            axis: u32,
-            direction: u32,
-        ) {
-            println!("axis relative direction: {axis} {direction}");
-        }
-    }
-    let mut pointer_events = PointerEvents {
-        pointer_on_surface: PointerOnSurface::None,
-        main_surface_handle: &mut *wl_surface as *mut _,
-        app_event_queue: &mut events as *mut _,
-    };
-    pointer.add_listener(&mut pointer_events).unwrap();
 
     let subsystem = Subsystem::init();
 
@@ -2399,8 +2524,8 @@ fn main() {
 
     let surface = SubsystemBoundSurface {
         handle: unsafe {
-            br::WaylandSurfaceCreateInfo::new(dp.as_raw() as _, wl_surface.as_raw() as _)
-                .execute(subsystem.instance(), None)
+            app_shell
+                .create_vulkan_surface(subsystem.instance())
                 .unwrap()
         },
         subsystem: &subsystem,
@@ -2502,7 +2627,7 @@ fn main() {
         .set_char_size(
             (10.0 * 64.0) as _,
             0,
-            96 * surface_events.optimal_buffer_scale,
+            (96.0 * app_shell.ui_scale_factor()) as _,
             0,
         )
         .expect("Failed to set char size");
@@ -2790,7 +2915,7 @@ fn main() {
     let mut init_context = ViewInitContext {
         subsystem: &subsystem,
         atlas: &mut composition_alphamask_surface_atlas,
-        ui_scale_factor: surface_events.optimal_buffer_scale as _,
+        ui_scale_factor: app_shell.ui_scale_factor(),
         fonts: &mut font_set,
         composite_tree: &mut composite_tree,
         composite_instance_manager: &mut composite_instance_buffer,
@@ -2929,23 +3054,6 @@ fn main() {
         br::FenceObject::new(&subsystem, &br::FenceCreateInfo::new(0)).unwrap();
     let mut last_updating = false;
 
-    struct FrameCallback {
-        app_event_queue: *mut VecDeque<AppEvent>,
-    }
-    impl wl::CallbackEventListener for FrameCallback {
-        fn done(&mut self, _: &mut wl::Callback, _: u32) {
-            unsafe { &mut *self.app_event_queue }.push_back(AppEvent::ToplevelWindowFrameTiming);
-        }
-    }
-    let mut frame_callback = FrameCallback {
-        app_event_queue: &mut events as *mut _,
-    };
-
-    let mut frame = wl_surface.frame().expect("Failed to request next frame");
-    frame
-        .add_listener(&mut frame_callback)
-        .expect("Failed to set frame callback");
-
     // fire initial update/render
     if core::mem::replace(&mut composite_instance_buffer_dirty, false) {
         unsafe {
@@ -3013,15 +3121,16 @@ fn main() {
         current_sec: 0.0,
     };
 
-    dp.flush().unwrap();
+    app_shell.flush();
+
     let t = std::time::Instant::now();
     let mut last_frame_t = Duration::ZERO;
     let mut frame_resize_request = None;
-    let mut last_render_scale = surface_events.optimal_buffer_scale;
+    let mut last_render_scale = app_shell.ui_scale_factor();
     let mut last_render_size = sc_size;
     let mut last_pointer_pos = (0.0f32, 0.0f32);
     'app: loop {
-        dp.dispatch().expect("Failed to dispatch");
+        app_shell.process_pending_events();
         for e in events.drain(..) {
             match e {
                 AppEvent::ToplevelWindowClose => break 'app,
@@ -3037,7 +3146,7 @@ fn main() {
                     }
 
                     if app_update_context.composite_tree.take_dirty()
-                        || last_render_scale != surface_events.optimal_buffer_scale
+                        || last_render_scale != app_shell.ui_scale_factor()
                         || last_render_size != sc_size
                         || true
                     {
@@ -3071,7 +3180,7 @@ fn main() {
                         ptr.end();
                         composite_instance_buffer_dirty = true;
 
-                        last_render_scale = surface_events.optimal_buffer_scale;
+                        last_render_scale = app_shell.ui_scale_factor();
                         last_render_size = sc_size;
                     }
 
@@ -3189,10 +3298,7 @@ fn main() {
                         ))
                         .unwrap();
 
-                    frame = wl_surface.frame().expect("Failed to request next frame");
-                    frame
-                        .add_listener(&mut frame_callback)
-                        .expect("Failed to set frame callback");
+                    app_shell.request_next_frame();
                 }
                 AppEvent::ToplevelWindowConfigure { width, height } => {
                     println!("ToplevelWindowConfigure {width} {height}");
@@ -3204,8 +3310,8 @@ fn main() {
                             println!("frame resize: {w} {h}");
 
                             client_size.set((w as f32, h as f32));
-                            sc_size.width = w * surface_events.optimal_buffer_scale;
-                            sc_size.height = h * surface_events.optimal_buffer_scale;
+                            sc_size.width = (w as f32 * app_shell.ui_scale_factor()) as _;
+                            sc_size.height = (h as f32 * app_shell.ui_scale_factor()) as _;
 
                             if last_rendering {
                                 last_render_command_fence.wait().unwrap();
@@ -3344,10 +3450,7 @@ fn main() {
                         }
                     }
 
-                    println!("ToplevelWindowSurfaceConfigure {serial}");
-                    xdg_surface
-                        .ack_configure(serial)
-                        .expect("Failed to ack configure");
+                    app_shell.post_configure(serial);
                 }
                 AppEvent::MainWindowPointerMove {
                     enter_serial,
@@ -3365,19 +3468,11 @@ fn main() {
                         &mut app_update_context,
                         ht_root,
                     );
-                    let shape = pointer_input_manager
-                        .cursor_shape(&mut ht_manager, &mut app_update_context);
-                    cursor_shape_device
-                        .set_shape(
-                            enter_serial,
-                            match shape {
-                                CursorShape::Default => WpCursorShapeDeviceV1Shape::Default,
-                                CursorShape::ResizeHorizontal => {
-                                    WpCursorShapeDeviceV1Shape::EwResize
-                                }
-                            },
-                        )
-                        .unwrap();
+                    app_shell.set_cursor_shape(
+                        enter_serial,
+                        pointer_input_manager
+                            .cursor_shape(&mut ht_manager, &mut app_update_context),
+                    );
 
                     last_pointer_pos = (surface_x, surface_y);
                 }
@@ -3394,19 +3489,11 @@ fn main() {
                         ht_root,
                     );
 
-                    let shape = pointer_input_manager
-                        .cursor_shape(&mut ht_manager, &mut app_update_context);
-                    cursor_shape_device
-                        .set_shape(
-                            enter_serial,
-                            match shape {
-                                CursorShape::Default => WpCursorShapeDeviceV1Shape::Default,
-                                CursorShape::ResizeHorizontal => {
-                                    WpCursorShapeDeviceV1Shape::EwResize
-                                }
-                            },
-                        )
-                        .unwrap();
+                    app_shell.set_cursor_shape(
+                        enter_serial,
+                        pointer_input_manager
+                            .cursor_shape(&mut ht_manager, &mut app_update_context),
+                    );
                 }
                 AppEvent::MainWindowPointerLeftUp { enter_serial } => {
                     app_update_context.current_sec = t.elapsed().as_secs_f32();
@@ -3421,19 +3508,11 @@ fn main() {
                         ht_root,
                     );
 
-                    let shape = pointer_input_manager
-                        .cursor_shape(&mut ht_manager, &mut app_update_context);
-                    cursor_shape_device
-                        .set_shape(
-                            enter_serial,
-                            match shape {
-                                CursorShape::Default => WpCursorShapeDeviceV1Shape::Default,
-                                CursorShape::ResizeHorizontal => {
-                                    WpCursorShapeDeviceV1Shape::EwResize
-                                }
-                            },
-                        )
-                        .unwrap();
+                    app_shell.set_cursor_shape(
+                        enter_serial,
+                        pointer_input_manager
+                            .cursor_shape(&mut ht_manager, &mut app_update_context),
+                    );
                 }
             }
         }

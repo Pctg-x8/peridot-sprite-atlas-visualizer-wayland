@@ -337,6 +337,230 @@ pub struct ViewInitContext<'d, 'r> {
     pub fonts: &'r mut FontSet,
 }
 
+pub struct AppHeaderBaseView {
+    height: f32,
+    ct_root: CompositeTreeRef,
+}
+impl AppHeaderBaseView {
+    const TITLE_SPACING: f32 = 16.0;
+    const TITLE_LEFT_OFFSET: f32 = 36.0;
+
+    pub fn new(ctx: &mut ViewInitContext) -> Self {
+        let title = "Peridot SpriteAtlas Visualizer/Editor";
+        let text_layout = TextLayout::build_simple(title, &mut ctx.fonts.ui_default);
+        let text_atlas_rect = ctx
+            .atlas
+            .alloc(text_layout.width_px(), text_layout.height_px());
+        let bg_atlas_rect = ctx.atlas.alloc(1, 2);
+
+        let height = text_layout.height() / ctx.ui_scale_factor + Self::TITLE_SPACING * 2.0;
+
+        let text_stg_image =
+            text_layout.build_stg_image(&ctx.subsystem, &ctx.subsystem.adapter_memory_info);
+        let mut bg_stg_image = br::ImageObject::new(
+            &ctx.subsystem,
+            &br::ImageCreateInfo::new(
+                br::Extent2D {
+                    width: 1,
+                    height: 2,
+                },
+                br::vk::VK_FORMAT_R8_UNORM,
+            )
+            .set_usage(br::ImageUsageFlags::TRANSFER_SRC)
+            .use_linear_tiling(),
+        )
+        .unwrap();
+        let bg_stg_image_mreq = bg_stg_image.requirements();
+        let bg_stg_image_subresource_mreq =
+            bg_stg_image.layout_info(&br::ImageSubresource::new(br::AspectMask::COLOR, 0, 0));
+        let bg_stg_image_memory_index = ctx
+            .subsystem
+            .adapter_memory_info
+            .find_host_visible_index(bg_stg_image_mreq.memoryTypeBits)
+            .unwrap();
+        let mut bg_stg_image_memory = br::DeviceMemoryObject::new(
+            &ctx.subsystem,
+            &br::MemoryAllocateInfo::new(bg_stg_image_mreq.size, bg_stg_image_memory_index),
+        )
+        .unwrap();
+        bg_stg_image.bind(&bg_stg_image_memory, 0).unwrap();
+        let requires_flush = !ctx
+            .subsystem
+            .adapter_memory_info
+            .is_coherent(bg_stg_image_memory_index);
+        let h = bg_stg_image_memory.native_ptr();
+        let p = bg_stg_image_memory
+            .map(
+                bg_stg_image_subresource_mreq.offset as _
+                    ..(bg_stg_image_subresource_mreq.offset + bg_stg_image_subresource_mreq.size)
+                        as _,
+            )
+            .unwrap();
+        unsafe {
+            core::ptr::write(p.addr_of_mut(0), 0xff);
+            core::ptr::write(
+                p.addr_of_mut(bg_stg_image_subresource_mreq.rowPitch as _),
+                0x00,
+            );
+        }
+        if requires_flush {
+            unsafe {
+                ctx.subsystem
+                    .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(
+                        h,
+                        bg_stg_image_subresource_mreq.offset,
+                        bg_stg_image_subresource_mreq.size,
+                    )])
+                    .unwrap();
+            }
+        }
+        unsafe {
+            bg_stg_image_memory.unmap();
+        }
+
+        let mut cp = br::CommandPoolObject::new(
+            &ctx.subsystem,
+            &br::CommandPoolCreateInfo::new(ctx.subsystem.graphics_queue_family_index).transient(),
+        )
+        .unwrap();
+        let [mut cb] = br::CommandBufferObject::alloc_array(
+            &ctx.subsystem,
+            &br::CommandBufferFixedCountAllocateInfo::new(&mut cp, br::CommandBufferLevel::Primary),
+        )
+        .unwrap();
+        unsafe {
+            cb.begin(
+                &br::CommandBufferBeginInfo::new().onetime_submit(),
+                &ctx.subsystem,
+            )
+            .unwrap()
+        }
+        .pipeline_barrier_2(&br::DependencyInfo::new(
+            &[],
+            &[],
+            &[
+                br::ImageMemoryBarrier2::new(
+                    &text_stg_image.0,
+                    br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+                )
+                .transit_to(br::ImageLayout::TransferSrcOpt.from_undefined()),
+                br::ImageMemoryBarrier2::new(
+                    &bg_stg_image,
+                    br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+                )
+                .transit_to(br::ImageLayout::TransferSrcOpt.from_undefined()),
+                br::ImageMemoryBarrier2::new(
+                    ctx.atlas.resource().image(),
+                    br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+                )
+                .transit_to(br::ImageLayout::TransferDestOpt.from_undefined()),
+            ],
+        ))
+        .copy_image(
+            &text_stg_image.0,
+            br::ImageLayout::TransferSrcOpt,
+            ctx.atlas.resource().image(),
+            br::ImageLayout::TransferDestOpt,
+            &[br::ImageCopy {
+                srcSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
+                srcOffset: br::Offset3D::ZERO,
+                dstSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
+                dstOffset: text_atlas_rect.lt_offset().with_z(0),
+                extent: text_atlas_rect.extent().with_depth(1),
+            }],
+        )
+        .copy_image(
+            &bg_stg_image,
+            br::ImageLayout::TransferSrcOpt,
+            ctx.atlas.resource().image(),
+            br::ImageLayout::TransferDestOpt,
+            &[br::ImageCopy {
+                srcSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
+                srcOffset: br::Offset3D::ZERO,
+                dstSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
+                dstOffset: bg_atlas_rect.lt_offset().with_z(0),
+                extent: bg_atlas_rect.extent().with_depth(1),
+            }],
+        )
+        .pipeline_barrier_2(&br::DependencyInfo::new(
+            &[],
+            &[],
+            &[br::ImageMemoryBarrier2::new(
+                ctx.atlas.resource().image(),
+                br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+            )
+            .from(
+                br::PipelineStageFlags2::COPY,
+                br::AccessFlags2::TRANSFER.write,
+            )
+            .to(
+                br::PipelineStageFlags2::FRAGMENT_SHADER,
+                br::AccessFlags2::SHADER_SAMPLED_READ,
+            )
+            .transit_from(br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt))],
+        ))
+        .end()
+        .unwrap();
+        ctx.subsystem
+            .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&cb)])
+            .unwrap();
+
+        let ct_root = ctx.composite_tree.alloc();
+        {
+            let ct_root = ctx.composite_tree.get_mut(ct_root);
+
+            ct_root.relative_size_adjustment = [1.0, 0.0];
+            ct_root.size = [0.0, height * ctx.ui_scale_factor];
+            ct_root.composite_mode =
+                CompositeMode::ColorTint(AnimatableColor::Value([0.0, 0.0, 0.0, 0.25]));
+            ct_root.texatlas_rect = bg_atlas_rect;
+            ct_root.instance_slot_index = Some(ctx.composite_instance_manager.alloc());
+        }
+
+        let ct_title = ctx.composite_tree.alloc();
+        {
+            let ct_title = ctx.composite_tree.get_mut(ct_title);
+
+            ct_title.size = [text_layout.width(), text_layout.height()];
+            ct_title.offset = [
+                Self::TITLE_LEFT_OFFSET * ctx.ui_scale_factor,
+                Self::TITLE_SPACING * ctx.ui_scale_factor,
+            ];
+            ct_title.texatlas_rect = text_atlas_rect;
+            ct_title.composite_mode =
+                CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 1.0]));
+            ct_title.instance_slot_index = Some(ctx.composite_instance_manager.alloc());
+        }
+
+        ctx.composite_tree.add_child(ct_root, ct_title);
+
+        Self { height, ct_root }
+    }
+
+    pub fn mount(&self, ct_parent: CompositeTreeRef, ct: &mut CompositeTree) {
+        ct.add_child(ct_parent, self.ct_root);
+    }
+}
+
+pub struct AppHeaderPresenter {
+    base_view: AppHeaderBaseView,
+}
+impl AppHeaderPresenter {
+    pub fn new(init: &mut ViewInitContext) -> Self {
+        let base_view = AppHeaderBaseView::new(init);
+
+        Self { base_view }
+    }
+
+    pub fn mount(&self, ct_parent: CompositeTreeRef, ct: &mut CompositeTree) {
+        self.base_view.mount(ct_parent, ct);
+    }
+
+    pub const fn height(&self) -> f32 {
+        self.base_view.height
+    }
+}
+
 pub struct SpriteListToggleButtonView {
     icon_atlas_rect: AtlasRect,
     circle_atlas_rect: AtlasRect,
@@ -2563,28 +2787,6 @@ fn main() {
         )
         .unwrap();
 
-    let title_cr = composite_tree.alloc();
-    composite_tree.add_child(CompositeTree::ROOT, title_cr);
-    {
-        let title_cr = composite_tree.get_mut(title_cr);
-
-        title_cr.instance_slot_index = Some(composite_instance_buffer.alloc());
-        title_cr.offset = [
-            24.0 * surface_events.optimal_buffer_scale as f32,
-            16.0 * surface_events.optimal_buffer_scale as f32,
-        ];
-        title_cr.size = [
-            text_surface_rect.width() as _,
-            text_surface_rect.height() as _,
-        ];
-        title_cr.texatlas_rect = text_surface_rect.clone();
-        title_cr.composite_mode =
-            CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 1.0]));
-    }
-
-    let header_size =
-        16.0 + 16.0 + title_layout.height() / surface_events.optimal_buffer_scale as f32;
-
     let mut init_context = ViewInitContext {
         subsystem: &subsystem,
         atlas: &mut composition_alphamask_surface_atlas,
@@ -2596,7 +2798,10 @@ fn main() {
     };
     let mut atlas_view = AtlasView::new(&mut init_context, main_rp.subpass(0), sc_size);
 
-    let sprite_list_pane = SpriteListPanePresenter::new(&mut init_context, header_size);
+    let app_header = AppHeaderPresenter::new(&mut init_context);
+    app_header.mount(CompositeTree::ROOT, init_context.composite_tree);
+
+    let sprite_list_pane = SpriteListPanePresenter::new(&mut init_context, app_header.height());
     sprite_list_pane.mount(
         &mut composite_tree,
         CompositeTree::ROOT,

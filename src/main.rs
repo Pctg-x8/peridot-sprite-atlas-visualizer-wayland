@@ -19,7 +19,7 @@ use bedrock::{
 };
 use composite::{
     AnimatableColor, AnimationData, AtlasRect, CompositeInstanceData, CompositeInstanceManager,
-    CompositeMode, CompositeStreamingData, CompositeTree, CompositeTreeRef,
+    CompositeMode, CompositeRect, CompositeStreamingData, CompositeTree, CompositeTreeRef,
     CompositionSurfaceAtlas,
 };
 use feature::editing_atlas_renderer::EditingAtlasRenderer;
@@ -255,32 +255,25 @@ impl AppHeaderBaseView {
             .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&cb)])
             .unwrap();
 
-        let ct_root = ctx.composite_tree.alloc();
-        {
-            let ct_root = ctx.composite_tree.get_mut(ct_root);
-
-            ct_root.relative_size_adjustment = [1.0, 0.0];
-            ct_root.size = [0.0, height * ctx.ui_scale_factor];
-            ct_root.composite_mode =
-                CompositeMode::ColorTint(AnimatableColor::Value([0.0, 0.0, 0.0, 0.25]));
-            ct_root.texatlas_rect = bg_atlas_rect;
-            ct_root.instance_slot_index = Some(ctx.composite_instance_manager.alloc());
-        }
-
-        let ct_title = ctx.composite_tree.alloc();
-        {
-            let ct_title = ctx.composite_tree.get_mut(ct_title);
-
-            ct_title.size = [text_layout.width(), text_layout.height()];
-            ct_title.offset = [
+        let ct_root = ctx.composite_tree.alloc(CompositeRect {
+            relative_size_adjustment: [1.0, 0.0],
+            size: [0.0, height * ctx.ui_scale_factor],
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.0, 0.0, 0.0, 0.25])),
+            texatlas_rect: bg_atlas_rect,
+            instance_slot_index: Some(ctx.composite_instance_manager.alloc()),
+            ..Default::default()
+        });
+        let ct_title = ctx.composite_tree.alloc(CompositeRect {
+            size: [text_layout.width(), text_layout.height()],
+            offset: [
                 Self::TITLE_LEFT_OFFSET * ctx.ui_scale_factor,
                 Self::TITLE_SPACING * ctx.ui_scale_factor,
-            ];
-            ct_title.texatlas_rect = text_atlas_rect;
-            ct_title.composite_mode =
-                CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 1.0]));
-            ct_title.instance_slot_index = Some(ctx.composite_instance_manager.alloc());
-        }
+            ],
+            texatlas_rect: text_atlas_rect,
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
+            instance_slot_index: Some(ctx.composite_instance_manager.alloc()),
+            ..Default::default()
+        });
 
         ctx.composite_tree.add_child(ct_root, ct_title);
 
@@ -313,7 +306,6 @@ impl AppHeaderPresenter {
 
 pub struct SpriteListToggleButtonView {
     icon_atlas_rect: AtlasRect,
-    circle_atlas_rect: AtlasRect,
     ct_root: CompositeTreeRef,
     ct_icon: CompositeTreeRef,
     ht_root: HitTestTreeRef,
@@ -733,41 +725,35 @@ impl SpriteListToggleButtonView {
             .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&cb)])
             .unwrap();
 
-        let ct_root = init.composite_tree.alloc();
-        {
-            let ct_root = init.composite_tree.get_mut(ct_root);
-
-            ct_root.size = [
+        let ct_root = init.composite_tree.alloc(CompositeRect {
+            size: [
                 Self::SIZE * init.ui_scale_factor,
                 Self::SIZE * init.ui_scale_factor,
-            ];
-            ct_root.offset = [0.0, 8.0 * init.ui_scale_factor];
-            ct_root.relative_offset_adjustment = [1.0, 0.0];
+            ],
+            offset: [0.0, 8.0 * init.ui_scale_factor],
+            relative_offset_adjustment: [1.0, 0.0],
+            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            texatlas_rect: circle_atlas_rect,
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 0.0])),
+            ..Default::default()
+        });
+        let ct_icon = init.composite_tree.alloc(CompositeRect {
+            offset: [
+                -Self::ICON_SIZE * 0.5 * init.ui_scale_factor,
+                -Self::ICON_SIZE * 0.5 * init.ui_scale_factor,
+            ],
+            relative_offset_adjustment: [0.5, 0.5],
+            size: [
+                Self::ICON_SIZE * init.ui_scale_factor,
+                Self::ICON_SIZE * init.ui_scale_factor,
+            ],
+            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            texatlas_rect: icon_atlas_rect.clone(),
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
+            ..Default::default()
+        });
 
-            ct_root.instance_slot_index = Some(init.composite_instance_manager.alloc());
-            ct_root.texatlas_rect = circle_atlas_rect.clone();
-            ct_root.composite_mode =
-                CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 0.0]));
-        }
-        let ct_icon = init.composite_tree.alloc();
         init.composite_tree.add_child(ct_root, ct_icon);
-        {
-            let ct_icon = init.composite_tree.get_mut(ct_icon);
-
-            ct_icon.offset = [
-                -Self::ICON_SIZE * 0.5 * init.ui_scale_factor,
-                -Self::ICON_SIZE * 0.5 * init.ui_scale_factor,
-            ];
-            ct_icon.relative_offset_adjustment = [0.5, 0.5];
-            ct_icon.size = [
-                Self::ICON_SIZE * init.ui_scale_factor,
-                Self::ICON_SIZE * init.ui_scale_factor,
-            ];
-            ct_icon.instance_slot_index = Some(init.composite_instance_manager.alloc());
-            ct_icon.texatlas_rect = icon_atlas_rect.clone();
-            ct_icon.composite_mode =
-                CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0]));
-        }
 
         let ht_root = init.ht.create(HitTestTreeData {
             width: Self::SIZE,
@@ -779,7 +765,6 @@ impl SpriteListToggleButtonView {
 
         Self {
             icon_atlas_rect,
-            circle_atlas_rect,
             ct_root,
             ct_icon,
             ht_root,
@@ -1387,68 +1372,60 @@ impl SpriteListPaneView {
             .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&cb)])
             .unwrap();
 
-        let ct_root = init.composite_tree.alloc();
-        {
-            let ct_root = init.composite_tree.get_mut(ct_root);
-
-            ct_root.instance_slot_index = Some(init.composite_instance_manager.alloc());
-            ct_root.offset = [
+        let ct_root = init.composite_tree.alloc(CompositeRect {
+            offset: [
                 Self::FLOATING_MARGIN * init.ui_scale_factor,
                 header_height * init.ui_scale_factor,
-            ];
-            ct_root.size = [
+            ],
+            size: [
                 Self::INIT_WIDTH * init.ui_scale_factor,
                 -(header_height + Self::FLOATING_MARGIN) * init.ui_scale_factor,
-            ];
-            ct_root.relative_size_adjustment = [0.0, 1.0];
-            ct_root.texatlas_rect = frame_image_atlas_rect.clone();
-            ct_root.slice_borders = [
+            ],
+            relative_size_adjustment: [0.0, 1.0],
+            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            texatlas_rect: frame_image_atlas_rect.clone(),
+            slice_borders: [
                 Self::CORNER_RADIUS * init.ui_scale_factor,
                 Self::CORNER_RADIUS * init.ui_scale_factor,
                 Self::CORNER_RADIUS * init.ui_scale_factor,
                 Self::CORNER_RADIUS * init.ui_scale_factor,
-            ];
-            ct_root.composite_mode =
-                CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 0.5]));
-        }
-        let ct_title_blurred = init.composite_tree.alloc();
-        init.composite_tree.add_child(ct_root, ct_title_blurred);
-        {
-            let ct_title_blurred = init.composite_tree.get_mut(ct_title_blurred);
-
-            ct_title_blurred.instance_slot_index = Some(init.composite_instance_manager.alloc());
-            ct_title_blurred.offset = [
+            ],
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 0.5])),
+            ..Default::default()
+        });
+        let ct_title_blurred = init.composite_tree.alloc(CompositeRect {
+            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            offset: [
                 -(title_blurred_atlas_rect.width() as f32 * 0.5),
                 (8.0 - Self::BLUR_AMOUNT_ONEDIR as f32) * init.ui_scale_factor,
-            ];
-            ct_title_blurred.relative_offset_adjustment = [0.5, 0.0];
-            ct_title_blurred.size = [
+            ],
+            relative_offset_adjustment: [0.5, 0.0],
+            size: [
                 title_blurred_atlas_rect.width() as f32,
                 title_blurred_atlas_rect.height() as f32,
-            ];
-            ct_title_blurred.texatlas_rect = title_blurred_atlas_rect.clone();
-            ct_title_blurred.composite_mode =
-                CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0]));
-        }
-        let ct_title = init.composite_tree.alloc();
-        init.composite_tree.add_child(ct_root, ct_title);
-        {
-            let ct_title = init.composite_tree.get_mut(ct_title);
-
-            ct_title.instance_slot_index = Some(init.composite_instance_manager.alloc());
-            ct_title.offset = [
+            ],
+            texatlas_rect: title_blurred_atlas_rect.clone(),
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
+            ..Default::default()
+        });
+        let ct_title = init.composite_tree.alloc(CompositeRect {
+            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            offset: [
                 -(title_atlas_rect.width() as f32 * 0.5),
                 8.0 * init.ui_scale_factor,
-            ];
-            ct_title.relative_offset_adjustment = [0.5, 0.0];
-            ct_title.size = [
+            ],
+            relative_offset_adjustment: [0.5, 0.0],
+            size: [
                 title_atlas_rect.width() as f32,
                 title_atlas_rect.height() as f32,
-            ];
-            ct_title.texatlas_rect = title_atlas_rect.clone();
-            ct_title.composite_mode =
-                CompositeMode::ColorTint(AnimatableColor::Value([0.1, 0.1, 0.1, 1.0]));
-        }
+            ],
+            texatlas_rect: title_atlas_rect.clone(),
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.1, 0.1, 0.1, 1.0])),
+            ..Default::default()
+        });
+
+        init.composite_tree.add_child(ct_root, ct_title_blurred);
+        init.composite_tree.add_child(ct_root, ct_title);
 
         let ht_frame = init.ht.create(HitTestTreeData {
             top: header_height,

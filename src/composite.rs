@@ -489,15 +489,13 @@ impl CompositeTree {
         }
     }
 
-    pub fn alloc(&mut self) -> CompositeTreeRef {
+    pub fn alloc(&mut self, data: CompositeRect) -> CompositeTreeRef {
         if let Some(x) = self.unused.pop_first() {
-            self.rects[x] = CompositeRect::default();
-
+            self.rects[x] = data;
             return CompositeTreeRef(x);
         }
 
-        self.rects.push(CompositeRect::default());
-
+        self.rects.push(data);
         CompositeTreeRef(self.rects.len() - 1)
     }
 

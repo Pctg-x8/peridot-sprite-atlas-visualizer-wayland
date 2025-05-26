@@ -1,4 +1,5 @@
 //! imported const values from linux/input-event-codes.h
+#![allow(dead_code)]
 
 pub const BTN_MOUSE: u32 = 0x110;
 pub const BTN_LEFT: u32 = 0x110;

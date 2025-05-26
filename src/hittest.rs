@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use crate::input::EventContinueControl;
 
-pub struct HitTestTreeData<ActionContext> {
+pub struct HitTestTreeData<'c, ActionContext> {
     pub left: f32,
     pub top: f32,
     pub left_adjustment_factor: f32,
@@ -12,9 +12,9 @@ pub struct HitTestTreeData<ActionContext> {
     pub width_adjustment_factor: f32,
     pub height_adjustment_factor: f32,
     pub action_handler:
-        Option<std::rc::Weak<dyn HitTestTreeActionHandler<Context = ActionContext>>>,
+        Option<std::rc::Weak<dyn HitTestTreeActionHandler<'c, Context = ActionContext>>>,
 }
-impl<ActionContext> Default for HitTestTreeData<ActionContext> {
+impl<ActionContext> Default for HitTestTreeData<'_, ActionContext> {
     #[inline]
     fn default() -> Self {
         Self {
@@ -30,11 +30,11 @@ impl<ActionContext> Default for HitTestTreeData<ActionContext> {
         }
     }
 }
-impl<ActionContext> HitTestTreeData<ActionContext> {
+impl<'c, ActionContext> HitTestTreeData<'c, ActionContext> {
     #[inline]
     pub fn action_handler(
         &self,
-    ) -> Option<std::rc::Rc<dyn HitTestTreeActionHandler<Context = ActionContext>>> {
+    ) -> Option<std::rc::Rc<dyn HitTestTreeActionHandler<'c, Context = ActionContext>>> {
         self.action_handler
             .as_ref()
             .and_then(std::rc::Weak::upgrade)
@@ -50,12 +50,12 @@ struct HitTestTreeRelationData {
     children: Vec<usize>,
 }
 
-pub struct HitTestTreeManager<ActionContext> {
-    data: Vec<HitTestTreeData<ActionContext>>,
+pub struct HitTestTreeManager<'c, ActionContext> {
+    data: Vec<HitTestTreeData<'c, ActionContext>>,
     relations: Vec<HitTestTreeRelationData>,
     free_index: BTreeSet<usize>,
 }
-impl<ActionContext> HitTestTreeManager<ActionContext> {
+impl<'c, ActionContext> HitTestTreeManager<'c, ActionContext> {
     pub fn new() -> Self {
         Self {
             data: Vec::new(),
@@ -64,7 +64,7 @@ impl<ActionContext> HitTestTreeManager<ActionContext> {
         }
     }
 
-    pub fn create(&mut self, data: HitTestTreeData<ActionContext>) -> HitTestTreeRef {
+    pub fn create(&mut self, data: HitTestTreeData<'c, ActionContext>) -> HitTestTreeRef {
         if let Some(x) = self.free_index.pop_first() {
             self.data[x] = data;
             self.relations[x].parent = None;
@@ -83,12 +83,12 @@ impl<ActionContext> HitTestTreeManager<ActionContext> {
     }
 
     #[inline]
-    pub fn get_data(&self, r: HitTestTreeRef) -> &HitTestTreeData<ActionContext> {
+    pub fn get_data(&self, r: HitTestTreeRef) -> &HitTestTreeData<'c, ActionContext> {
         &self.data[r.0]
     }
 
     #[inline]
-    pub fn get_data_mut(&mut self, r: HitTestTreeRef) -> &mut HitTestTreeData<ActionContext> {
+    pub fn get_data_mut(&mut self, r: HitTestTreeRef) -> &mut HitTestTreeData<'c, ActionContext> {
         &mut self.data[r.0]
     }
 
@@ -273,7 +273,7 @@ pub struct PointerActionArgs {
     pub client_height: f32,
 }
 
-pub trait HitTestTreeActionHandler {
+pub trait HitTestTreeActionHandler<'c> {
     type Context;
 
     #[allow(unused_variables)]

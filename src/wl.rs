@@ -151,6 +151,8 @@ pub unsafe trait Interface {
 pub struct Owned<T: Interface>(NonNull<T>);
 impl<T: Interface> Drop for Owned<T> {
     fn drop(&mut self) {
+        println!("drop wl owned: {:?}", core::any::type_name::<T>());
+
         unsafe {
             self.0.as_mut().destruct();
         }
@@ -173,6 +175,17 @@ impl<T: Interface> DerefMut for Owned<T> {
 impl<T: Interface> Owned<T> {
     pub const unsafe fn from_untyped_unchecked(untyped: NonNull<Proxy>) -> Self {
         Self(untyped.cast())
+    }
+
+    pub const fn leak(self) {
+        core::mem::forget(self);
+    }
+
+    pub const fn unwrap(self) -> NonNull<T> {
+        let ptr = unsafe { core::ptr::read(&self.0) };
+        core::mem::forget(self);
+
+        ptr
     }
 }
 

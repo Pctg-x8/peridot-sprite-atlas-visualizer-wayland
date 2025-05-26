@@ -259,6 +259,32 @@ pub struct CompositeRect {
     pub parent: Option<usize>,
     pub children: Vec<usize>,
 }
+impl Default for CompositeRect {
+    fn default() -> Self {
+        Self {
+            instance_slot_index: None,
+            offset: [0.0, 0.0],
+            size: [0.0, 0.0],
+            relative_offset_adjustment: [0.0, 0.0],
+            relative_size_adjustment: [0.0, 0.0],
+            texatlas_rect: AtlasRect {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
+            slice_borders: [0.0, 0.0, 0.0, 0.0],
+            dirty: false,
+            composite_mode: CompositeMode::DirectSourceOver,
+            animation_data_left: None,
+            animation_data_top: None,
+            animation_data_width: None,
+            animation_data_height: None,
+            parent: None,
+            children: Vec::new(),
+        }
+    }
+}
 
 pub struct CompositeInstanceManager<'d> {
     buffer: br::BufferObject<&'d Subsystem>,
@@ -452,26 +478,8 @@ impl CompositeTree {
         let mut rects = Vec::new();
         // root is filling rect
         rects.push(CompositeRect {
-            instance_slot_index: None,
-            offset: [0.0, 0.0],
-            size: [0.0, 0.0],
-            relative_offset_adjustment: [0.0, 0.0],
             relative_size_adjustment: [1.0, 1.0],
-            texatlas_rect: AtlasRect {
-                left: 0,
-                top: 0,
-                right: 0,
-                bottom: 0,
-            },
-            slice_borders: [0.0, 0.0, 0.0, 0.0],
-            dirty: false,
-            composite_mode: CompositeMode::DirectSourceOver,
-            animation_data_left: None,
-            animation_data_top: None,
-            animation_data_width: None,
-            animation_data_height: None,
-            parent: None,
-            children: Vec::new(),
+            ..Default::default()
         });
 
         Self {
@@ -483,54 +491,12 @@ impl CompositeTree {
 
     pub fn alloc(&mut self) -> CompositeTreeRef {
         if let Some(x) = self.unused.pop_first() {
-            self.rects[x] = CompositeRect {
-                instance_slot_index: None,
-                offset: [0.0; 2],
-                size: [0.0; 2],
-                relative_offset_adjustment: [0.0; 2],
-                relative_size_adjustment: [0.0; 2],
-                texatlas_rect: AtlasRect {
-                    left: 0,
-                    top: 0,
-                    right: 0,
-                    bottom: 0,
-                },
-                slice_borders: [0.0; 4],
-                composite_mode: CompositeMode::DirectSourceOver,
-                animation_data_left: None,
-                animation_data_top: None,
-                animation_data_width: None,
-                animation_data_height: None,
-                dirty: false,
-                parent: None,
-                children: Vec::new(),
-            };
+            self.rects[x] = CompositeRect::default();
 
             return CompositeTreeRef(x);
         }
 
-        self.rects.push(CompositeRect {
-            instance_slot_index: None,
-            offset: [0.0; 2],
-            size: [0.0; 2],
-            relative_offset_adjustment: [0.0; 2],
-            relative_size_adjustment: [0.0; 2],
-            texatlas_rect: AtlasRect {
-                left: 0,
-                top: 0,
-                right: 0,
-                bottom: 0,
-            },
-            slice_borders: [0.0; 4],
-            composite_mode: CompositeMode::DirectSourceOver,
-            animation_data_left: None,
-            animation_data_top: None,
-            animation_data_width: None,
-            animation_data_height: None,
-            dirty: false,
-            parent: None,
-            children: Vec::new(),
-        });
+        self.rects.push(CompositeRect::default());
 
         CompositeTreeRef(self.rects.len() - 1)
     }

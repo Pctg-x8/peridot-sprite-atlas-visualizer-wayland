@@ -1,4 +1,5 @@
 mod composite;
+mod feature;
 mod fontconfig;
 mod freetype;
 mod harfbuzz;
@@ -21,6 +22,7 @@ use composite::{
     CompositeMode, CompositeStreamingData, CompositeTree, CompositeTreeRef,
     CompositionSurfaceAtlas,
 };
+use feature::editing_atlas_renderer::EditingAtlasRenderer;
 use freetype::FreeType;
 use hittest::{
     CursorShape, HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef,
@@ -75,265 +77,13 @@ pub struct FontSet {
     pub ui_default: freetype::Owned<freetype::Face>,
 }
 
-#[repr(C)]
-struct AtlasViewGridParams {
-    pub offset: [f32; 2],
-    pub size: [f32; 2],
-}
-
-pub struct AtlasView<'d> {
-    pub param_buffer: br::BufferObject<&'d Subsystem>,
-    _param_buffer_memory: br::DeviceMemoryObject<&'d Subsystem>,
-    grid_vsh: br::ShaderModuleObject<&'d Subsystem>,
-    grid_fsh: br::ShaderModuleObject<&'d Subsystem>,
-    pub render_pipeline_layout: br::PipelineLayoutObject<&'d Subsystem>,
-    pub render_pipeline: br::PipelineObject<&'d Subsystem>,
-    pub dsl_param: br::DescriptorSetLayoutObject<&'d Subsystem>,
-    pub dp: br::DescriptorPoolObject<&'d Subsystem>,
-    pub ds_param: br::DescriptorSet,
-}
-impl<'d> AtlasView<'d> {
-    pub fn new(
-        init: &mut ViewInitContext<'d, '_>,
-        rendered_pass: br::SubpassRef<impl br::RenderPass>,
-        main_buffer_size: br::Extent2D,
-    ) -> Self {
-        let mut param_buffer = br::BufferObject::new(
-            init.subsystem,
-            &br::BufferCreateInfo::new_for_type::<AtlasViewGridParams>(
-                br::BufferUsage::UNIFORM_BUFFER | br::BufferUsage::TRANSFER_DEST,
-            ),
-        )
-        .unwrap();
-        let mreq = param_buffer.requirements();
-        let memindex = init
-            .subsystem
-            .adapter_memory_info
-            .find_device_local_index(mreq.memoryTypeBits)
-            .expect("no suitable memory property");
-        let param_buffer_memory = br::DeviceMemoryObject::new(
-            init.subsystem,
-            &br::MemoryAllocateInfo::new(mreq.size, memindex),
-        )
-        .unwrap();
-        param_buffer.bind(&param_buffer_memory, 0).unwrap();
-
-        let mut param_buffer_stg = br::BufferObject::new(
-            init.subsystem,
-            &br::BufferCreateInfo::new_for_type::<AtlasViewGridParams>(
-                br::BufferUsage::TRANSFER_SRC,
-            ),
-        )
-        .unwrap();
-        let mreq = param_buffer_stg.requirements();
-        let memindex = init
-            .subsystem
-            .adapter_memory_info
-            .find_host_visible_index(mreq.memoryTypeBits)
-            .expect("no suitable memory property");
-        let mut param_buffer_stg_memory = br::DeviceMemoryObject::new(
-            init.subsystem,
-            &br::MemoryAllocateInfo::new(mreq.size, memindex),
-        )
-        .unwrap();
-        param_buffer_stg.bind(&param_buffer_stg_memory, 0).unwrap();
-        let n = param_buffer_stg_memory.native_ptr();
-        let ptr = param_buffer_stg_memory
-            .map(0..core::mem::size_of::<AtlasViewGridParams>())
-            .unwrap();
-        unsafe {
-            core::ptr::write(
-                ptr.get_mut(0),
-                AtlasViewGridParams {
-                    offset: [0.0, 0.0],
-                    size: [64.0, 64.0],
-                },
-            );
-        }
-        if !init.subsystem.adapter_memory_info.is_coherent(memindex) {
-            unsafe {
-                init.subsystem
-                    .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new(
-                        &br::VkHandleRef::dangling(n),
-                        0..core::mem::size_of::<AtlasViewGridParams>() as _,
-                    )])
-                    .unwrap();
-            }
-        }
-        ptr.end();
-
-        let mut cp = br::CommandPoolObject::new(
-            init.subsystem,
-            &br::CommandPoolCreateInfo::new(init.subsystem.graphics_queue_family_index),
-        )
-        .unwrap();
-        let [mut cb] = br::CommandBufferObject::alloc_array(
-            init.subsystem,
-            &br::CommandBufferFixedCountAllocateInfo::new(&mut cp, br::CommandBufferLevel::Primary),
-        )
-        .unwrap();
-        unsafe {
-            cb.begin(&br::CommandBufferBeginInfo::new(), init.subsystem)
-                .unwrap()
-        }
-        .pipeline_barrier_2(&br::DependencyInfo::new(
-            &[br::MemoryBarrier2::new()
-                .from(br::PipelineStageFlags2::HOST, br::AccessFlags2::HOST.write)
-                .to(
-                    br::PipelineStageFlags2::COPY,
-                    br::AccessFlags2::TRANSFER.read,
-                )],
-            &[],
-            &[],
-        ))
-        .copy_buffer(
-            &param_buffer_stg,
-            &param_buffer,
-            &[br::BufferCopy::mirror_data::<AtlasViewGridParams>(0)],
-        )
-        .pipeline_barrier_2(&br::DependencyInfo::new(
-            &[br::MemoryBarrier2::new()
-                .from(
-                    br::PipelineStageFlags2::COPY,
-                    br::AccessFlags2::TRANSFER.write,
-                )
-                .to(
-                    br::PipelineStageFlags2::FRAGMENT_SHADER,
-                    br::AccessFlags2::SHADER.read,
-                )],
-            &[],
-            &[],
-        ))
-        .end()
-        .unwrap();
-        init.subsystem
-            .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&cb)])
-            .unwrap();
-
-        let dsl_param = br::DescriptorSetLayoutObject::new(
-            init.subsystem,
-            &br::DescriptorSetLayoutCreateInfo::new(&[
-                br::DescriptorType::UniformBuffer.make_binding(0, 1)
-            ]),
-        )
-        .unwrap();
-        let mut dp = br::DescriptorPoolObject::new(
-            init.subsystem,
-            &br::DescriptorPoolCreateInfo::new(
-                1,
-                &[br::DescriptorType::UniformBuffer.make_size(1)],
-            ),
-        )
-        .unwrap();
-        let [ds_param] = dp.alloc_array(&[dsl_param.as_transparent_ref()]).unwrap();
-        init.subsystem.update_descriptor_sets(
-            &[ds_param
-                .binding_at(0)
-                .write(br::DescriptorContents::uniform_buffer(
-                    &param_buffer,
-                    0..core::mem::size_of::<AtlasViewGridParams>() as _,
-                ))],
-            &[],
-        );
-
-        let vsh = init
-            .subsystem
-            .load_shader("resources/filltri.vert")
-            .unwrap();
-        let fsh = init.subsystem.load_shader("resources/grid.frag").unwrap();
-
-        let render_pipeline_layout = br::PipelineLayoutObject::new(
-            init.subsystem,
-            &br::PipelineLayoutCreateInfo::new(
-                &[dsl_param.as_transparent_ref()],
-                &[br::PushConstantRange::for_type::<[f32; 2]>(
-                    br::vk::VK_SHADER_STAGE_FRAGMENT_BIT,
-                    0,
-                )],
-            ),
-        )
-        .unwrap();
-        let [render_pipeline] = init
-            .subsystem
-            .new_graphics_pipeline_array(
-                &[br::GraphicsPipelineCreateInfo::new(
-                    &render_pipeline_layout,
-                    rendered_pass,
-                    &[
-                        vsh.on_stage(br::ShaderStage::Vertex, c"main"),
-                        fsh.on_stage(br::ShaderStage::Fragment, c"main"),
-                    ],
-                    VI_STATE_EMPTY,
-                    IA_STATE_TRILIST,
-                    &br::PipelineViewportStateCreateInfo::new(
-                        &[main_buffer_size
-                            .into_rect(br::Offset2D::ZERO)
-                            .make_viewport(0.0..1.0)],
-                        &[main_buffer_size.into_rect(br::Offset2D::ZERO)],
-                    ),
-                    RASTER_STATE_DEFAULT_FILL_NOCULL,
-                    BLEND_STATE_SINGLE_NONE,
-                )
-                .multisample_state(MS_STATE_EMPTY)],
-                None::<&br::PipelineCacheObject<&'d br::DeviceObject<&'d br::InstanceObject>>>,
-            )
-            .unwrap();
-
-        Self {
-            param_buffer,
-            _param_buffer_memory: param_buffer_memory,
-            dsl_param,
-            dp,
-            ds_param,
-            grid_vsh: vsh,
-            grid_fsh: fsh,
-            render_pipeline_layout,
-            render_pipeline,
-        }
-    }
-
-    pub fn recreate(
-        &mut self,
-        device: &'d Subsystem,
-        rendered_pass: br::SubpassRef<impl br::RenderPass>,
-        main_buffer_size: br::Extent2D,
-    ) {
-        let [render_pipeline] = device
-            .new_graphics_pipeline_array(
-                &[br::GraphicsPipelineCreateInfo::new(
-                    &self.render_pipeline_layout,
-                    rendered_pass,
-                    &[
-                        self.grid_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
-                        self.grid_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
-                    ],
-                    VI_STATE_EMPTY,
-                    IA_STATE_TRILIST,
-                    &br::PipelineViewportStateCreateInfo::new(
-                        &[main_buffer_size
-                            .into_rect(br::Offset2D::ZERO)
-                            .make_viewport(0.0..1.0)],
-                        &[main_buffer_size.into_rect(br::Offset2D::ZERO)],
-                    ),
-                    RASTER_STATE_DEFAULT_FILL_NOCULL,
-                    BLEND_STATE_SINGLE_NONE,
-                )
-                .multisample_state(MS_STATE_EMPTY)],
-                None::<&br::PipelineCacheObject<&'d br::DeviceObject<&'d br::InstanceObject>>>,
-            )
-            .unwrap();
-
-        self.render_pipeline = render_pipeline;
-    }
-}
-
 pub struct ViewInitContext<'d, 'r> {
     pub subsystem: &'d Subsystem,
     pub atlas: &'r mut CompositionSurfaceAtlas<'d>,
     pub ui_scale_factor: f32,
     pub composite_tree: &'r mut CompositeTree,
     pub composite_instance_manager: &'r mut CompositeInstanceManager<'d>,
-    pub ht: &'r mut HitTestTreeManager<AppUpdateContext>,
+    pub ht: &'r mut HitTestTreeManager<'d, AppUpdateContext<'d>>,
     pub fonts: &'r mut FontSet,
 }
 
@@ -1797,8 +1547,8 @@ pub struct SpriteListPaneActionHandler {
     resize_state: Cell<Option<(f32, f32)>>,
     shown: Cell<bool>,
 }
-impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
-    type Context = AppUpdateContext;
+impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
+    type Context = AppUpdateContext<'c>;
 
     fn cursor_shape(&self, sender: HitTestTreeRef, _context: &mut Self::Context) -> CursorShape {
         if sender == self.ht_resize_area && self.shown.get() {
@@ -1849,11 +1599,19 @@ impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
         _ht: &mut HitTestTreeManager<Self::Context>,
         args: hittest::PointerActionArgs,
     ) -> input::EventContinueControl {
-        if sender == self.ht_resize_area && self.shown.get() {
-            self.resize_state
-                .set(Some((self.view.width.get(), args.client_x)));
+        if self.shown.get() {
+            if sender == self.view.ht_frame {
+                // guard fallback
+                return EventContinueControl::STOP_PROPAGATION;
+            }
 
-            return EventContinueControl::CAPTURE_ELEMENT | EventContinueControl::STOP_PROPAGATION;
+            if sender == self.ht_resize_area {
+                self.resize_state
+                    .set(Some((self.view.width.get(), args.client_x)));
+
+                return EventContinueControl::CAPTURE_ELEMENT
+                    | EventContinueControl::STOP_PROPAGATION;
+            }
         }
 
         if sender == self.toggle_button_view.ht_root {
@@ -1873,12 +1631,19 @@ impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
         ht: &mut HitTestTreeManager<Self::Context>,
         args: hittest::PointerActionArgs,
     ) -> EventContinueControl {
-        if sender == self.ht_resize_area && self.shown.get() {
-            if let Some((base_width, base_cx)) = self.resize_state.get() {
-                let w = (base_width + (args.client_x - base_cx)).max(16.0);
-                self.view.set_width(w, &mut context.composite_tree, ht);
-
+        if self.shown.get() {
+            if sender == self.view.ht_frame {
+                // guard fallback
                 return EventContinueControl::STOP_PROPAGATION;
+            }
+
+            if sender == self.ht_resize_area {
+                if let Some((base_width, base_cx)) = self.resize_state.get() {
+                    let w = (base_width + (args.client_x - base_cx)).max(16.0);
+                    self.view.set_width(w, &mut context.composite_tree, ht);
+
+                    return EventContinueControl::STOP_PROPAGATION;
+                }
             }
         }
 
@@ -1892,12 +1657,19 @@ impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
         ht: &mut HitTestTreeManager<Self::Context>,
         args: hittest::PointerActionArgs,
     ) -> EventContinueControl {
-        if sender == self.ht_resize_area && self.shown.get() {
-            if let Some((base_width, base_cx)) = self.resize_state.replace(None) {
-                let w = (base_width + (args.client_x - base_cx)).max(16.0);
-                self.view.set_width(w, &mut context.composite_tree, ht);
+        if self.shown.get() {
+            if sender == self.view.ht_frame {
+                // guard fallback
+                return EventContinueControl::STOP_PROPAGATION;
+            }
 
-                return EventContinueControl::RELEASE_CAPTURE_ELEMENT;
+            if sender == self.ht_resize_area {
+                if let Some((base_width, base_cx)) = self.resize_state.replace(None) {
+                    let w = (base_width + (args.client_x - base_cx)).max(16.0);
+                    self.view.set_width(w, &mut context.composite_tree, ht);
+
+                    return EventContinueControl::RELEASE_CAPTURE_ELEMENT;
+                }
             }
         }
 
@@ -1918,6 +1690,11 @@ impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
         ht: &mut HitTestTreeManager<Self::Context>,
         _args: hittest::PointerActionArgs,
     ) -> EventContinueControl {
+        if self.shown.get() && sender == self.view.ht_frame {
+            // guard fallback
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
         if sender == self.toggle_button_view.ht_root {
             let show = !self.shown.get();
             self.shown.set(show);
@@ -1953,7 +1730,6 @@ impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
 
 pub struct SpriteListPanePresenter {
     view: Rc<SpriteListPaneView>,
-    toggle_button_view: Rc<SpriteListToggleButtonView>,
     _ht_action_handler: Rc<SpriteListPaneActionHandler>,
 }
 impl SpriteListPanePresenter {
@@ -1971,6 +1747,8 @@ impl SpriteListPanePresenter {
             resize_state: Cell::new(None),
             shown: Cell::new(true),
         });
+        init.ht.get_data_mut(view.ht_frame).action_handler =
+            Some(Rc::downgrade(&ht_action_handler) as _);
         init.ht.get_data_mut(view.ht_resize_area).action_handler =
             Some(Rc::downgrade(&ht_action_handler) as _);
         init.ht
@@ -1979,7 +1757,6 @@ impl SpriteListPanePresenter {
 
         Self {
             view,
-            toggle_button_view,
             _ht_action_handler: ht_action_handler,
         }
     }
@@ -1997,10 +1774,84 @@ impl SpriteListPanePresenter {
 
 pub struct AppState {}
 
-pub struct AppUpdateContext {
+pub struct AppUpdateContext<'d> {
     composite_tree: CompositeTree,
     state: AppState,
+    editing_atlas_renderer: EditingAtlasRenderer<'d>,
     current_sec: f32,
+}
+
+struct HitTestRootTreeActionHandler {
+    editing_atlas_dragging: Cell<bool>,
+    editing_atlas_drag_start_x: Cell<f32>,
+    editing_atlas_drag_start_y: Cell<f32>,
+    editing_atlas_drag_start_offset_x: Cell<f32>,
+    editing_atlas_drag_start_offset_y: Cell<f32>,
+}
+impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler {
+    type Context = AppUpdateContext<'c>;
+
+    fn on_pointer_down(
+        &self,
+        sender: HitTestTreeRef,
+        context: &mut Self::Context,
+        ht: &mut HitTestTreeManager<Self::Context>,
+        args: hittest::PointerActionArgs,
+    ) -> EventContinueControl {
+        self.editing_atlas_dragging.set(true);
+        self.editing_atlas_drag_start_x.set(args.client_x);
+        self.editing_atlas_drag_start_y.set(args.client_y);
+        self.editing_atlas_drag_start_offset_x
+            .set(context.editing_atlas_renderer.offset()[0]);
+        self.editing_atlas_drag_start_offset_y
+            .set(context.editing_atlas_renderer.offset()[1]);
+
+        EventContinueControl::CAPTURE_ELEMENT
+    }
+
+    fn on_pointer_move(
+        &self,
+        sender: HitTestTreeRef,
+        context: &mut Self::Context,
+        ht: &mut HitTestTreeManager<Self::Context>,
+        args: hittest::PointerActionArgs,
+    ) -> EventContinueControl {
+        if self.editing_atlas_dragging.get() {
+            let dx = args.client_x - self.editing_atlas_drag_start_x.get();
+            let dy = args.client_y - self.editing_atlas_drag_start_y.get();
+
+            // 逆向きに動く
+            // TODO: あとでui_scale_factorをみれるようにする
+            context.editing_atlas_renderer.set_offset(
+                self.editing_atlas_drag_start_offset_x.get() - dx * 2.0,
+                self.editing_atlas_drag_start_offset_y.get() - dy * 2.0,
+            );
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_pointer_up(
+        &self,
+        sender: HitTestTreeRef,
+        context: &mut Self::Context,
+        ht: &mut HitTestTreeManager<Self::Context>,
+        args: hittest::PointerActionArgs,
+    ) -> EventContinueControl {
+        if self.editing_atlas_dragging.replace(false) {
+            let dx = args.client_x - self.editing_atlas_drag_start_x.get();
+            let dy = args.client_y - self.editing_atlas_drag_start_y.get();
+
+            // 逆向きに動く
+            // TODO: あとでui_scale_factorをみれるようにする
+            context.editing_atlas_renderer.set_offset(
+                self.editing_atlas_drag_start_offset_x.get() - dx * 2.0,
+                self.editing_atlas_drag_start_offset_y.get() - dy * 2.0,
+            );
+        }
+
+        EventContinueControl::RELEASE_CAPTURE_ELEMENT
+    }
 }
 
 struct FrameCallback {
@@ -2012,21 +1863,201 @@ impl wl::CallbackEventListener for FrameCallback {
     }
 }
 
-struct AppShell {
-    display: wl::Display,
-    _compositor: wl::Owned<wl::Compositor>,
-    _xdg_wm_base: wl::Owned<wl::XdgWmBase>,
-    _seat: wl::Owned<wl::Seat>,
-    _cursor_shape_manager: wl::Owned<wl::WpCursorShapeManagerV1>,
-    surface: wl::Owned<wl::Surface>,
-    xdg_surface: wl::Owned<wl::XdgSurface>,
-    _xdg_toplevel: wl::Owned<wl::XdgToplevel>,
-    _pointer: wl::Owned<wl::Pointer>,
-    cursor_shape_device: wl::Owned<wl::WpCursorShapeDeviceV1>,
-    frame_callback: wl::Owned<wl::Callback>,
-    frame_callback_data: Box<FrameCallback>,
-    event_bus: *mut VecDeque<AppEvent>,
+enum PointerOnSurface {
+    None,
+    Main { serial: u32 },
+}
+struct WaylandShellEventHandler {
+    app_event_bus: *mut VecDeque<AppEvent>,
     ui_scale_factor: Rc<Cell<f32>>,
+    pointer_on_surface: PointerOnSurface,
+    main_surface_proxy_ptr: *mut wl::Surface,
+}
+impl wl::XdgSurfaceEventListener for WaylandShellEventHandler {
+    fn configure(&mut self, _: &mut wl::XdgSurface, serial: u32) {
+        unsafe { &mut *self.app_event_bus }
+            .push_back(AppEvent::ToplevelWindowSurfaceConfigure { serial });
+    }
+}
+impl wl::XdgToplevelEventListener for WaylandShellEventHandler {
+    fn configure(&mut self, _: &mut wl::XdgToplevel, width: i32, height: i32, states: &[i32]) {
+        unsafe { &mut *self.app_event_bus }.push_back(AppEvent::ToplevelWindowConfigure {
+            width: width as _,
+            height: height as _,
+        });
+
+        println!(
+            "configure: {width} {height} {states:?} th: {:?}",
+            std::thread::current().id()
+        );
+    }
+
+    fn close(&mut self, _: &mut wl::XdgToplevel) {
+        unsafe { &mut *self.app_event_bus }.push_back(AppEvent::ToplevelWindowClose);
+    }
+
+    fn configure_bounds(&mut self, _toplevel: &mut wl::XdgToplevel, width: i32, height: i32) {
+        println!(
+            "configure bounds: {width} {height} th: {:?}",
+            std::thread::current().id()
+        );
+    }
+
+    fn wm_capabilities(&mut self, _toplevel: &mut wl::XdgToplevel, capabilities: &[i32]) {
+        println!(
+            "wm capabilities: {capabilities:?} th: {:?}",
+            std::thread::current().id()
+        );
+    }
+}
+impl wl::SurfaceEventListener for WaylandShellEventHandler {
+    fn enter(&mut self, _surface: &mut wl::Surface, _output: &mut wl::Output) {
+        println!("enter output");
+    }
+
+    fn leave(&mut self, _surface: &mut wl::Surface, _output: &mut wl::Output) {
+        println!("leave output");
+    }
+
+    fn preferred_buffer_scale(&mut self, surface: &mut wl::Surface, factor: i32) {
+        println!("preferred buffer scale: {factor}");
+        self.ui_scale_factor.set(factor as _);
+        // 同じ値を適用することでdpi-awareになるらしい
+        surface.set_buffer_scale(factor).unwrap();
+        surface.commit().unwrap();
+    }
+
+    fn preferred_buffer_transform(&mut self, _surface: &mut wl::Surface, transform: u32) {
+        println!("preferred buffer transform: {transform}");
+    }
+}
+impl wl::PointerEventListener for WaylandShellEventHandler {
+    fn enter(
+        &mut self,
+        _pointer: &mut wl::Pointer,
+        serial: u32,
+        surface: &mut wl::Surface,
+        surface_x: wl::Fixed,
+        surface_y: wl::Fixed,
+    ) {
+        self.pointer_on_surface = if core::ptr::addr_eq(surface, self.main_surface_proxy_ptr) {
+            PointerOnSurface::Main { serial }
+        } else {
+            PointerOnSurface::None
+        };
+
+        match self.pointer_on_surface {
+            PointerOnSurface::None => (),
+            PointerOnSurface::Main { serial } => {
+                unsafe { &mut *self.app_event_bus }.push_back(AppEvent::MainWindowPointerMove {
+                    enter_serial: serial,
+                    surface_x: surface_x.to_f32(),
+                    surface_y: surface_y.to_f32(),
+                })
+            }
+        }
+    }
+    fn leave(&mut self, _pointer: &mut wl::Pointer, _serial: u32, surface: &mut wl::Surface) {
+        match self.pointer_on_surface {
+            PointerOnSurface::None => (),
+            PointerOnSurface::Main { .. } => {
+                if core::ptr::addr_eq(surface, self.main_surface_proxy_ptr) {
+                    self.pointer_on_surface = PointerOnSurface::None;
+                }
+            }
+        };
+    }
+
+    fn motion(
+        &mut self,
+        _pointer: &mut wl::Pointer,
+        _time: u32,
+        surface_x: wl::Fixed,
+        surface_y: wl::Fixed,
+    ) {
+        match self.pointer_on_surface {
+            PointerOnSurface::None => (),
+            PointerOnSurface::Main { serial } => {
+                unsafe { &mut *self.app_event_bus }.push_back(AppEvent::MainWindowPointerMove {
+                    enter_serial: serial,
+                    surface_x: surface_x.to_f32(),
+                    surface_y: surface_y.to_f32(),
+                })
+            }
+        }
+    }
+
+    fn button(
+        &mut self,
+        _pointer: &mut wl::Pointer,
+        serial: u32,
+        time: u32,
+        button: u32,
+        state: wl::PointerButtonState,
+    ) {
+        println!("button: {serial} {time} {button} {}", state as u32);
+
+        match self.pointer_on_surface {
+            PointerOnSurface::None => (),
+            PointerOnSurface::Main { serial } => {
+                if button == BTN_LEFT && state == wl::PointerButtonState::Pressed {
+                    unsafe { &mut *self.app_event_bus }.push_back(
+                        AppEvent::MainWindowPointerLeftDown {
+                            enter_serial: serial,
+                        },
+                    );
+                } else if button == BTN_LEFT && state == wl::PointerButtonState::Released {
+                    unsafe { &mut *self.app_event_bus }.push_back(
+                        AppEvent::MainWindowPointerLeftUp {
+                            enter_serial: serial,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    fn axis(&mut self, _pointer: &mut wl::Pointer, time: u32, axis: u32, value: wl::Fixed) {
+        println!("axis: {time} {axis} {}", value.to_f32());
+    }
+
+    fn frame(&mut self, _pointer: &mut wl::Pointer) {
+        // do nothing
+    }
+
+    fn axis_source(&mut self, _pointer: &mut wl::Pointer, axis_source: u32) {
+        println!("axis source: {axis_source}");
+    }
+
+    fn axis_stop(&mut self, _pointer: &mut wl::Pointer, _time: u32, axis: u32) {
+        println!("axis stop: {axis}");
+    }
+
+    fn axis_discrete(&mut self, _pointer: &mut wl::Pointer, axis: u32, discrete: i32) {
+        println!("axis discrete: {axis} {discrete}");
+    }
+
+    fn axis_value120(&mut self, _pointer: &mut wl::Pointer, axis: u32, value120: i32) {
+        println!("axis value120: {axis} {value120}");
+    }
+
+    fn axis_relative_direction(&mut self, _pointer: &mut wl::Pointer, axis: u32, direction: u32) {
+        println!("axis relative direction: {axis} {direction}");
+    }
+}
+impl wl::CallbackEventListener for WaylandShellEventHandler {
+    fn done(&mut self, _callback: &mut wl::Callback, _data: u32) {
+        unsafe { &mut *self.app_event_bus }.push_back(AppEvent::ToplevelWindowFrameTiming);
+    }
+}
+
+struct AppShell {
+    shell_event_handler: Box<WaylandShellEventHandler>,
+    display: wl::Display,
+    surface: core::ptr::NonNull<wl::Surface>,
+    xdg_surface: core::ptr::NonNull<wl::XdgSurface>,
+    cursor_shape_device: core::ptr::NonNull<wl::WpCursorShapeDeviceV1>,
+    frame_callback: core::ptr::NonNull<wl::Callback>,
 }
 impl AppShell {
     pub fn new(events: *mut VecDeque<AppEvent>) -> Self {
@@ -2095,6 +2126,7 @@ impl AppShell {
             .add_listener(&mut rl)
             .expect("Failed to register listener");
         dp.roundtrip().expect("Failed to roundtrip events");
+        drop(registry);
 
         let mut compositor = rl.compositor.take().unwrap();
         let mut xdg_wm_base = rl.xdg_wm_base.take().unwrap();
@@ -2120,6 +2152,12 @@ impl AppShell {
         }
         let mut seat_listener = SeatListener { pointer: None };
         seat.add_listener(&mut seat_listener).unwrap();
+        dp.roundtrip().expect("Failed to sync");
+
+        let mut pointer = seat_listener.pointer.take().expect("no pointer from seat");
+        let cursor_shape_device = cursor_shape_manager
+            .get_pointer(&mut pointer)
+            .expect("Failed to get cursor shape device");
 
         let mut wl_surface = compositor
             .create_surface()
@@ -2137,275 +2175,43 @@ impl AppShell {
             .set_title(c"Peridot SpriteAtlas Visualizer/Editor")
             .expect("Failed to set title");
 
-        struct ToplevelSurfaceEventsHandler {
-            app_event_queue: *mut VecDeque<AppEvent>,
-        }
-        impl wl::XdgSurfaceEventListener for ToplevelSurfaceEventsHandler {
-            fn configure(&mut self, _: &mut wl::XdgSurface, serial: u32) {
-                unsafe { &mut *self.app_event_queue }
-                    .push_back(AppEvent::ToplevelWindowSurfaceConfigure { serial });
-            }
-        }
-        struct ToplevelWindowEventsHandler {
-            app_event_queue: *mut VecDeque<AppEvent>,
-        }
-        impl wl::XdgToplevelEventListener for ToplevelWindowEventsHandler {
-            fn configure(
-                &mut self,
-                _: &mut wl::XdgToplevel,
-                width: i32,
-                height: i32,
-                states: &[i32],
-            ) {
-                unsafe { &mut *self.app_event_queue }.push_back(
-                    AppEvent::ToplevelWindowConfigure {
-                        width: width as _,
-                        height: height as _,
-                    },
-                );
+        let mut frame = wl_surface.frame().expect("Failed to request next frame");
 
-                println!(
-                    "configure: {width} {height} {states:?} th: {:?}",
-                    std::thread::current().id()
-                );
-            }
-
-            fn close(&mut self, _: &mut wl::XdgToplevel) {
-                unsafe { &mut *self.app_event_queue }.push_back(AppEvent::ToplevelWindowClose);
-            }
-
-            fn configure_bounds(
-                &mut self,
-                toplevel: &mut wl::XdgToplevel,
-                width: i32,
-                height: i32,
-            ) {
-                println!(
-                    "configure bounds: {width} {height} th: {:?}",
-                    std::thread::current().id()
-                );
-            }
-
-            fn wm_capabilities(&mut self, toplevel: &mut wl::XdgToplevel, capabilities: &[i32]) {
-                println!(
-                    "wm capabilities: {capabilities:?} th: {:?}",
-                    std::thread::current().id()
-                );
-            }
-        }
-        let mut tseh = Box::new(ToplevelSurfaceEventsHandler {
-            app_event_queue: events as *mut _,
+        let mut shell_event_handler = Box::new(WaylandShellEventHandler {
+            app_event_bus: events,
+            ui_scale_factor: Rc::new(Cell::new(2.0)),
+            pointer_on_surface: PointerOnSurface::None,
+            main_surface_proxy_ptr: wl_surface.as_raw() as _,
         });
-        let mut tweh = Box::new(ToplevelWindowEventsHandler {
-            app_event_queue: events as *mut _,
-        });
+
+        pointer.add_listener(&mut *shell_event_handler).unwrap();
         xdg_surface
-            .add_listener(&mut *tseh)
+            .add_listener(&mut *shell_event_handler)
             .expect("Failed to register toplevel surface event");
         xdg_toplevel
-            .add_listener(&mut *tweh)
+            .add_listener(&mut *shell_event_handler)
             .expect("Failed to register toplevel window event");
-        Box::leak(tseh);
-        Box::leak(tweh);
-
-        struct SurfaceEvents {
-            optimal_buffer_scale: Rc<Cell<f32>>,
-        }
-        impl wl::SurfaceEventListener for SurfaceEvents {
-            fn enter(&mut self, surface: &mut wl::Surface, output: &mut wl::Output) {
-                println!("enter output");
-            }
-
-            fn leave(&mut self, surface: &mut wl::Surface, output: &mut wl::Output) {
-                println!("leave output");
-            }
-
-            fn preferred_buffer_scale(&mut self, surface: &mut wl::Surface, factor: i32) {
-                println!("preferred buffer scale: {factor}");
-                self.optimal_buffer_scale.set(factor as _);
-                // 同じ値を適用することでdpi-awareになるらしい
-                surface.set_buffer_scale(factor).unwrap();
-                surface.commit().unwrap();
-            }
-
-            fn preferred_buffer_transform(&mut self, surface: &mut wl::Surface, transform: u32) {
-                println!("preferred buffer transform: {transform}");
-            }
-        }
-        let mut surface_events = SurfaceEvents {
-            optimal_buffer_scale: Rc::new(Cell::new(2.0)),
-        };
-        wl_surface.add_listener(&mut surface_events).unwrap();
-
-        wl_surface.commit().expect("Failed to commit surface");
-        dp.roundtrip().expect("Failed to sync");
-
-        let mut pointer = seat_listener.pointer.take().expect("no pointer from seat");
-        let mut cursor_shape_device = cursor_shape_manager
-            .get_pointer(&mut pointer)
-            .expect("Failed to get cursor shape device");
-        enum PointerOnSurface {
-            None,
-            Main { serial: u32 },
-        }
-        struct PointerEvents {
-            pointer_on_surface: PointerOnSurface,
-            main_surface_handle: *mut wl::Surface,
-            app_event_queue: *mut VecDeque<AppEvent>,
-        }
-        impl wl::PointerEventListener for PointerEvents {
-            fn enter(
-                &mut self,
-                _pointer: &mut wl::Pointer,
-                serial: u32,
-                surface: &mut wl::Surface,
-                surface_x: wl::Fixed,
-                surface_y: wl::Fixed,
-            ) {
-                self.pointer_on_surface = if core::ptr::addr_eq(surface, self.main_surface_handle) {
-                    PointerOnSurface::Main { serial }
-                } else {
-                    PointerOnSurface::None
-                };
-
-                match self.pointer_on_surface {
-                    PointerOnSurface::None => (),
-                    PointerOnSurface::Main { serial } => unsafe { &mut *self.app_event_queue }
-                        .push_back(AppEvent::MainWindowPointerMove {
-                            enter_serial: serial,
-                            surface_x: surface_x.to_f32(),
-                            surface_y: surface_y.to_f32(),
-                        }),
-                }
-            }
-            fn leave(
-                &mut self,
-                _pointer: &mut wl::Pointer,
-                _serial: u32,
-                surface: &mut wl::Surface,
-            ) {
-                match self.pointer_on_surface {
-                    PointerOnSurface::None => (),
-                    PointerOnSurface::Main { .. } => {
-                        if core::ptr::addr_eq(surface, self.main_surface_handle) {
-                            self.pointer_on_surface = PointerOnSurface::None;
-                        }
-                    }
-                };
-            }
-
-            fn motion(
-                &mut self,
-                _pointer: &mut wl::Pointer,
-                _time: u32,
-                surface_x: wl::Fixed,
-                surface_y: wl::Fixed,
-            ) {
-                match self.pointer_on_surface {
-                    PointerOnSurface::None => (),
-                    PointerOnSurface::Main { serial } => unsafe { &mut *self.app_event_queue }
-                        .push_back(AppEvent::MainWindowPointerMove {
-                            enter_serial: serial,
-                            surface_x: surface_x.to_f32(),
-                            surface_y: surface_y.to_f32(),
-                        }),
-                }
-            }
-
-            fn button(
-                &mut self,
-                _pointer: &mut wl::Pointer,
-                serial: u32,
-                time: u32,
-                button: u32,
-                state: wl::PointerButtonState,
-            ) {
-                println!("button: {serial} {time} {button} {}", state as u32);
-
-                match self.pointer_on_surface {
-                    PointerOnSurface::None => (),
-                    PointerOnSurface::Main { serial } => {
-                        if button == BTN_LEFT && state == wl::PointerButtonState::Pressed {
-                            unsafe { &mut *self.app_event_queue }.push_back(
-                                AppEvent::MainWindowPointerLeftDown {
-                                    enter_serial: serial,
-                                },
-                            );
-                        } else if button == BTN_LEFT && state == wl::PointerButtonState::Released {
-                            unsafe { &mut *self.app_event_queue }.push_back(
-                                AppEvent::MainWindowPointerLeftUp {
-                                    enter_serial: serial,
-                                },
-                            );
-                        }
-                    }
-                }
-            }
-
-            fn axis(&mut self, _pointer: &mut wl::Pointer, time: u32, axis: u32, value: wl::Fixed) {
-                println!("axis: {time} {axis} {}", value.to_f32());
-            }
-
-            fn frame(&mut self, _pointer: &mut wl::Pointer) {
-                // do nothing
-            }
-
-            fn axis_source(&mut self, _pointer: &mut wl::Pointer, axis_source: u32) {
-                println!("axis source: {axis_source}");
-            }
-
-            fn axis_stop(&mut self, _pointer: &mut wl::Pointer, _time: u32, axis: u32) {
-                println!("axis stop: {axis}");
-            }
-
-            fn axis_discrete(&mut self, _pointer: &mut wl::Pointer, axis: u32, discrete: i32) {
-                println!("axis discrete: {axis} {discrete}");
-            }
-
-            fn axis_value120(&mut self, _pointer: &mut wl::Pointer, axis: u32, value120: i32) {
-                println!("axis value120: {axis} {value120}");
-            }
-
-            fn axis_relative_direction(
-                &mut self,
-                _pointer: &mut wl::Pointer,
-                axis: u32,
-                direction: u32,
-            ) {
-                println!("axis relative direction: {axis} {direction}");
-            }
-        }
-        let mut pointer_events = Box::new(PointerEvents {
-            pointer_on_surface: PointerOnSurface::None,
-            main_surface_handle: &mut *wl_surface as *mut _,
-            app_event_queue: events as *mut _,
-        });
-        pointer.add_listener(&mut *pointer_events).unwrap();
-        Box::leak(pointer_events);
-
-        let mut frame = wl_surface.frame().expect("Failed to request next frame");
-        let mut frame_callback_data = Box::new(FrameCallback {
-            app_event_queue: events as *mut _,
-        });
+        wl_surface.add_listener(&mut *shell_event_handler).unwrap();
         frame
-            .add_listener(&mut *frame_callback_data)
+            .add_listener(&mut *shell_event_handler)
             .expect("Failed to set frame callback");
 
+        wl_surface.commit().expect("Failed to commit surface");
+
+        compositor.leak();
+        xdg_wm_base.leak();
+        seat.leak();
+        cursor_shape_manager.leak();
+        xdg_toplevel.leak();
+        pointer.leak();
+
         Self {
+            shell_event_handler,
             display: dp,
-            _compositor: compositor,
-            _xdg_wm_base: xdg_wm_base,
-            _seat: seat,
-            _cursor_shape_manager: cursor_shape_manager,
-            surface: wl_surface,
-            xdg_surface,
-            _xdg_toplevel: xdg_toplevel,
-            _pointer: pointer,
-            cursor_shape_device,
-            frame_callback: frame,
-            frame_callback_data,
-            event_bus: events as *mut _,
-            ui_scale_factor: surface_events.optimal_buffer_scale.clone(),
+            surface: wl_surface.unwrap(),
+            xdg_surface: xdg_surface.unwrap(),
+            cursor_shape_device: cursor_shape_device.unwrap(),
+            frame_callback: frame.unwrap(),
         }
     }
 
@@ -2416,7 +2222,7 @@ impl AppShell {
         unsafe {
             br::WaylandSurfaceCreateInfo::new(
                 self.display.as_raw() as _,
-                self.surface.as_raw() as _,
+                self.surface.as_ptr() as _,
             )
             .execute(instance, None)
         }
@@ -2431,21 +2237,24 @@ impl AppShell {
     }
 
     pub fn request_next_frame(&mut self) {
-        self.frame_callback = self.surface.frame().expect("Failed to request next frame");
-        self.frame_callback
-            .add_listener(&mut *self.frame_callback_data)
+        self.frame_callback = unsafe { self.surface.as_mut() }
+            .frame()
+            .expect("Failed to request next frame")
+            .unwrap();
+        unsafe { self.frame_callback.as_mut() }
+            .add_listener(&mut *self.shell_event_handler)
             .expect("Failed to set frame callback");
     }
 
     pub fn post_configure(&mut self, serial: u32) {
         println!("ToplevelWindowSurfaceConfigure {serial}");
-        self.xdg_surface
+        unsafe { self.xdg_surface.as_mut() }
             .ack_configure(serial)
             .expect("Failed to ack configure");
     }
 
     pub fn set_cursor_shape(&mut self, enter_serial: u32, shape: CursorShape) {
-        self.cursor_shape_device
+        unsafe { self.cursor_shape_device.as_mut() }
             .set_shape(
                 enter_serial,
                 match shape {
@@ -2457,7 +2266,7 @@ impl AppShell {
     }
 
     pub fn ui_scale_factor(&self) -> f32 {
-        self.ui_scale_factor.get()
+        self.shell_event_handler.ui_scale_factor.get()
     }
 }
 
@@ -2469,6 +2278,13 @@ fn main() {
     let mut app_state = AppState {};
     let mut pointer_input_manager = PointerInputManager::new();
     let mut ht_manager = HitTestTreeManager::new();
+    let ht_root_fallback_action_handler = Rc::new(HitTestRootTreeActionHandler {
+        editing_atlas_dragging: Cell::new(false),
+        editing_atlas_drag_start_x: Cell::new(0.0),
+        editing_atlas_drag_start_y: Cell::new(0.0),
+        editing_atlas_drag_start_offset_x: Cell::new(0.0),
+        editing_atlas_drag_start_offset_y: Cell::new(0.0),
+    });
     let ht_root = ht_manager.create(HitTestTreeData {
         left: 0.0,
         top: 0.0,
@@ -2478,7 +2294,7 @@ fn main() {
         height: 0.0,
         width_adjustment_factor: 1.0,
         height_adjustment_factor: 1.0,
-        action_handler: None,
+        action_handler: Some(Rc::downgrade(&ht_root_fallback_action_handler) as _),
     });
 
     let subsystem = Subsystem::init();
@@ -2631,103 +2447,6 @@ fn main() {
             0,
         )
         .expect("Failed to set char size");
-
-    let title_layout =
-        TextLayout::build_simple("Peridot SpriteAtlas Visualizer/Editor", &mut ft_face);
-    let (title_stg_image, _title_stg_image_mem) =
-        title_layout.build_stg_image(&subsystem, &subsystem.adapter_memory_info);
-
-    let text_surface_rect = composition_alphamask_surface_atlas
-        .alloc(title_layout.width_px(), title_layout.height_px());
-    println!("text surface rect: {text_surface_rect:?}");
-
-    let mut upload_cp = br::CommandPoolObject::new(
-        &subsystem,
-        &br::CommandPoolCreateInfo::new(subsystem.graphics_queue_family_index).transient(),
-    )
-    .unwrap();
-    let [mut upload_cb] = br::CommandBufferObject::alloc_array(
-        &subsystem,
-        &br::CommandBufferFixedCountAllocateInfo::new(
-            &mut upload_cp,
-            br::CommandBufferLevel::Primary,
-        ),
-    )
-    .unwrap();
-    unsafe {
-        upload_cb
-            .begin(
-                &br::CommandBufferBeginInfo::new().onetime_submit(),
-                &subsystem,
-            )
-            .unwrap()
-    }
-    .pipeline_barrier_2(&br::DependencyInfo::new(
-        &[],
-        &[],
-        &[
-            title_stg_image
-                .memory_barrier2(br::ImageSubresourceRange::new(
-                    br::AspectMask::COLOR,
-                    0..1,
-                    0..1,
-                ))
-                .from(br::PipelineStageFlags2::HOST, br::AccessFlags2::HOST.write)
-                .to(
-                    br::PipelineStageFlags2::COPY,
-                    br::AccessFlags2::TRANSFER.read,
-                )
-                .transit_to(br::ImageLayout::TransferSrcOpt.from_undefined()),
-            composition_alphamask_surface_atlas
-                .resource()
-                .image()
-                .memory_barrier2(br::ImageSubresourceRange::new(
-                    br::AspectMask::COLOR,
-                    0..1,
-                    0..1,
-                ))
-                .transit_to(br::ImageLayout::TransferDestOpt.from_undefined()),
-        ],
-    ))
-    .copy_image(
-        &title_stg_image,
-        br::ImageLayout::TransferSrcOpt,
-        composition_alphamask_surface_atlas.resource().image(),
-        br::ImageLayout::TransferDestOpt,
-        &[br::vk::VkImageCopy {
-            srcSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
-            srcOffset: br::Offset3D::ZERO,
-            dstSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
-            dstOffset: text_surface_rect.lt_offset().with_z(0),
-            extent: text_surface_rect.extent().with_depth(1),
-        }],
-    )
-    .pipeline_barrier_2(&br::DependencyInfo::new(
-        &[],
-        &[],
-        &[composition_alphamask_surface_atlas
-            .resource()
-            .image()
-            .memory_barrier2(br::ImageSubresourceRange::new(
-                br::AspectMask::COLOR,
-                0..1,
-                0..1,
-            ))
-            .from(
-                br::PipelineStageFlags2::COPY,
-                br::AccessFlags2::TRANSFER.write,
-            )
-            .to(
-                br::PipelineStageFlags2::FRAGMENT_SHADER,
-                br::AccessFlags2::SHADER_SAMPLED_READ,
-            )
-            .transit_from(br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt))],
-    ))
-    .end()
-    .unwrap();
-    subsystem
-        .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&upload_cb)])
-        .unwrap();
 
     let mut font_set = FontSet {
         ui_default: ft_face,
@@ -2912,6 +2631,9 @@ fn main() {
         )
         .unwrap();
 
+    let mut editing_atlas_renderer =
+        EditingAtlasRenderer::new(&subsystem, main_rp.subpass(0), sc_size);
+
     let mut init_context = ViewInitContext {
         subsystem: &subsystem,
         atlas: &mut composition_alphamask_surface_atlas,
@@ -2921,7 +2643,6 @@ fn main() {
         composite_instance_manager: &mut composite_instance_buffer,
         ht: &mut ht_manager,
     };
-    let mut atlas_view = AtlasView::new(&mut init_context, main_rp.subpass(0), sc_size);
 
     let app_header = AppHeaderPresenter::new(&mut init_context);
     app_header.mount(CompositeTree::ROOT, init_context.composite_tree);
@@ -2994,18 +2715,21 @@ fn main() {
             ),
             &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
         )
-        .bind_pipeline(br::PipelineBindPoint::Graphics, &atlas_view.render_pipeline)
+        .bind_pipeline(
+            br::PipelineBindPoint::Graphics,
+            &editing_atlas_renderer.render_pipeline,
+        )
         .push_constant(
-            &atlas_view.render_pipeline_layout,
+            &editing_atlas_renderer.render_pipeline_layout,
             br::vk::VK_SHADER_STAGE_FRAGMENT_BIT,
             0,
             &[sc_size.width as f32, sc_size.height as f32],
         )
         .bind_descriptor_sets(
             br::PipelineBindPoint::Graphics,
-            &atlas_view.render_pipeline_layout,
+            &editing_atlas_renderer.render_pipeline_layout,
             0,
-            &[atlas_view.ds_param],
+            &[editing_atlas_renderer.ds_param],
             &[],
         )
         .draw(3, 1, 0, 0)
@@ -3118,6 +2842,7 @@ fn main() {
     let mut app_update_context = AppUpdateContext {
         composite_tree,
         state: app_state,
+        editing_atlas_renderer,
         current_sec: 0.0,
     };
 
@@ -3186,7 +2911,8 @@ fn main() {
 
                     let composite_instance_buffer_dirty =
                         core::mem::replace(&mut composite_instance_buffer_dirty, false);
-                    let needs_update = composite_instance_buffer_dirty;
+                    let needs_update = composite_instance_buffer_dirty
+                        || app_update_context.editing_atlas_renderer.is_dirty();
 
                     if needs_update {
                         if last_updating {
@@ -3221,6 +2947,11 @@ fn main() {
                             &[],
                             &[],
                         ))
+                        .inject(|r| {
+                            app_update_context
+                                .editing_atlas_renderer
+                                .process_dirty_data(r)
+                        })
                         .end()
                         .unwrap();
                     }
@@ -3394,7 +3125,11 @@ fn main() {
                                 .unwrap();
                             composite_pipeline = composite_pipeline1;
 
-                            atlas_view.recreate(&subsystem, main_rp.subpass(0), sc_size);
+                            app_update_context.editing_atlas_renderer.recreate(
+                                &subsystem,
+                                main_rp.subpass(0),
+                                sc_size,
+                            );
 
                             for (cb, fb) in main_cbs.iter_mut().zip(main_fbs.iter()) {
                                 unsafe {
@@ -3412,19 +3147,23 @@ fn main() {
                                 )
                                 .bind_pipeline(
                                     br::PipelineBindPoint::Graphics,
-                                    &atlas_view.render_pipeline,
+                                    &app_update_context.editing_atlas_renderer.render_pipeline,
                                 )
                                 .push_constant(
-                                    &atlas_view.render_pipeline_layout,
+                                    &app_update_context
+                                        .editing_atlas_renderer
+                                        .render_pipeline_layout,
                                     br::vk::VK_SHADER_STAGE_FRAGMENT_BIT,
                                     0,
                                     &[sc_size.width as f32, sc_size.height as f32],
                                 )
                                 .bind_descriptor_sets(
                                     br::PipelineBindPoint::Graphics,
-                                    &atlas_view.render_pipeline_layout,
+                                    &app_update_context
+                                        .editing_atlas_renderer
+                                        .render_pipeline_layout,
                                     0,
-                                    &[atlas_view.ds_param],
+                                    &[app_update_context.editing_atlas_renderer.ds_param],
                                     &[],
                                 )
                                 .draw(3, 1, 0, 0)

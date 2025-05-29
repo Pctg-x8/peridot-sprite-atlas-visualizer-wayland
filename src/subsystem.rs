@@ -1,6 +1,10 @@
-use std::{io::Read, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    io::Read,
+    path::Path,
+};
 
-use bedrock::{self as br, Instance, PhysicalDevice};
+use bedrock::{self as br, Device, Instance, MemoryBound, PhysicalDevice, VkHandle};
 
 #[repr(transparent)]
 pub struct SubsystemInstanceAccess(Subsystem);
@@ -290,6 +294,568 @@ impl Subsystem {
                 fence,
             )
         }
+    }
+}
+
+pub struct StagingScratchBufferReservation {
+    block_index: usize,
+    offset: br::DeviceSize,
+    size: br::DeviceSize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum StagingScratchBufferMapMode {
+    Read,
+    Write,
+    ReadWrite,
+}
+impl StagingScratchBufferMapMode {
+    const fn is_read(&self) -> bool {
+        matches!(self, Self::Read | Self::ReadWrite)
+    }
+
+    const fn is_write(&self) -> bool {
+        matches!(self, Self::Write | Self::ReadWrite)
+    }
+}
+
+pub struct MappedStagingScratchBuffer<'r, 'g> {
+    gfx_device_ref: &'g Subsystem,
+    memory: br::vk::VkDeviceMemory,
+    range: core::ops::Range<br::DeviceSize>,
+    explicit_flush: bool,
+    ptr: *mut core::ffi::c_void,
+    _marker: core::marker::PhantomData<&'r mut StagingScratchBuffer<'g>>,
+}
+impl Drop for MappedStagingScratchBuffer<'_, '_> {
+    fn drop(&mut self) {
+        if self.explicit_flush {
+            let r = unsafe {
+                self.gfx_device_ref
+                    .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(
+                        self.memory,
+                        self.range.start,
+                        self.range.end - self.range.start,
+                    )])
+            };
+            if let Err(e) = r {
+                eprintln!("Failed to flush mapped memory ranges: {e:?}");
+            }
+        }
+
+        unsafe {
+            br::vkfn_wrapper::unmap_memory(self.gfx_device_ref.native_ptr(), self.memory);
+        }
+    }
+}
+impl MappedStagingScratchBuffer<'_, '_> {
+    pub const unsafe fn addr_of_mut<T>(&self, offset: usize) -> *mut T {
+        unsafe { self.ptr.byte_add(offset).cast() }
+    }
+}
+
+pub struct StagingScratchBuffer<'g> {
+    next_suitable_index: Option<usize>,
+    gfx_device_ref: &'g Subsystem,
+    buffer: br::vk::VkBuffer,
+    memory: br::vk::VkDeviceMemory,
+    requires_explicit_flush: bool,
+    size: br::DeviceSize,
+    top: br::DeviceSize,
+}
+impl Drop for StagingScratchBuffer<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            br::vkfn_wrapper::free_memory(self.gfx_device_ref.native_ptr(), self.memory, None);
+            br::vkfn_wrapper::destroy_buffer(self.gfx_device_ref.native_ptr(), self.buffer, None);
+        }
+    }
+}
+impl br::VkHandle for StagingScratchBuffer<'_> {
+    type Handle = br::vk::VkBuffer;
+
+    #[inline(always)]
+    fn native_ptr(&self) -> Self::Handle {
+        self.buffer
+    }
+}
+impl<'g> StagingScratchBuffer<'g> {
+    pub fn new(gfx_device: &'g Subsystem, size: br::DeviceSize) -> Self {
+        let mut buf = br::BufferObject::new(
+            gfx_device,
+            &br::BufferCreateInfo::new(size as _, br::BufferUsage::TRANSFER_SRC),
+        )
+        .expect("Failed to create StagingScratchBuffer");
+        let mreq = buf.requirements();
+        let memindex = gfx_device
+            .adapter_memory_info
+            .find_host_visible_index(mreq.memoryTypeBits)
+            .expect("no suitable memory for StagingScratchBuffer");
+        let is_coherent = gfx_device.adapter_memory_info.is_coherent(memindex);
+        let mem = br::DeviceMemoryObject::new(
+            gfx_device,
+            &br::MemoryAllocateInfo::new(mreq.size, memindex),
+        )
+        .expect("Failed to allocate StagingScratchBuffer memory");
+        buf.bind(&mem, 0).expect("Failed to bind buffer memory");
+
+        Self {
+            next_suitable_index: None,
+            gfx_device_ref: gfx_device,
+            buffer: buf.unmanage().0,
+            memory: mem.unmanage().0,
+            requires_explicit_flush: !is_coherent,
+            size,
+            top: 0,
+        }
+    }
+
+    pub const fn reminder(&self) -> br::DeviceSize {
+        self.size - self.top
+    }
+
+    pub fn reserve(&mut self, size: br::DeviceSize) -> br::DeviceSize {
+        let base = self.top;
+
+        self.top = base + size;
+        base
+    }
+
+    pub fn map(
+        &self,
+        mode: StagingScratchBufferMapMode,
+        range: core::ops::Range<br::DeviceSize>,
+    ) -> br::Result<MappedStagingScratchBuffer> {
+        let ptr = unsafe {
+            br::vkfn_wrapper::map_memory(
+                self.gfx_device_ref.native_ptr(),
+                self.memory,
+                range.start,
+                range.end - range.start,
+                0,
+            )?
+        };
+        if mode.is_read() && self.requires_explicit_flush {
+            let r = unsafe {
+                self.gfx_device_ref
+                    .invalidate_memory_range(&[br::MappedMemoryRange::new_raw(
+                        self.memory,
+                        range.start,
+                        range.end - range.start,
+                    )])
+            };
+            if let Err(e) = r {
+                eprintln!("Failed to invalidate mapped memory range: {e:?}");
+            }
+        }
+
+        Ok(MappedStagingScratchBuffer {
+            gfx_device_ref: self.gfx_device_ref,
+            memory: self.memory,
+            explicit_flush: self.requires_explicit_flush && mode.is_write(),
+            ptr,
+            range,
+            _marker: core::marker::PhantomData,
+        })
+    }
+}
+
+// alloc-only buffer resource manager: using tlsf algorithm for best-fit buffer block finding.
+pub struct StagingScratchBufferManager<'g> {
+    buffer_blocks: Vec<StagingScratchBuffer<'g>>,
+    first_level_free_residency_bit: u64,
+    second_level_free_residency_bit: [u16; StagingScratchBufferManager::FIRST_LEVEL_MAX_COUNT],
+    suitable_block_head_index: [usize;
+        StagingScratchBufferManager::SECOND_LEVEL_ENTRY_COUNT
+            * StagingScratchBufferManager::FIRST_LEVEL_MAX_COUNT],
+    total_reserve_amount: br::DeviceSize,
+}
+impl<'g> StagingScratchBufferManager<'g> {
+    const BLOCK_SIZE: br::DeviceSize = 4 * 1024 * 1024;
+    const MIN_ALLOC_GRANULARITY: br::DeviceSize = 64;
+    const SECOND_LEVEL_BIT_COUNT: u32 = 4;
+
+    const LOWER_BIT_COUNT: u32 = (Self::MIN_ALLOC_GRANULARITY - 1).trailing_ones();
+    const SECOND_LEVEL_ENTRY_COUNT: usize = (1 << Self::SECOND_LEVEL_BIT_COUNT) as _;
+    const FIRST_LEVEL_BIT_COUNT: u32 = core::mem::size_of::<br::DeviceSize>() as u32 * 8
+        - Self::SECOND_LEVEL_BIT_COUNT
+        - Self::LOWER_BIT_COUNT;
+    const FIRST_LEVEL_MAX_COUNT: usize = ((Self::BLOCK_SIZE - 1)
+        >> (Self::LOWER_BIT_COUNT + Self::SECOND_LEVEL_BIT_COUNT))
+        .trailing_ones() as usize
+        + 2;
+
+    pub fn new(gfx_device: &'g Subsystem) -> Self {
+        let mut this = Self {
+            buffer_blocks: vec![StagingScratchBuffer::new(gfx_device, Self::BLOCK_SIZE)],
+            first_level_free_residency_bit: 0,
+            second_level_free_residency_bit: [0; Self::FIRST_LEVEL_MAX_COUNT],
+            suitable_block_head_index: [0; Self::SECOND_LEVEL_ENTRY_COUNT
+                * Self::FIRST_LEVEL_MAX_COUNT],
+            total_reserve_amount: 0,
+        };
+
+        let (f, s) = Self::level_indices(Self::BLOCK_SIZE);
+        println!("f {f} s {s} size {}", Self::BLOCK_SIZE);
+        this.chain_free_block(f, s, 0);
+        this
+    }
+
+    pub const fn total_reserved_amount(&self) -> br::DeviceSize {
+        self.total_reserve_amount
+    }
+
+    pub fn reset(&mut self) {
+        // TODO: ここbuffer blockの再利用はどうするかあとで考える
+        self.buffer_blocks.shrink_to(1);
+        self.buffer_blocks[0].next_suitable_index = None;
+        self.first_level_free_residency_bit = 0;
+        self.second_level_free_residency_bit.fill(0);
+        self.total_reserve_amount = 0;
+
+        let (f, s) = Self::level_indices(Self::BLOCK_SIZE);
+        self.chain_free_block(f, s, 0);
+    }
+
+    const fn level_indices(size: br::DeviceSize) -> (u8, u8) {
+        const fn const_min_u32(a: u32, b: u32) -> u32 {
+            if a < b { a } else { b }
+        }
+
+        let f = Self::FIRST_LEVEL_BIT_COUNT
+            - const_min_u32(size.leading_zeros(), Self::FIRST_LEVEL_BIT_COUNT);
+        let s = if f == 0 {
+            // minimum sizes
+            size >> (Self::LOWER_BIT_COUNT - 1)
+        } else {
+            (size >> (Self::LOWER_BIT_COUNT + f - 1)) - (1 << Self::SECOND_LEVEL_BIT_COUNT)
+        };
+
+        (f as u8, s as u8)
+    }
+
+    const fn level_to_index(fli: u8, sli: u8) -> usize {
+        fli as usize * Self::SECOND_LEVEL_ENTRY_COUNT + sli as usize
+    }
+
+    fn evict_level(&mut self, fli: u8, sli: u8) {
+        let new_residency_bits = self.second_level_free_residency_bit[fli as usize] & !(1 << sli);
+        self.second_level_free_residency_bit[fli as usize] = new_residency_bits;
+        if new_residency_bits == 0 {
+            // second levelが全部埋まった
+            self.first_level_free_residency_bit &= !(1 << fli);
+        }
+    }
+
+    fn resident_level(&mut self, fli: u8, sli: u8, value: usize) {
+        self.second_level_free_residency_bit[fli as usize] |= 1 << sli;
+        // かならずできるはず
+        self.first_level_free_residency_bit |= 1 << fli;
+
+        self.suitable_block_head_index[Self::level_to_index(fli, sli)] = value;
+    }
+
+    const fn residential_value(&self, fli: u8, sli: u8) -> Option<usize> {
+        if (self.second_level_free_residency_bit[fli as usize] & (1 << sli)) != 0 {
+            Some(self.suitable_block_head_index[Self::level_to_index(fli, sli)])
+        } else {
+            None
+        }
+    }
+
+    fn find_fit_free_block_index(&self, fli: &mut u8, sli: &mut u8) -> Option<usize> {
+        let residency_bit_pos = (self.second_level_free_residency_bit[*fli as usize]
+            & (u16::MAX << *sli))
+            .trailing_zeros();
+        if residency_bit_pos < Self::SECOND_LEVEL_ENTRY_COUNT as u32 {
+            // found
+            *sli = residency_bit_pos as _;
+
+            return Some(self.suitable_block_head_index[Self::level_to_index(*fli, *sli)]);
+        }
+
+        let residency_bit_pos =
+            (self.first_level_free_residency_bit & (u64::MAX << *fli)).trailing_zeros();
+        if residency_bit_pos < Self::FIRST_LEVEL_MAX_COUNT as u32 {
+            // found in first level
+            *fli = residency_bit_pos as _;
+            let second_level_least_residency =
+                self.second_level_free_residency_bit[*fli as usize].trailing_zeros();
+            assert!(second_level_least_residency < Self::SECOND_LEVEL_ENTRY_COUNT as u32);
+            *sli = second_level_least_residency as _;
+
+            return Some(self.suitable_block_head_index[Self::level_to_index(*fli, *sli)]);
+        }
+
+        None
+    }
+
+    fn unchain_free_block(&mut self, fli: u8, sli: u8, index: usize) {
+        self.evict_level(fli, sli);
+        if let Some(next) = self.buffer_blocks[index].next_suitable_index {
+            // set next free block as resident of this level
+            self.resident_level(fli, sli, next);
+        }
+    }
+
+    fn chain_free_block(&mut self, fli: u8, sli: u8, index: usize) {
+        if let Some(current) = self.residential_value(fli, sli) {
+            // chain head of existing list
+            self.buffer_blocks[index].next_suitable_index = Some(current);
+        }
+
+        self.resident_level(fli, sli, index);
+    }
+
+    pub fn reserve(&mut self, size: br::DeviceSize) -> StagingScratchBufferReservation {
+        // roundup
+        let size = (size + (Self::MIN_ALLOC_GRANULARITY - 1)) & !(Self::MIN_ALLOC_GRANULARITY - 1);
+
+        let (mut fli, mut sli) = Self::level_indices(size);
+
+        let block_index = self
+            .find_fit_free_block_index(&mut fli, &mut sli)
+            .expect("out of memory");
+        self.unchain_free_block(fli, sli, block_index);
+
+        let offset = self.buffer_blocks[block_index].reserve(size);
+        if self.buffer_blocks[block_index].reminder() > 0 {
+            // のこりは再登録
+            let (new_f, new_s) = Self::level_indices(self.buffer_blocks[block_index].reminder());
+            self.chain_free_block(new_f, new_s, block_index);
+        }
+
+        self.total_reserve_amount += size;
+
+        StagingScratchBufferReservation {
+            block_index,
+            offset,
+            size,
+        }
+    }
+
+    pub fn of(
+        &self,
+        reservation: &StagingScratchBufferReservation,
+    ) -> (
+        &impl br::VkHandle<Handle = br::vk::VkBuffer>,
+        br::DeviceSize,
+    ) {
+        (
+            &self.buffer_blocks[reservation.block_index],
+            reservation.offset,
+        )
+    }
+
+    pub fn map(
+        &mut self,
+        reservation: &StagingScratchBufferReservation,
+        mode: StagingScratchBufferMapMode,
+    ) -> br::Result<MappedStagingScratchBuffer> {
+        let buf = &self.buffer_blocks[reservation.block_index];
+
+        let ptr = unsafe {
+            br::vkfn_wrapper::map_memory(
+                buf.gfx_device_ref.native_ptr(),
+                buf.memory,
+                reservation.offset,
+                reservation.size,
+                0,
+            )?
+        };
+        if buf.requires_explicit_flush && mode.is_read() {
+            let r = unsafe {
+                buf.gfx_device_ref
+                    .invalidate_memory_range(&[br::MappedMemoryRange::new_raw(
+                        buf.memory,
+                        reservation.offset,
+                        reservation.size,
+                    )])
+            };
+            if let Err(e) = r {
+                eprintln!("Failed to invalidate mapped memory: {e:?}");
+            }
+        }
+
+        Ok(MappedStagingScratchBuffer {
+            gfx_device_ref: buf.gfx_device_ref,
+            memory: buf.memory,
+            explicit_flush: buf.requires_explicit_flush && mode.is_write(),
+            ptr,
+            range: reservation.offset..(reservation.offset + reservation.size),
+            _marker: core::marker::PhantomData,
+        })
+    }
+}
+
+// simple tlsf allocator: first-level 16bits second-level 8bits
+struct DeviceLocalScratchBufferManager {
+    max_block_size: br::DeviceSize,
+    allowed_size_mask: br::DeviceSize,
+    top_force_zero_bit_count: u32,
+    effective_bit_count: u32,
+    first_level_freeblock_residency_bit: u16,
+    second_level_freeblock_residency_bit: [u8; 16],
+    freeblock_offsets: [br::DeviceSize; 16 * 8],
+    addr_to_block_size: HashMap<br::DeviceSize, br::DeviceSize>,
+    addr_to_prev_block: HashMap<br::DeviceSize, br::DeviceSize>,
+    addr_to_next_free_block: HashMap<br::DeviceSize, br::DeviceSize>,
+    used_addrs: HashSet<br::DeviceSize>,
+}
+impl DeviceLocalScratchBufferManager {
+    pub fn new(max_block_size: br::DeviceSize) -> Self {
+        let mut second_level_freeblock_residency_bit = [0; 16];
+        second_level_freeblock_residency_bit[15] = 1 << 7;
+
+        // 4mb = 4 * 1024 * 1024 -> 2^22
+        // 8bits/8bits = 8bits + 3bits = 11bits left 11bits(2048)
+        // 11bits -> 2^11 = 2048
+        // 16bits/8bits = 16bits + 3bits = 19bits left 3bits(8)
+
+        Self {
+            max_block_size,
+            allowed_size_mask: max_block_size - 1,
+            top_force_zero_bit_count: (max_block_size - 1).leading_zeros(),
+            effective_bit_count: (max_block_size - 1).trailing_ones(),
+            first_level_freeblock_residency_bit: 1 << 15,
+            second_level_freeblock_residency_bit,
+            freeblock_offsets: [0; 16 * 8],
+            addr_to_block_size: HashMap::new(),
+            addr_to_prev_block: HashMap::new(),
+            addr_to_next_free_block: HashMap::new(),
+            used_addrs: HashSet::new(),
+        }
+    }
+
+    fn level_indices(&self, size: br::DeviceSize) -> (u8, u8) {
+        let lower = (self.effective_bit_count - 16 - 3) as u8;
+
+        let f = (15
+            - ((size & self.allowed_size_mask).leading_zeros() - self.top_force_zero_bit_count)
+                .min(15)) as u8;
+        let s = ((size >> (lower + f)) & 0x07) as u8;
+
+        (f, s)
+    }
+
+    fn evict_level_freeblock(&mut self, fli: u8, sli: u8) {
+        let new_freeblock_residency_bits =
+            self.second_level_freeblock_residency_bit[fli as usize] & !(1 << sli);
+        self.second_level_freeblock_residency_bit[fli as usize] = new_freeblock_residency_bits;
+        if new_freeblock_residency_bits == 0 {
+            // second levelが全部埋まった
+            self.first_level_freeblock_residency_bit &= !(1 << fli);
+        }
+    }
+
+    fn resident_level_freeblock(&mut self, fli: u8, sli: u8, addr: br::DeviceSize) {
+        self.second_level_freeblock_residency_bit[fli as usize] |= 1 << sli;
+        // かならずできるはず
+        self.first_level_freeblock_residency_bit |= 1 << fli;
+
+        self.freeblock_offsets[(fli * 8 + sli) as usize] = addr;
+    }
+
+    fn residential_free_block_addr(&self, fli: u8, sli: u8) -> Option<br::DeviceSize> {
+        if (self.second_level_freeblock_residency_bit[fli as usize] & (1 << sli)) != 0 {
+            Some(self.freeblock_offsets[(fli * 8 + sli) as usize])
+        } else {
+            None
+        }
+    }
+
+    fn find_fit_free_block_head(&self, fli: &mut u8, sli: &mut u8) -> Option<br::DeviceSize> {
+        let residency_bit_pos = (self.second_level_freeblock_residency_bit[*fli as usize]
+            & (0xff << *sli))
+            .trailing_zeros()
+            + 1;
+        if residency_bit_pos < 8 {
+            // found
+            *sli = residency_bit_pos as _;
+
+            return Some(self.freeblock_offsets[(*fli * 8 + *sli) as usize]);
+        }
+
+        let residency_bit_pos =
+            (self.first_level_freeblock_residency_bit & (0xffff << *fli)).trailing_zeros() + 1;
+        if residency_bit_pos < 16 {
+            // found in first level
+            *fli = residency_bit_pos as _;
+            let second_level_least_residency =
+                self.second_level_freeblock_residency_bit[*fli as usize].trailing_zeros() + 1;
+            assert!(second_level_least_residency < 8);
+            *sli = second_level_least_residency as _;
+
+            return Some(self.freeblock_offsets[(*fli * 8 + *sli) as usize]);
+        }
+
+        None
+    }
+
+    fn unchain_free_block(&mut self, addr: br::DeviceSize) {
+        let (f, s) = self.level_indices(self.addr_to_block_size[&addr]);
+
+        self.evict_level_freeblock(f, s);
+        if let Some(a) = self.addr_to_next_free_block.remove(&addr) {
+            // set next free block as resident of this level
+            self.resident_level_freeblock(f, s, a);
+        }
+
+        self.used_addrs.insert(addr);
+    }
+
+    fn chain_free_block(&mut self, addr: br::DeviceSize) {
+        let (f, s) = self.level_indices(self.addr_to_block_size[&addr]);
+
+        if let Some(a) = self.residential_free_block_addr(f, s) {
+            // chain head of existing list
+            self.addr_to_next_free_block.insert(addr, a);
+        }
+
+        self.resident_level_freeblock(f, s, addr);
+        self.used_addrs.remove(&addr);
+    }
+
+    pub fn alloc(&mut self, size: br::DeviceSize) -> br::DeviceSize {
+        let (mut fli, mut sli) = self.level_indices(size);
+
+        let head_addr = self
+            .find_fit_free_block_head(&mut fli, &mut sli)
+            .expect("out of memory");
+        self.unchain_free_block(head_addr);
+
+        if self.addr_to_block_size[&head_addr] > size {
+            // 必要分より大きいので分割
+            let new_free_block_size = self.addr_to_block_size[&head_addr] - size;
+            let new_free_block_addr = head_addr + size;
+            self.addr_to_block_size.insert(head_addr, size);
+            self.addr_to_block_size
+                .insert(new_free_block_addr, new_free_block_size);
+
+            self.chain_free_block(new_free_block_addr);
+        }
+
+        self.used_addrs.insert(head_addr);
+        return head_addr;
+    }
+
+    pub fn free(&mut self, addr: br::DeviceSize) {
+        let mut size = self.addr_to_block_size[&addr];
+
+        if !self.used_addrs.contains(&(addr + size)) {
+            // merge with next unused block
+            self.unchain_free_block(addr + size);
+            let next_block_size = unsafe {
+                self.addr_to_block_size
+                    .remove(&(addr + size))
+                    .unwrap_unchecked()
+            };
+
+            size += next_block_size;
+            self.addr_to_block_size.insert(addr, size);
+        }
+
+        self.chain_free_block(addr);
     }
 }
 

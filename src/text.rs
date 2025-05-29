@@ -1,4 +1,9 @@
-use crate::{freetype as ft, harfbuzz as hb};
+use crate::{
+    freetype as ft, harfbuzz as hb,
+    subsystem::{
+        StagingScratchBufferManager, StagingScratchBufferMapMode, StagingScratchBufferReservation,
+    },
+};
 use bedrock::{self as br, DeviceMemoryMut, Image, MemoryBound, VkHandle};
 use freetype2::*;
 
@@ -124,6 +129,33 @@ impl TextLayout {
         self.height().ceil() as _
     }
 
+    pub fn build_stg_image_pixel_buffer(
+        &self,
+        staging_scratch_buffer: &mut StagingScratchBufferManager,
+    ) -> StagingScratchBufferReservation {
+        let buf = staging_scratch_buffer.reserve((self.width_px() * self.height_px()) as _);
+        let ptr = staging_scratch_buffer
+            .map(&buf, StagingScratchBufferMapMode::Write)
+            .expect("Failed to map staging scratch buffer");
+        for b in self.bitmaps.iter() {
+            for y in 0..b.rows {
+                let dy = y as isize + self.max_ascender as isize - b.ascending_pixels;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        b.buf.as_ptr().add(b.pitch * y),
+                        ptr.addr_of_mut(
+                            self.width_px() as usize * dy as usize + b.left_offset as usize,
+                        ),
+                        b.width,
+                    )
+                }
+            }
+        }
+
+        buf
+    }
+
+    #[deprecated = "use build_stg_image_pixel_buffer with StagingScratchBufferManager"]
     pub fn build_stg_image<'d, D: br::Device + 'd>(
         &self,
         device: &'d D,

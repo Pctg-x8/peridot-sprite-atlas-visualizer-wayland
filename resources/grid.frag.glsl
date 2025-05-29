@@ -14,7 +14,7 @@ layout(set = 0, binding = 0) uniform Params {
 layout(location = 0) out vec4 color;
 
 void main() {
-    const vec2 uv1 = uv + offset / pixelSize;
+    const vec2 uv1 = uv - offset / pixelSize;
     const vec2 lv0 = 1.0 - smoothstep(1.0 / pixelSize, 2.0 / pixelSize, abs(uv1));
     const float b0 = 1.0 - (1.0 - lv0.x) * (1.0 - lv0.y);
 

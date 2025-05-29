@@ -29,7 +29,7 @@ use hittest::{
 };
 use input::{EventContinueControl, PointerInputManager};
 use linux_input_event_codes::BTN_LEFT;
-use subsystem::Subsystem;
+use subsystem::{StagingScratchBufferManager, StagingScratchBufferMapMode, Subsystem};
 use text::TextLayout;
 use wl::{WpCursorShapeDeviceV1Shape, WpCursorShapeManagerV1};
 
@@ -79,6 +79,7 @@ pub struct FontSet {
 
 pub struct ViewInitContext<'d, 'r> {
     pub subsystem: &'d Subsystem,
+    pub staging_scratch_buffer: &'r mut StagingScratchBufferManager<'d>,
     pub atlas: &'r mut CompositionSurfaceAtlas<'d>,
     pub ui_scale_factor: f32,
     pub composite_tree: &'r mut CompositeTree,
@@ -105,68 +106,18 @@ impl AppHeaderBaseView {
 
         let height = text_layout.height() / ctx.ui_scale_factor + Self::TITLE_SPACING * 2.0;
 
-        let text_stg_image =
-            text_layout.build_stg_image(&ctx.subsystem, &ctx.subsystem.adapter_memory_info);
-        let mut bg_stg_image = br::ImageObject::new(
-            &ctx.subsystem,
-            &br::ImageCreateInfo::new(
-                br::Extent2D {
-                    width: 1,
-                    height: 2,
-                },
-                br::vk::VK_FORMAT_R8_UNORM,
-            )
-            .set_usage(br::ImageUsageFlags::TRANSFER_SRC)
-            .use_linear_tiling(),
-        )
-        .unwrap();
-        let bg_stg_image_mreq = bg_stg_image.requirements();
-        let bg_stg_image_subresource_mreq =
-            bg_stg_image.layout_info(&br::ImageSubresource::new(br::AspectMask::COLOR, 0, 0));
-        let bg_stg_image_memory_index = ctx
-            .subsystem
-            .adapter_memory_info
-            .find_host_visible_index(bg_stg_image_mreq.memoryTypeBits)
-            .unwrap();
-        let mut bg_stg_image_memory = br::DeviceMemoryObject::new(
-            &ctx.subsystem,
-            &br::MemoryAllocateInfo::new(bg_stg_image_mreq.size, bg_stg_image_memory_index),
-        )
-        .unwrap();
-        bg_stg_image.bind(&bg_stg_image_memory, 0).unwrap();
-        let requires_flush = !ctx
-            .subsystem
-            .adapter_memory_info
-            .is_coherent(bg_stg_image_memory_index);
-        let h = bg_stg_image_memory.native_ptr();
-        let p = bg_stg_image_memory
-            .map(
-                bg_stg_image_subresource_mreq.offset as _
-                    ..(bg_stg_image_subresource_mreq.offset + bg_stg_image_subresource_mreq.size)
-                        as _,
-            )
+        let text_stg_image_pixels =
+            text_layout.build_stg_image_pixel_buffer(ctx.staging_scratch_buffer);
+        let bg_stg_image_pixels = ctx.staging_scratch_buffer.reserve(2);
+        let ptr = ctx
+            .staging_scratch_buffer
+            .map(&bg_stg_image_pixels, StagingScratchBufferMapMode::Write)
             .unwrap();
         unsafe {
-            core::ptr::write(p.addr_of_mut(0), 0xff);
-            core::ptr::write(
-                p.addr_of_mut(bg_stg_image_subresource_mreq.rowPitch as _),
-                0x00,
-            );
+            ptr.addr_of_mut::<u8>(0).write(0xff);
+            ptr.addr_of_mut::<u8>(1).write(0x00);
         }
-        if requires_flush {
-            unsafe {
-                ctx.subsystem
-                    .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(
-                        h,
-                        bg_stg_image_subresource_mreq.offset,
-                        bg_stg_image_subresource_mreq.size,
-                    )])
-                    .unwrap();
-            }
-        }
-        unsafe {
-            bg_stg_image_memory.unmap();
-        }
+        drop(ptr);
 
         let mut cp = br::CommandPoolObject::new(
             &ctx.subsystem,
@@ -188,50 +139,52 @@ impl AppHeaderBaseView {
         .pipeline_barrier_2(&br::DependencyInfo::new(
             &[],
             &[],
-            &[
-                br::ImageMemoryBarrier2::new(
-                    &text_stg_image.0,
-                    br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
-                )
-                .transit_to(br::ImageLayout::TransferSrcOpt.from_undefined()),
-                br::ImageMemoryBarrier2::new(
-                    &bg_stg_image,
-                    br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
-                )
-                .transit_to(br::ImageLayout::TransferSrcOpt.from_undefined()),
-                br::ImageMemoryBarrier2::new(
-                    ctx.atlas.resource().image(),
-                    br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
-                )
-                .transit_to(br::ImageLayout::TransferDestOpt.from_undefined()),
-            ],
+            &[br::ImageMemoryBarrier2::new(
+                ctx.atlas.resource().image(),
+                br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+            )
+            .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
         ))
-        .copy_image(
-            &text_stg_image.0,
-            br::ImageLayout::TransferSrcOpt,
-            ctx.atlas.resource().image(),
-            br::ImageLayout::TransferDestOpt,
-            &[br::ImageCopy {
-                srcSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
-                srcOffset: br::Offset3D::ZERO,
-                dstSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
-                dstOffset: text_atlas_rect.lt_offset().with_z(0),
-                extent: text_atlas_rect.extent().with_depth(1),
-            }],
-        )
-        .copy_image(
-            &bg_stg_image,
-            br::ImageLayout::TransferSrcOpt,
-            ctx.atlas.resource().image(),
-            br::ImageLayout::TransferDestOpt,
-            &[br::ImageCopy {
-                srcSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
-                srcOffset: br::Offset3D::ZERO,
-                dstSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
-                dstOffset: bg_atlas_rect.lt_offset().with_z(0),
-                extent: bg_atlas_rect.extent().with_depth(1),
-            }],
-        )
+        .inject(|r| {
+            let (tb, to) = ctx.staging_scratch_buffer.of(&text_stg_image_pixels);
+            let (b, o) = ctx.staging_scratch_buffer.of(&bg_stg_image_pixels);
+
+            // TODO: ここ使うリソースいっしょだったらバッチするようにしたい
+            r.copy_buffer_to_image(
+                tb,
+                ctx.atlas.resource().image(),
+                br::ImageLayout::TransferDestOpt,
+                &[br::vk::VkBufferImageCopy {
+                    bufferOffset: to,
+                    bufferRowLength: text_layout.width_px(),
+                    bufferImageHeight: text_layout.height_px(),
+                    imageSubresource: br::ImageSubresourceLayers::new(
+                        br::AspectMask::COLOR,
+                        0,
+                        0..1,
+                    ),
+                    imageOffset: text_atlas_rect.lt_offset().with_z(0),
+                    imageExtent: text_atlas_rect.extent().with_depth(1),
+                }],
+            )
+            .copy_buffer_to_image(
+                b,
+                ctx.atlas.resource().image(),
+                br::ImageLayout::TransferDestOpt,
+                &[br::vk::VkBufferImageCopy {
+                    bufferOffset: o,
+                    bufferRowLength: 1,
+                    bufferImageHeight: 2,
+                    imageSubresource: br::ImageSubresourceLayers::new(
+                        br::AspectMask::COLOR,
+                        0,
+                        0..1,
+                    ),
+                    imageOffset: bg_atlas_rect.lt_offset().with_z(0),
+                    imageExtent: bg_atlas_rect.extent().with_depth(1),
+                }],
+            )
+        })
         .pipeline_barrier_2(&br::DependencyInfo::new(
             &[],
             &[],
@@ -918,8 +871,8 @@ impl SpriteListPaneView {
             title_layout.width_px() + (title_blur_pixels * 2 + 1),
             title_layout.height_px() + (title_blur_pixels * 2 + 1),
         );
-        let (title_stg_image, _title_stg_image_mem) =
-            title_layout.build_stg_image(&init.subsystem, &init.subsystem.adapter_memory_info);
+        let title_stg_image_pixels =
+            title_layout.build_stg_image_pixel_buffer(init.staging_scratch_buffer);
 
         let mut title_blurred_work_image = br::ImageObject::new(
             &init.subsystem,
@@ -1219,43 +1172,38 @@ impl SpriteListPaneView {
         .pipeline_barrier_2(&br::DependencyInfo::new(
             &[],
             &[],
-            &[
-                title_stg_image
-                    .memory_barrier2(br::ImageSubresourceRange::new(
-                        br::AspectMask::COLOR,
-                        0..1,
-                        0..1,
-                    ))
-                    .from(br::PipelineStageFlags2::HOST, br::AccessFlags2::HOST.write)
-                    .to(
-                        br::PipelineStageFlags2::COPY,
-                        br::AccessFlags2::TRANSFER.read,
-                    )
-                    .transit_to(br::ImageLayout::TransferSrcOpt.from_undefined()),
-                init.atlas
-                    .resource()
-                    .image()
-                    .memory_barrier2(br::ImageSubresourceRange::new(
-                        br::AspectMask::COLOR,
-                        0..1,
-                        0..1,
-                    ))
-                    .transit_to(br::ImageLayout::TransferDestOpt.from_undefined()),
-            ],
+            &[init
+                .atlas
+                .resource()
+                .image()
+                .memory_barrier2(br::ImageSubresourceRange::new(
+                    br::AspectMask::COLOR,
+                    0..1,
+                    0..1,
+                ))
+                .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
         ))
-        .copy_image(
-            &title_stg_image,
-            br::ImageLayout::TransferSrcOpt,
-            init.atlas.resource().image(),
-            br::ImageLayout::TransferDestOpt,
-            &[br::vk::VkImageCopy {
-                srcSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
-                srcOffset: br::Offset3D::ZERO,
-                dstSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
-                dstOffset: title_atlas_rect.lt_offset().with_z(0),
-                extent: title_atlas_rect.extent().with_depth(1),
-            }],
-        )
+        .inject(|r| {
+            let (b, o) = init.staging_scratch_buffer.of(&title_stg_image_pixels);
+
+            r.copy_buffer_to_image(
+                b,
+                init.atlas.resource().image(),
+                br::ImageLayout::TransferDestOpt,
+                &[br::vk::VkBufferImageCopy {
+                    bufferOffset: o,
+                    bufferRowLength: title_layout.width_px(),
+                    bufferImageHeight: title_layout.height_px(),
+                    imageSubresource: br::ImageSubresourceLayers::new(
+                        br::AspectMask::COLOR,
+                        0,
+                        0..1,
+                    ),
+                    imageOffset: title_atlas_rect.lt_offset().with_z(0),
+                    imageExtent: title_atlas_rect.extent().with_depth(1),
+                }],
+            )
+        })
         .pipeline_barrier_2(&br::DependencyInfo::new(
             &[],
             &[],
@@ -1770,9 +1718,9 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler {
 
     fn on_pointer_down(
         &self,
-        sender: HitTestTreeRef,
+        _sender: HitTestTreeRef,
         context: &mut Self::Context,
-        ht: &mut HitTestTreeManager<Self::Context>,
+        _ht: &mut HitTestTreeManager<Self::Context>,
         args: hittest::PointerActionArgs,
     ) -> EventContinueControl {
         self.editing_atlas_dragging.set(true);
@@ -1788,20 +1736,19 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler {
 
     fn on_pointer_move(
         &self,
-        sender: HitTestTreeRef,
+        _sender: HitTestTreeRef,
         context: &mut Self::Context,
-        ht: &mut HitTestTreeManager<Self::Context>,
+        _ht: &mut HitTestTreeManager<Self::Context>,
         args: hittest::PointerActionArgs,
     ) -> EventContinueControl {
         if self.editing_atlas_dragging.get() {
             let dx = args.client_x - self.editing_atlas_drag_start_x.get();
             let dy = args.client_y - self.editing_atlas_drag_start_y.get();
 
-            // 逆向きに動く
             // TODO: あとでui_scale_factorをみれるようにする
             context.editing_atlas_renderer.set_offset(
-                self.editing_atlas_drag_start_offset_x.get() - dx * 2.0,
-                self.editing_atlas_drag_start_offset_y.get() - dy * 2.0,
+                self.editing_atlas_drag_start_offset_x.get() + dx * 2.0,
+                self.editing_atlas_drag_start_offset_y.get() + dy * 2.0,
             );
         }
 
@@ -1810,20 +1757,19 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler {
 
     fn on_pointer_up(
         &self,
-        sender: HitTestTreeRef,
+        _sender: HitTestTreeRef,
         context: &mut Self::Context,
-        ht: &mut HitTestTreeManager<Self::Context>,
+        _ht: &mut HitTestTreeManager<Self::Context>,
         args: hittest::PointerActionArgs,
     ) -> EventContinueControl {
         if self.editing_atlas_dragging.replace(false) {
             let dx = args.client_x - self.editing_atlas_drag_start_x.get();
             let dy = args.client_y - self.editing_atlas_drag_start_y.get();
 
-            // 逆向きに動く
             // TODO: あとでui_scale_factorをみれるようにする
             context.editing_atlas_renderer.set_offset(
-                self.editing_atlas_drag_start_offset_x.get() - dx * 2.0,
-                self.editing_atlas_drag_start_offset_y.get() - dy * 2.0,
+                self.editing_atlas_drag_start_offset_x.get() + dx * 2.0,
+                self.editing_atlas_drag_start_offset_y.get() + dy * 2.0,
             );
         }
 
@@ -2275,7 +2221,7 @@ fn main() {
     });
 
     let subsystem = Subsystem::init();
-
+    let mut staging_scratch_buffer = StagingScratchBufferManager::new(&subsystem);
     let mut composition_alphamask_surface_atlas = CompositionSurfaceAtlas::new(
         &subsystem,
         subsystem.adapter_properties.limits.maxImageDimension2D,
@@ -2608,11 +2554,11 @@ fn main() {
         )
         .unwrap();
 
-    let mut editing_atlas_renderer =
-        EditingAtlasRenderer::new(&subsystem, main_rp.subpass(0), sc_size);
+    let editing_atlas_renderer = EditingAtlasRenderer::new(&subsystem, main_rp.subpass(0), sc_size);
 
     let mut init_context = ViewInitContext {
         subsystem: &subsystem,
+        staging_scratch_buffer: &mut staging_scratch_buffer,
         atlas: &mut composition_alphamask_surface_atlas,
         ui_scale_factor: app_shell.ui_scale_factor(),
         fonts: &mut font_set,
@@ -2632,6 +2578,10 @@ fn main() {
         ht_root,
     );
 
+    println!(
+        "Reserved Staging Buffers during UI initialization: {}",
+        staging_scratch_buffer.total_reserved_amount()
+    );
     ht_manager.dump(ht_root);
 
     let n = composite_instance_buffer.memory_stg().native_ptr();

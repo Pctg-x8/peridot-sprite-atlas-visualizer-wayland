@@ -1,4 +1,6 @@
+mod app_state;
 mod composite;
+mod coordinate;
 mod feature;
 mod fontconfig;
 mod freetype;
@@ -6,12 +8,19 @@ mod harfbuzz;
 mod hittest;
 mod input;
 mod linux_input_event_codes;
+mod peridot;
 mod subsystem;
 mod text;
 mod wl;
 
-use std::{cell::Cell, collections::VecDeque, rc::Rc, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    collections::VecDeque,
+    rc::Rc,
+    time::Duration,
+};
 
+use app_state::AppState;
 use bedrock::{
     self as br, CommandBufferMut, CommandPoolMut, DescriptorPoolMut, Device, DeviceMemoryMut,
     Fence, FenceMut, Image, ImageChild, InstanceChild, MemoryBound, PhysicalDevice, RenderPass,
@@ -22,6 +31,7 @@ use composite::{
     CompositeMode, CompositeRect, CompositeStreamingData, CompositeTree, CompositeTreeRef,
     CompositionSurfaceAtlas,
 };
+use coordinate::SizePixels;
 use feature::editing_atlas_renderer::EditingAtlasRenderer;
 use freetype::FreeType;
 use hittest::{
@@ -70,8 +80,22 @@ const RASTER_STATE_DEFAULT_FILL_NOCULL: &'static br::PipelineRasterizationStateC
     );
 const IA_STATE_TRILIST: &'static br::PipelineInputAssemblyStateCreateInfo =
     &br::PipelineInputAssemblyStateCreateInfo::new(br::PrimitiveTopology::TriangleList);
+const IA_STATE_TRISTRIP: &'static br::PipelineInputAssemblyStateCreateInfo =
+    &br::PipelineInputAssemblyStateCreateInfo::new(br::PrimitiveTopology::TriangleStrip);
 const VI_STATE_EMPTY: &'static br::PipelineVertexInputStateCreateInfo<'static> =
     &br::PipelineVertexInputStateCreateInfo::new(&[], &[]);
+const VI_STATE_POSITION4_ONLY: &'static br::PipelineVertexInputStateCreateInfo<'static> =
+    &br::PipelineVertexInputStateCreateInfo::new(
+        &[br::VertexInputBindingDescription::per_vertex_typed::<
+            [f32; 4],
+        >(0)],
+        &[br::VertexInputAttributeDescription {
+            location: 0,
+            binding: 0,
+            format: br::vk::VK_FORMAT_R32G32B32A32_SFLOAT,
+            offset: 0,
+        }],
+    );
 
 pub struct FontSet {
     pub ui_default: freetype::Owned<freetype::Face>,
@@ -1697,12 +1721,10 @@ impl SpriteListPanePresenter {
     }
 }
 
-pub struct AppState {}
-
 pub struct AppUpdateContext<'d> {
     composite_tree: CompositeTree,
-    state: AppState,
-    editing_atlas_renderer: EditingAtlasRenderer<'d>,
+    state: AppState<'d>,
+    editing_atlas_renderer: Rc<RefCell<EditingAtlasRenderer<'d>>>,
     current_sec: f32,
 }
 
@@ -1727,9 +1749,9 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler {
         self.editing_atlas_drag_start_x.set(args.client_x);
         self.editing_atlas_drag_start_y.set(args.client_y);
         self.editing_atlas_drag_start_offset_x
-            .set(context.editing_atlas_renderer.offset()[0]);
+            .set(context.editing_atlas_renderer.borrow().offset()[0]);
         self.editing_atlas_drag_start_offset_y
-            .set(context.editing_atlas_renderer.offset()[1]);
+            .set(context.editing_atlas_renderer.borrow().offset()[1]);
 
         EventContinueControl::CAPTURE_ELEMENT
     }
@@ -1746,7 +1768,7 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler {
             let dy = args.client_y - self.editing_atlas_drag_start_y.get();
 
             // TODO: あとでui_scale_factorをみれるようにする
-            context.editing_atlas_renderer.set_offset(
+            context.editing_atlas_renderer.borrow_mut().set_offset(
                 self.editing_atlas_drag_start_offset_x.get() + dx * 2.0,
                 self.editing_atlas_drag_start_offset_y.get() + dy * 2.0,
             );
@@ -1767,7 +1789,7 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler {
             let dy = args.client_y - self.editing_atlas_drag_start_y.get();
 
             // TODO: あとでui_scale_factorをみれるようにする
-            context.editing_atlas_renderer.set_offset(
+            context.editing_atlas_renderer.borrow_mut().set_offset(
                 self.editing_atlas_drag_start_offset_x.get() + dx * 2.0,
                 self.editing_atlas_drag_start_offset_y.get() + dy * 2.0,
             );
@@ -2197,8 +2219,16 @@ fn main() {
     let mut events = VecDeque::new();
     let mut app_shell = AppShell::new(&mut events);
 
+    let subsystem = Subsystem::init();
+    let mut staging_scratch_buffer = StagingScratchBufferManager::new(&subsystem);
+    let mut composition_alphamask_surface_atlas = CompositionSurfaceAtlas::new(
+        &subsystem,
+        subsystem.adapter_properties.limits.maxImageDimension2D,
+        br::vk::VK_FORMAT_R8_UNORM,
+    );
+
     let client_size = Cell::new((640.0f32, 480.0));
-    let mut app_state = AppState {};
+    let mut app_state = AppState::new();
     let mut pointer_input_manager = PointerInputManager::new();
     let mut ht_manager = HitTestTreeManager::new();
     let ht_root_fallback_action_handler = Rc::new(HitTestRootTreeActionHandler {
@@ -2219,14 +2249,6 @@ fn main() {
         height_adjustment_factor: 1.0,
         action_handler: Some(Rc::downgrade(&ht_root_fallback_action_handler) as _),
     });
-
-    let subsystem = Subsystem::init();
-    let mut staging_scratch_buffer = StagingScratchBufferManager::new(&subsystem);
-    let mut composition_alphamask_surface_atlas = CompositionSurfaceAtlas::new(
-        &subsystem,
-        subsystem.adapter_properties.limits.maxImageDimension2D,
-        br::vk::VK_FORMAT_R8_UNORM,
-    );
 
     struct SubsystemBoundSurface<'s> {
         handle: br::vk::VkSurfaceKHR,
@@ -2554,7 +2576,27 @@ fn main() {
         )
         .unwrap();
 
-    let editing_atlas_renderer = EditingAtlasRenderer::new(&subsystem, main_rp.subpass(0), sc_size);
+    let editing_atlas_renderer = Rc::new(RefCell::new(EditingAtlasRenderer::new(
+        &subsystem,
+        main_rp.subpass(0),
+        sc_size,
+        SizePixels {
+            width: 32,
+            height: 32,
+        },
+    )));
+    app_state.register_atlas_size_view_feedback({
+        let editing_atlas_renderer = Rc::downgrade(&editing_atlas_renderer);
+
+        move |size| {
+            let Some(editing_atlas_renderer) = editing_atlas_renderer.upgrade() else {
+                // app teardown-ed
+                return;
+            };
+
+            editing_atlas_renderer.borrow_mut().set_atlas_size(*size);
+        }
+    });
 
     let mut init_context = ViewInitContext {
         subsystem: &subsystem,
@@ -2644,22 +2686,35 @@ fn main() {
         )
         .bind_pipeline(
             br::PipelineBindPoint::Graphics,
-            &editing_atlas_renderer.render_pipeline,
+            &editing_atlas_renderer.borrow().render_pipeline,
         )
         .push_constant(
-            &editing_atlas_renderer.render_pipeline_layout,
-            br::vk::VK_SHADER_STAGE_FRAGMENT_BIT,
+            &editing_atlas_renderer.borrow().render_pipeline_layout,
+            br::vk::VK_SHADER_STAGE_FRAGMENT_BIT | br::vk::VK_SHADER_STAGE_VERTEX_BIT,
             0,
             &[sc_size.width as f32, sc_size.height as f32],
         )
         .bind_descriptor_sets(
             br::PipelineBindPoint::Graphics,
-            &editing_atlas_renderer.render_pipeline_layout,
+            &editing_atlas_renderer.borrow().render_pipeline_layout,
             0,
-            &[editing_atlas_renderer.ds_param],
+            &[editing_atlas_renderer.borrow().ds_param],
             &[],
         )
         .draw(3, 1, 0, 0)
+        .bind_pipeline(
+            br::PipelineBindPoint::Graphics,
+            &editing_atlas_renderer.borrow().bg_render_pipeline,
+        )
+        .bind_vertex_buffer_array(
+            0,
+            &[editing_atlas_renderer
+                .borrow()
+                .bg_vertex_buffer
+                .as_transparent_ref()],
+            &[0],
+        )
+        .draw(4, 1, 0, 0)
         .bind_pipeline(br::PipelineBindPoint::Graphics, &composite_pipeline)
         .push_constant(
             &composite_pipeline_layout,
@@ -2839,7 +2894,10 @@ fn main() {
                     let composite_instance_buffer_dirty =
                         core::mem::replace(&mut composite_instance_buffer_dirty, false);
                     let needs_update = composite_instance_buffer_dirty
-                        || app_update_context.editing_atlas_renderer.is_dirty();
+                        || app_update_context
+                            .editing_atlas_renderer
+                            .borrow()
+                            .is_dirty();
 
                     if needs_update {
                         if last_updating {
@@ -2877,6 +2935,7 @@ fn main() {
                         .inject(|r| {
                             app_update_context
                                 .editing_atlas_renderer
+                                .borrow_mut()
                                 .process_dirty_data(r)
                         })
                         .end()
@@ -3052,11 +3111,10 @@ fn main() {
                                 .unwrap();
                             composite_pipeline = composite_pipeline1;
 
-                            app_update_context.editing_atlas_renderer.recreate(
-                                &subsystem,
-                                main_rp.subpass(0),
-                                sc_size,
-                            );
+                            app_update_context
+                                .editing_atlas_renderer
+                                .borrow_mut()
+                                .recreate(&subsystem, main_rp.subpass(0), sc_size);
 
                             for (cb, fb) in main_cbs.iter_mut().zip(main_fbs.iter()) {
                                 unsafe {
@@ -3074,13 +3132,18 @@ fn main() {
                                 )
                                 .bind_pipeline(
                                     br::PipelineBindPoint::Graphics,
-                                    &app_update_context.editing_atlas_renderer.render_pipeline,
+                                    &app_update_context
+                                        .editing_atlas_renderer
+                                        .borrow()
+                                        .render_pipeline,
                                 )
                                 .push_constant(
                                     &app_update_context
                                         .editing_atlas_renderer
+                                        .borrow()
                                         .render_pipeline_layout,
-                                    br::vk::VK_SHADER_STAGE_FRAGMENT_BIT,
+                                    br::vk::VK_SHADER_STAGE_FRAGMENT_BIT
+                                        | br::vk::VK_SHADER_STAGE_VERTEX_BIT,
                                     0,
                                     &[sc_size.width as f32, sc_size.height as f32],
                                 )
@@ -3088,12 +3151,30 @@ fn main() {
                                     br::PipelineBindPoint::Graphics,
                                     &app_update_context
                                         .editing_atlas_renderer
+                                        .borrow()
                                         .render_pipeline_layout,
                                     0,
-                                    &[app_update_context.editing_atlas_renderer.ds_param],
+                                    &[app_update_context.editing_atlas_renderer.borrow().ds_param],
                                     &[],
                                 )
                                 .draw(3, 1, 0, 0)
+                                .bind_pipeline(
+                                    br::PipelineBindPoint::Graphics,
+                                    &app_update_context
+                                        .editing_atlas_renderer
+                                        .borrow()
+                                        .bg_render_pipeline,
+                                )
+                                .bind_vertex_buffer_array(
+                                    0,
+                                    &[app_update_context
+                                        .editing_atlas_renderer
+                                        .borrow()
+                                        .bg_vertex_buffer
+                                        .as_transparent_ref()],
+                                    &[0],
+                                )
+                                .draw(4, 1, 0, 0)
                                 .bind_pipeline(br::PipelineBindPoint::Graphics, &composite_pipeline)
                                 .push_constant(
                                     &composite_pipeline_layout,

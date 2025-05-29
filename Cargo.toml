@@ -15,3 +15,5 @@ fontconfig = { git = "https://github.com/Pctg-x8/fc-rs", features = [
     "with-freetype",
 ] }
 bitflags = "2.9.0"
+uuid = { version = "1.17.0", features = ["v4"] }
+thiserror = "2.0.12"

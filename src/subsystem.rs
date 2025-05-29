@@ -563,26 +563,42 @@ impl<'g> StagingScratchBufferManager<'g> {
         }
     }
 
+    const fn least_second_level_resident_index(&self, fli: u8, lowest_sli: u8) -> Option<u8> {
+        let p = (self.second_level_free_residency_bit[fli as usize] & (u16::MAX << lowest_sli))
+            .trailing_zeros() as usize;
+
+        if p < Self::SECOND_LEVEL_ENTRY_COUNT {
+            Some(p as _)
+        } else {
+            None
+        }
+    }
+
+    const fn least_first_level_resident_index(&self, lowest_fli: u8) -> Option<u8> {
+        let p = (self.first_level_free_residency_bit & (u64::MAX << lowest_fli)).trailing_zeros()
+            as usize;
+
+        if p < Self::FIRST_LEVEL_MAX_COUNT {
+            Some(p as _)
+        } else {
+            None
+        }
+    }
+
     fn find_fit_free_block_index(&self, fli: &mut u8, sli: &mut u8) -> Option<usize> {
-        let residency_bit_pos = (self.second_level_free_residency_bit[*fli as usize]
-            & (u16::MAX << *sli))
-            .trailing_zeros();
-        if residency_bit_pos < Self::SECOND_LEVEL_ENTRY_COUNT as u32 {
+        if let Some(resident_sli) = self.least_second_level_resident_index(*fli, *sli) {
             // found
-            *sli = residency_bit_pos as _;
+            *sli = resident_sli;
 
             return Some(self.suitable_block_head_index[Self::level_to_index(*fli, *sli)]);
         }
 
-        let residency_bit_pos =
-            (self.first_level_free_residency_bit & (u64::MAX << *fli)).trailing_zeros();
-        if residency_bit_pos < Self::FIRST_LEVEL_MAX_COUNT as u32 {
-            // found in first level
-            *fli = residency_bit_pos as _;
-            let second_level_least_residency =
-                self.second_level_free_residency_bit[*fli as usize].trailing_zeros();
-            assert!(second_level_least_residency < Self::SECOND_LEVEL_ENTRY_COUNT as u32);
-            *sli = second_level_least_residency as _;
+        if let Some(resident_fli) = self.least_first_level_resident_index(*fli) {
+            // found in larger first level
+            *fli = resident_fli;
+            *sli = self
+                .least_second_level_resident_index(*fli, 0)
+                .expect("resident fli found but no sli?");
 
             return Some(self.suitable_block_head_index[Self::level_to_index(*fli, *sli)]);
         }
@@ -652,39 +668,10 @@ impl<'g> StagingScratchBufferManager<'g> {
         reservation: &StagingScratchBufferReservation,
         mode: StagingScratchBufferMapMode,
     ) -> br::Result<MappedStagingScratchBuffer> {
-        let buf = &self.buffer_blocks[reservation.block_index];
-
-        let ptr = unsafe {
-            br::vkfn_wrapper::map_memory(
-                buf.gfx_device_ref.native_ptr(),
-                buf.memory,
-                reservation.offset,
-                reservation.size,
-                0,
-            )?
-        };
-        if buf.requires_explicit_flush && mode.is_read() {
-            let r = unsafe {
-                buf.gfx_device_ref
-                    .invalidate_memory_range(&[br::MappedMemoryRange::new_raw(
-                        buf.memory,
-                        reservation.offset,
-                        reservation.size,
-                    )])
-            };
-            if let Err(e) = r {
-                eprintln!("Failed to invalidate mapped memory: {e:?}");
-            }
-        }
-
-        Ok(MappedStagingScratchBuffer {
-            gfx_device_ref: buf.gfx_device_ref,
-            memory: buf.memory,
-            explicit_flush: buf.requires_explicit_flush && mode.is_write(),
-            ptr,
-            range: reservation.offset..(reservation.offset + reservation.size),
-            _marker: core::marker::PhantomData,
-        })
+        self.buffer_blocks[reservation.block_index].map(
+            mode,
+            reservation.offset..(reservation.offset + reservation.size),
+        )
     }
 }
 

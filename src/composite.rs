@@ -489,7 +489,7 @@ impl CompositeTree {
         }
     }
 
-    pub fn alloc(&mut self, data: CompositeRect) -> CompositeTreeRef {
+    pub fn register(&mut self, data: CompositeRect) -> CompositeTreeRef {
         if let Some(x) = self.unused.pop_first() {
             self.rects[x] = data;
             return CompositeTreeRef(x);
@@ -537,13 +537,15 @@ impl CompositeTree {
         }
     }
 
+    /// return: bitmap count
     pub unsafe fn sink_all(
         &mut self,
         size: br::Extent2D,
         current_sec: f32,
         tex_size: br::Extent2D,
         mapped_ptr: &br::MappedMemory<'_, impl br::DeviceMemoryMut + ?Sized>,
-    ) {
+    ) -> usize {
+        let mut instance_slot_index = 0;
         let mut targets = vec![(0, (0.0, 0.0, size.width as f32, size.height as f32))];
         while !targets.is_empty() {
             let current = core::mem::replace(&mut targets, Vec::new());
@@ -586,7 +588,7 @@ impl CompositeTree {
                 let w = effective_width * r.relative_size_adjustment[0] + local_width;
                 let h = effective_height * r.relative_size_adjustment[1] + local_height;
 
-                if let Some(instance_slot_index) = r.instance_slot_index {
+                if let Some(_) = r.instance_slot_index {
                     unsafe {
                         core::ptr::write(
                             mapped_ptr.get_mut(
@@ -624,11 +626,15 @@ impl CompositeTree {
                             },
                         );
                     }
+
+                    instance_slot_index += 1;
                 }
 
                 targets.extend(r.children.iter().map(|&x| (x, (left, top, w, h))));
             }
         }
+
+        instance_slot_index
     }
 }
 

@@ -232,7 +232,7 @@ impl AppHeaderBaseView {
             .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&cb)])
             .unwrap();
 
-        let ct_root = ctx.composite_tree.alloc(CompositeRect {
+        let ct_root = ctx.composite_tree.register(CompositeRect {
             relative_size_adjustment: [1.0, 0.0],
             size: [0.0, height * ctx.ui_scale_factor],
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.0, 0.0, 0.0, 0.25])),
@@ -240,7 +240,7 @@ impl AppHeaderBaseView {
             instance_slot_index: Some(ctx.composite_instance_manager.alloc()),
             ..Default::default()
         });
-        let ct_title = ctx.composite_tree.alloc(CompositeRect {
+        let ct_title = ctx.composite_tree.register(CompositeRect {
             size: [text_layout.width(), text_layout.height()],
             offset: [
                 Self::TITLE_LEFT_OFFSET * ctx.ui_scale_factor,
@@ -702,7 +702,7 @@ impl SpriteListToggleButtonView {
             .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&cb)])
             .unwrap();
 
-        let ct_root = init.composite_tree.alloc(CompositeRect {
+        let ct_root = init.composite_tree.register(CompositeRect {
             size: [
                 Self::SIZE * init.ui_scale_factor,
                 Self::SIZE * init.ui_scale_factor,
@@ -714,7 +714,7 @@ impl SpriteListToggleButtonView {
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 0.0])),
             ..Default::default()
         });
-        let ct_icon = init.composite_tree.alloc(CompositeRect {
+        let ct_icon = init.composite_tree.register(CompositeRect {
             offset: [
                 -Self::ICON_SIZE * 0.5 * init.ui_scale_factor,
                 -Self::ICON_SIZE * 0.5 * init.ui_scale_factor,
@@ -861,6 +861,253 @@ impl SpriteListToggleButtonView {
     pub fn on_release(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
         self.pressing.set(false);
         self.update_button_bg_opacity(composite_tree, current_sec);
+    }
+}
+
+pub struct SpriteListCellView {
+    ct_root: CompositeTreeRef,
+    ct_bg: CompositeTreeRef,
+    ct_bg_selected: CompositeTreeRef,
+    ct_label: CompositeTreeRef,
+    top: Cell<f32>,
+    ui_scale: Cell<f32>,
+}
+impl SpriteListCellView {
+    const CORNER_RADIUS: f32 = 8.0;
+    const MARGIN_H: f32 = 16.0;
+    const HEIGHT: f32 = 24.0;
+    const LABEL_MARGIN_LEFT: f32 = 8.0;
+
+    pub fn new(init: &mut ViewInitContext, init_label: &str, init_top: f32) -> Self {
+        let label_layout = TextLayout::build_simple(init_label, &mut init.fonts.ui_default);
+        let label_atlas_rect = init
+            .atlas
+            .alloc(label_layout.width_px(), label_layout.height_px());
+        let label_stg_image_pixels =
+            label_layout.build_stg_image_pixel_buffer(init.staging_scratch_buffer);
+        let bg_atlas_rect = init.atlas.alloc(
+            ((Self::CORNER_RADIUS * 2.0 + 1.0) * init.ui_scale_factor) as _,
+            ((Self::CORNER_RADIUS * 2.0 + 1.0) * init.ui_scale_factor) as _,
+        );
+
+        let render_pass = br::RenderPassObject::new(
+            &init.subsystem,
+            &br::RenderPassCreateInfo2::new(
+                &[br::AttachmentDescription2::new(br::vk::VK_FORMAT_R8_UNORM)
+                    .layout_transition(
+                        br::ImageLayout::Undefined,
+                        br::ImageLayout::ShaderReadOnlyOpt,
+                    )
+                    .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store)],
+                &[
+                    br::SubpassDescription2::new().colors(&[br::AttachmentReference2::color(
+                        0,
+                        br::ImageLayout::ColorAttachmentOpt,
+                    )]),
+                ],
+                &[br::SubpassDependency2::new(
+                    br::SubpassIndex::Internal(0),
+                    br::SubpassIndex::External,
+                )
+                .of_memory(
+                    br::AccessFlags::COLOR_ATTACHMENT.write,
+                    br::AccessFlags::SHADER.read,
+                )
+                .of_execution(
+                    br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    br::PipelineStageFlags::FRAGMENT_SHADER,
+                )],
+            ),
+        )
+        .unwrap();
+        let framebuffer = br::FramebufferObject::new(
+            &init.subsystem,
+            &br::FramebufferCreateInfo::new(
+                &render_pass,
+                &[init.atlas.resource().as_transparent_ref()],
+                init.atlas.size(),
+                init.atlas.size(),
+            ),
+        )
+        .unwrap();
+
+        let vsh = init
+            .subsystem
+            .load_shader("resources/filltri.vert")
+            .unwrap();
+        let fsh = init
+            .subsystem
+            .load_shader("resources/rounded_rect.frag")
+            .unwrap();
+
+        let pipeline_layout = br::PipelineLayoutObject::new(
+            &init.subsystem,
+            &br::PipelineLayoutCreateInfo::new(&[], &[]),
+        )
+        .unwrap();
+        let [pipeline] = init
+            .subsystem
+            .new_graphics_pipeline_array(
+                &[br::GraphicsPipelineCreateInfo::new(
+                    &pipeline_layout,
+                    render_pass.subpass(0),
+                    &[
+                        br::PipelineShaderStage::new(br::ShaderStage::Vertex, &vsh, c"main"),
+                        br::PipelineShaderStage::new(br::ShaderStage::Fragment, &fsh, c"main"),
+                    ],
+                    VI_STATE_EMPTY,
+                    IA_STATE_TRILIST,
+                    &br::PipelineViewportStateCreateInfo::new(
+                        &[bg_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
+                        &[bg_atlas_rect.vk_rect()],
+                    ),
+                    RASTER_STATE_DEFAULT_FILL_NOCULL,
+                    BLEND_STATE_SINGLE_NONE,
+                )
+                .multisample_state(MS_STATE_EMPTY)],
+                None::<&br::PipelineCacheObject<&br::DeviceObject<&br::InstanceObject>>>,
+            )
+            .unwrap();
+
+        let mut cp = br::CommandPoolObject::new(
+            &init.subsystem,
+            &br::CommandPoolCreateInfo::new(init.subsystem.graphics_queue_family_index).transient(),
+        )
+        .unwrap();
+        let [mut cb] = br::CommandBufferObject::alloc_array(
+            &init.subsystem,
+            &br::CommandBufferFixedCountAllocateInfo::new(&mut cp, br::CommandBufferLevel::Primary),
+        )
+        .unwrap();
+        unsafe {
+            cb.begin(&br::CommandBufferBeginInfo::new(), &init.subsystem)
+                .unwrap()
+        }
+        .inject(|r| {
+            let (b, o) = init.staging_scratch_buffer.of(&label_stg_image_pixels);
+
+            r.copy_buffer_to_image(
+                b,
+                init.atlas.resource().image(),
+                br::ImageLayout::TransferDestOpt,
+                &[br::vk::VkBufferImageCopy {
+                    bufferOffset: o,
+                    bufferRowLength: label_layout.width_px(),
+                    bufferImageHeight: label_layout.height_px(),
+                    imageSubresource: br::ImageSubresourceLayers::new(
+                        br::AspectMask::COLOR,
+                        0,
+                        0..1,
+                    ),
+                    imageOffset: label_atlas_rect.lt_offset().with_z(0),
+                    imageExtent: label_atlas_rect.extent().with_depth(1),
+                }],
+            )
+        })
+        .pipeline_barrier_2(&br::DependencyInfo::new(
+            &[],
+            &[],
+            &[init
+                .atlas
+                .resource()
+                .image()
+                .memory_barrier2(br::ImageSubresourceRange::new(
+                    br::AspectMask::COLOR,
+                    0..1,
+                    0..1,
+                ))
+                .from(
+                    br::PipelineStageFlags2::COPY,
+                    br::AccessFlags2::TRANSFER.write,
+                )
+                .to(
+                    br::PipelineStageFlags2::FRAGMENT_SHADER,
+                    br::AccessFlags2::SHADER_SAMPLED_READ,
+                )
+                .transit_from(
+                    br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt),
+                )],
+        ))
+        .begin_render_pass2(
+            &br::RenderPassBeginInfo::new(
+                &render_pass,
+                &framebuffer,
+                bg_atlas_rect.vk_rect(),
+                &[br::ClearValue::color_f32([0.0; 4])],
+            ),
+            &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+        )
+        .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline)
+        .draw(3, 1, 0, 0)
+        .end_render_pass2(&br::SubpassEndInfo::new())
+        .end()
+        .unwrap();
+
+        init.subsystem
+            .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&cb)])
+            .unwrap();
+
+        let ct_root = init.composite_tree.register(CompositeRect {
+            offset: [
+                Self::MARGIN_H * init.ui_scale_factor,
+                init_top * init.ui_scale_factor,
+            ],
+            relative_size_adjustment: [1.0, 0.0],
+            size: [
+                -Self::MARGIN_H * 2.0 * init.ui_scale_factor,
+                Self::HEIGHT * init.ui_scale_factor,
+            ],
+            ..Default::default()
+        });
+        let ct_label = init.composite_tree.register(CompositeRect {
+            offset: [
+                Self::LABEL_MARGIN_LEFT * init.ui_scale_factor,
+                -label_layout.height() * 0.5,
+            ],
+            relative_offset_adjustment: [0.0, 0.5],
+            size: [label_layout.width(), label_layout.height()],
+            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.1, 0.1, 0.1, 1.0])),
+            texatlas_rect: label_atlas_rect,
+            ..Default::default()
+        });
+        let ct_bg = init.composite_tree.register(CompositeRect {
+            relative_size_adjustment: [1.0, 1.0],
+            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 0.25])),
+            texatlas_rect: bg_atlas_rect.clone(),
+            slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
+            ..Default::default()
+        });
+        let ct_bg_selected = init.composite_tree.register(CompositeRect {
+            relative_size_adjustment: [1.0, 1.0],
+            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.6, 0.8, 1.0, 0.0])),
+            texatlas_rect: bg_atlas_rect,
+            slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
+            ..Default::default()
+        });
+
+        init.composite_tree.add_child(ct_root, ct_bg_selected);
+        init.composite_tree.add_child(ct_root, ct_bg);
+        init.composite_tree.add_child(ct_root, ct_label);
+
+        Self {
+            ct_root,
+            ct_label,
+            ct_bg,
+            ct_bg_selected,
+            top: Cell::new(init_top),
+            ui_scale: Cell::new(init.ui_scale_factor),
+        }
+    }
+
+    pub fn mount(&self, ct_parent: CompositeTreeRef, ct: &mut CompositeTree) {
+        ct.add_child(ct_parent, self.ct_root);
+    }
+
+    pub fn unmount(&self, ct: &mut CompositeTree) {
+        ct.remove_child(self.ct_root);
     }
 }
 
@@ -1344,7 +1591,7 @@ impl SpriteListPaneView {
             .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&cb)])
             .unwrap();
 
-        let ct_root = init.composite_tree.alloc(CompositeRect {
+        let ct_root = init.composite_tree.register(CompositeRect {
             offset: [
                 Self::FLOATING_MARGIN * init.ui_scale_factor,
                 header_height * init.ui_scale_factor,
@@ -1365,11 +1612,11 @@ impl SpriteListPaneView {
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 0.5])),
             ..Default::default()
         });
-        let ct_title_blurred = init.composite_tree.alloc(CompositeRect {
+        let ct_title_blurred = init.composite_tree.register(CompositeRect {
             instance_slot_index: Some(init.composite_instance_manager.alloc()),
             offset: [
                 -(title_blurred_atlas_rect.width() as f32 * 0.5),
-                (8.0 - Self::BLUR_AMOUNT_ONEDIR as f32) * init.ui_scale_factor,
+                (12.0 - Self::BLUR_AMOUNT_ONEDIR as f32) * init.ui_scale_factor,
             ],
             relative_offset_adjustment: [0.5, 0.0],
             size: [
@@ -1380,11 +1627,11 @@ impl SpriteListPaneView {
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
             ..Default::default()
         });
-        let ct_title = init.composite_tree.alloc(CompositeRect {
+        let ct_title = init.composite_tree.register(CompositeRect {
             instance_slot_index: Some(init.composite_instance_manager.alloc()),
             offset: [
                 -(title_atlas_rect.width() as f32 * 0.5),
-                8.0 * init.ui_scale_factor,
+                12.0 * init.ui_scale_factor,
             ],
             relative_offset_adjustment: [0.5, 0.0],
             size: [
@@ -1679,6 +1926,7 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
 
 pub struct SpriteListPanePresenter {
     view: Rc<SpriteListPaneView>,
+    cell_view: SpriteListCellView,
     _ht_action_handler: Rc<SpriteListPaneActionHandler>,
 }
 impl SpriteListPanePresenter {
@@ -1686,8 +1934,12 @@ impl SpriteListPanePresenter {
         let view = Rc::new(SpriteListPaneView::new(init, header_height));
         let toggle_button_view = Rc::new(SpriteListToggleButtonView::new(init));
 
+        let cell_view = SpriteListCellView::new(init, "sprite cell", 32.0);
+
         toggle_button_view.mount(init.composite_tree, view.ct_root, init.ht, view.ht_frame);
         toggle_button_view.place_inner(init.composite_tree, init.ht, -0.25);
+
+        cell_view.mount(view.ct_root, init.composite_tree);
 
         let ht_action_handler = Rc::new(SpriteListPaneActionHandler {
             view: view.clone(),
@@ -1706,6 +1958,7 @@ impl SpriteListPanePresenter {
 
         Self {
             view,
+            cell_view,
             _ht_action_handler: ht_action_handler,
         }
     }
@@ -2219,6 +2472,21 @@ fn main() {
     let mut events = VecDeque::new();
     let mut app_shell = AppShell::new(&mut events);
 
+    // initialize font systems
+    crate::fontconfig::init();
+    let mut ft = FreeType::new().expect("Failed to initialize FreeType");
+    let hinting = unsafe { ft.get_property::<u32>(c"cff", c"hinting-engine").unwrap() };
+    println!("hinting engine: {hinting}");
+    let no_stem_darkening = unsafe {
+        ft.get_property::<freetype2::FT_Bool>(c"cff", c"no-stem-darkening")
+            .unwrap()
+    };
+    println!("no stem darkening: {no_stem_darkening}");
+    unsafe {
+        ft.set_property(c"cff", c"no-stem-darkening", &(true as freetype2::FT_Bool))
+            .unwrap();
+    }
+
     let subsystem = Subsystem::init();
     let mut staging_scratch_buffer = StagingScratchBufferManager::new(&subsystem);
     let mut composition_alphamask_surface_atlas = CompositionSurfaceAtlas::new(
@@ -2343,7 +2611,6 @@ fn main() {
         .unwrap(),
     );
 
-    crate::fontconfig::init();
     let mut fc_pat = crate::fontconfig::Pattern::new();
     fc_pat.add_family_name(c"system-ui");
     fc_pat.add_weight(80);
@@ -2369,18 +2636,6 @@ fn main() {
 
     let (primary_face_path, primary_face_index) = primary_face_info.unwrap();
 
-    let mut ft = FreeType::new().expect("Failed to initialize FreeType");
-    let hinting = unsafe { ft.get_property::<u32>(c"cff", c"hinting-engine").unwrap() };
-    println!("hinting engine: {hinting}");
-    let no_stem_darkening = unsafe {
-        ft.get_property::<freetype2::FT_Bool>(c"cff", c"no-stem-darkening")
-            .unwrap()
-    };
-    println!("no stem darkening: {no_stem_darkening}");
-    unsafe {
-        ft.set_property(c"cff", c"no-stem-darkening", &(true as freetype2::FT_Bool))
-            .unwrap();
-    }
     let mut ft_face = ft
         .new_face(&primary_face_path, primary_face_index as _)
         .expect("Failed to create ft face");
@@ -2633,7 +2888,7 @@ fn main() {
         .memory_stg_exc()
         .map(r.clone())
         .unwrap();
-    unsafe {
+    let mut composite_instance_count = unsafe {
         composite_tree.sink_all(
             sc_size,
             0.0,
@@ -2642,8 +2897,8 @@ fn main() {
                 height: composition_alphamask_surface_atlas.size(),
             },
             &ptr,
-        );
-    }
+        )
+    };
     if flush_required {
         unsafe {
             subsystem
@@ -2729,7 +2984,7 @@ fn main() {
             &[composite_alphamask_group_descriptor],
             &[],
         )
-        .draw(4, composite_instance_buffer.count() as _, 0, 0)
+        .draw(4, composite_instance_count as _, 0, 0)
         .end_render_pass2(&br::SubpassEndInfo::new())
         .end()
         .unwrap();
@@ -2836,6 +3091,7 @@ fn main() {
     let mut last_render_scale = app_shell.ui_scale_factor();
     let mut last_render_size = sc_size;
     let mut last_pointer_pos = (0.0f32, 0.0f32);
+    let mut last_composite_instance_count = composite_instance_count;
     'app: loop {
         app_shell.process_pending_events();
         for e in events.drain(..) {
@@ -2849,6 +3105,7 @@ fn main() {
 
                     if last_rendering {
                         last_render_command_fence.wait().unwrap();
+                        last_render_command_fence.reset().unwrap();
                         last_rendering = false;
                     }
 
@@ -2865,7 +3122,7 @@ fn main() {
                             .memory_stg_exc()
                             .map(r.clone())
                             .unwrap();
-                        unsafe {
+                        composite_instance_count = unsafe {
                             app_update_context.composite_tree.sink_all(
                                 sc_size,
                                 current_t.as_secs_f32(),
@@ -2873,8 +3130,8 @@ fn main() {
                                     composition_alphamask_surface_atlas.size() as _
                                 ),
                                 &ptr,
-                            );
-                        }
+                            )
+                        };
                         if flush_required {
                             unsafe {
                                 subsystem
@@ -2984,7 +3241,94 @@ fn main() {
                         last_updating = true;
                     }
 
-                    last_render_command_fence.reset().unwrap();
+                    if last_composite_instance_count != composite_instance_count {
+                        // needs update render commands
+                        unsafe {
+                            main_cp.reset(br::CommandPoolResetFlags::EMPTY).unwrap();
+                        }
+
+                        for (cb, fb) in main_cbs.iter_mut().zip(main_fbs.iter()) {
+                            unsafe {
+                                cb.begin(&br::CommandBufferBeginInfo::new(), &subsystem)
+                                    .unwrap()
+                            }
+                            .begin_render_pass2(
+                                &br::RenderPassBeginInfo::new(
+                                    &main_rp,
+                                    fb,
+                                    sc_size.into_rect(br::Offset2D::ZERO),
+                                    &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 1.0])],
+                                ),
+                                &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                            )
+                            .bind_pipeline(
+                                br::PipelineBindPoint::Graphics,
+                                &app_update_context
+                                    .editing_atlas_renderer
+                                    .borrow()
+                                    .render_pipeline,
+                            )
+                            .push_constant(
+                                &app_update_context
+                                    .editing_atlas_renderer
+                                    .borrow()
+                                    .render_pipeline_layout,
+                                br::vk::VK_SHADER_STAGE_FRAGMENT_BIT
+                                    | br::vk::VK_SHADER_STAGE_VERTEX_BIT,
+                                0,
+                                &[sc_size.width as f32, sc_size.height as f32],
+                            )
+                            .bind_descriptor_sets(
+                                br::PipelineBindPoint::Graphics,
+                                &app_update_context
+                                    .editing_atlas_renderer
+                                    .borrow()
+                                    .render_pipeline_layout,
+                                0,
+                                &[app_update_context.editing_atlas_renderer.borrow().ds_param],
+                                &[],
+                            )
+                            .draw(3, 1, 0, 0)
+                            .bind_pipeline(
+                                br::PipelineBindPoint::Graphics,
+                                &app_update_context
+                                    .editing_atlas_renderer
+                                    .borrow()
+                                    .bg_render_pipeline,
+                            )
+                            .bind_vertex_buffer_array(
+                                0,
+                                &[app_update_context
+                                    .editing_atlas_renderer
+                                    .borrow()
+                                    .bg_vertex_buffer
+                                    .as_transparent_ref()],
+                                &[0],
+                            )
+                            .draw(4, 1, 0, 0)
+                            .bind_pipeline(br::PipelineBindPoint::Graphics, &composite_pipeline)
+                            .push_constant(
+                                &composite_pipeline_layout,
+                                br::vk::VK_SHADER_STAGE_VERTEX_BIT,
+                                0,
+                                &[sc_size.width as f32, sc_size.height as f32],
+                            )
+                            .bind_descriptor_sets(
+                                br::PipelineBindPoint::Graphics,
+                                &composite_pipeline_layout,
+                                0,
+                                &[composite_alphamask_group_descriptor],
+                                &[],
+                            )
+                            .draw(4, composite_instance_count as _, 0, 0)
+                            .end_render_pass2(&br::SubpassEndInfo::new())
+                            .end()
+                            .unwrap();
+                        }
+
+                        last_composite_instance_count = composite_instance_count;
+                    }
+
                     let next = sc
                         .acquire_next(
                             None,
@@ -3032,6 +3376,7 @@ fn main() {
 
                             if last_rendering {
                                 last_render_command_fence.wait().unwrap();
+                                last_render_command_fence.reset().unwrap();
                                 last_rendering = false;
                             }
 
@@ -3189,7 +3534,7 @@ fn main() {
                                     &[composite_alphamask_group_descriptor],
                                     &[],
                                 )
-                                .draw(4, composite_instance_buffer.count() as _, 0, 0)
+                                .draw(4, composite_instance_count as _, 0, 0)
                                 .end_render_pass2(&br::SubpassEndInfo::new())
                                 .end()
                                 .unwrap();

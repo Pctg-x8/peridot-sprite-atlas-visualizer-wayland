@@ -42,12 +42,14 @@ pub struct CompositeStreamingData {
 pub enum CompositeMode {
     DirectSourceOver,
     ColorTint(AnimatableColor),
+    FillColor(AnimatableColor),
 }
 impl CompositeMode {
     const fn shader_mode_value(&self) -> f32 {
         match self {
             Self::DirectSourceOver => 0.0,
             Self::ColorTint(_) => 1.0,
+            Self::FillColor(_) => 2.0,
         }
     }
 }
@@ -546,92 +548,90 @@ impl CompositeTree {
         mapped_ptr: &br::MappedMemory<'_, impl br::DeviceMemoryMut + ?Sized>,
     ) -> usize {
         let mut instance_slot_index = 0;
-        let mut targets = vec![(0, (0.0, 0.0, size.width as f32, size.height as f32))];
-        while !targets.is_empty() {
-            let current = core::mem::replace(&mut targets, Vec::new());
-            for (r, (effective_base_left, effective_base_top, effective_width, effective_height)) in
-                current
-            {
-                let r = &mut self.rects[r];
-                r.dirty = false;
-                let local_left = match r.animation_data_left {
-                    None => r.offset[0],
-                    Some(ref x) => {
-                        r.offset[0] + (x.to_value - r.offset[0]) * x.interpolate(current_sec)
-                    }
-                };
-                let local_top = match r.animation_data_top {
-                    None => r.offset[1],
-                    Some(ref x) => {
-                        r.offset[1] + (x.to_value - r.offset[1]) * x.interpolate(current_sec)
-                    }
-                };
-                let local_width = match r.animation_data_width {
-                    None => r.size[0],
-                    Some(ref x) => {
-                        r.size[0] + (x.to_value - r.size[0]) * x.interpolate(current_sec)
-                    }
-                };
-                let local_height = match r.animation_data_height {
-                    None => r.size[1],
-                    Some(ref x) => {
-                        r.size[1] + (x.to_value - r.size[1]) * x.interpolate(current_sec)
-                    }
-                };
+        let mut processes = vec![(0, (0.0, 0.0, size.width as f32, size.height as f32))];
+        while let Some((
+            r,
+            (effective_base_left, effective_base_top, effective_width, effective_height),
+        )) = processes.pop()
+        {
+            let r = &mut self.rects[r];
+            r.dirty = false;
+            let local_left = match r.animation_data_left {
+                None => r.offset[0],
+                Some(ref x) => {
+                    r.offset[0] + (x.to_value - r.offset[0]) * x.interpolate(current_sec)
+                }
+            };
+            let local_top = match r.animation_data_top {
+                None => r.offset[1],
+                Some(ref x) => {
+                    r.offset[1] + (x.to_value - r.offset[1]) * x.interpolate(current_sec)
+                }
+            };
+            let local_width = match r.animation_data_width {
+                None => r.size[0],
+                Some(ref x) => r.size[0] + (x.to_value - r.size[0]) * x.interpolate(current_sec),
+            };
+            let local_height = match r.animation_data_height {
+                None => r.size[1],
+                Some(ref x) => r.size[1] + (x.to_value - r.size[1]) * x.interpolate(current_sec),
+            };
 
-                let left = effective_base_left
-                    + (effective_width * r.relative_offset_adjustment[0])
-                    + local_left;
-                let top = effective_base_top
-                    + (effective_height * r.relative_offset_adjustment[1])
-                    + local_top;
-                let w = effective_width * r.relative_size_adjustment[0] + local_width;
-                let h = effective_height * r.relative_size_adjustment[1] + local_height;
+            let left = effective_base_left
+                + (effective_width * r.relative_offset_adjustment[0])
+                + local_left;
+            let top = effective_base_top
+                + (effective_height * r.relative_offset_adjustment[1])
+                + local_top;
+            let w = effective_width * r.relative_size_adjustment[0] + local_width;
+            let h = effective_height * r.relative_size_adjustment[1] + local_height;
 
-                if let Some(_) = r.instance_slot_index {
-                    unsafe {
-                        core::ptr::write(
-                            mapped_ptr.get_mut(
-                                core::mem::size_of::<CompositeInstanceData>() * instance_slot_index,
-                            ),
-                            CompositeInstanceData {
-                                pos_st: [w, h, left, top],
-                                uv_st: [
-                                    (r.texatlas_rect.right as f32 - r.texatlas_rect.left as f32)
-                                        / tex_size.width as f32,
-                                    (r.texatlas_rect.bottom as f32 - r.texatlas_rect.top as f32)
-                                        / tex_size.height as f32,
-                                    r.texatlas_rect.left as f32 / tex_size.width as f32,
-                                    r.texatlas_rect.top as f32 / tex_size.height as f32,
-                                ],
-                                slice_borders: r.slice_borders,
-                                tex_size_pixels_composite_mode: [
-                                    tex_size.width as _,
-                                    tex_size.height as _,
-                                    r.composite_mode.shader_mode_value(),
-                                    0.0,
-                                ],
-                                color_tint: match r.composite_mode {
-                                    CompositeMode::DirectSourceOver => [0.0; 4],
-                                    CompositeMode::ColorTint(ref t) => t.compute(current_sec),
-                                },
-                                pos_x_animation_data: [0.0; 4],
-                                pos_x_curve_control_points: [0.0; 4],
-                                pos_y_animation_data: [0.0; 4],
-                                pos_y_curve_control_points: [0.0; 4],
-                                pos_width_animation_data: [0.0; 4],
-                                pos_width_curve_control_points: [0.0; 4],
-                                pos_height_animation_data: [0.0; 4],
-                                pos_height_curve_control_points: [0.0; 4],
+            if let Some(_) = r.instance_slot_index {
+                unsafe {
+                    core::ptr::write(
+                        mapped_ptr.get_mut(
+                            core::mem::size_of::<CompositeInstanceData>() * instance_slot_index,
+                        ),
+                        CompositeInstanceData {
+                            pos_st: [w, h, left, top],
+                            uv_st: [
+                                ((r.texatlas_rect.right as f32 - r.texatlas_rect.left as f32)
+                                    - 1.0)
+                                    / tex_size.width as f32,
+                                ((r.texatlas_rect.bottom as f32 - r.texatlas_rect.top as f32)
+                                    - 1.0)
+                                    / tex_size.height as f32,
+                                (r.texatlas_rect.left as f32 + 0.5) / tex_size.width as f32,
+                                (r.texatlas_rect.top as f32 + 0.5) / tex_size.height as f32,
+                            ],
+                            slice_borders: r.slice_borders,
+                            tex_size_pixels_composite_mode: [
+                                tex_size.width as _,
+                                tex_size.height as _,
+                                r.composite_mode.shader_mode_value(),
+                                0.0,
+                            ],
+                            color_tint: match r.composite_mode {
+                                CompositeMode::DirectSourceOver => [0.0; 4],
+                                CompositeMode::ColorTint(ref t) => t.compute(current_sec),
+                                CompositeMode::FillColor(ref t) => t.compute(current_sec),
                             },
-                        );
-                    }
-
-                    instance_slot_index += 1;
+                            pos_x_animation_data: [0.0; 4],
+                            pos_x_curve_control_points: [0.0; 4],
+                            pos_y_animation_data: [0.0; 4],
+                            pos_y_curve_control_points: [0.0; 4],
+                            pos_width_animation_data: [0.0; 4],
+                            pos_width_curve_control_points: [0.0; 4],
+                            pos_height_animation_data: [0.0; 4],
+                            pos_height_curve_control_points: [0.0; 4],
+                        },
+                    );
                 }
 
-                targets.extend(r.children.iter().map(|&x| (x, (left, top, w, h))));
+                instance_slot_index += 1;
             }
+
+            processes.extend(r.children.iter().rev().map(|&x| (x, (left, top, w, h))));
         }
 
         instance_slot_index

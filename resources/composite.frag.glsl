@@ -43,7 +43,10 @@ vec4 tex_9s(in vec2 relativePixelCoord, in vec2 renderSizePixels, in vec2 uvOffs
 }
 
 void main() {
-    if (sliceBordersLTRB == vec4(0.0f)) {
+    if (uv_compositeMode.z == 2.0) {
+        // no texture mapping
+        col_out = colorTint;
+    } else if (sliceBordersLTRB == vec4(0.0f)) {
         // no 9slices
         col_out = texture(tex, uv_compositeMode.xy);
     } else {

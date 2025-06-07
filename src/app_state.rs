@@ -2,7 +2,10 @@ use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
-use crate::{coordinate::SizePixels, peridot};
+use crate::{
+    AppUpdateContext, ViewFeedbackContext, coordinate::SizePixels, hittest::HitTestTreeManager,
+    peridot,
+};
 
 #[derive(Debug)]
 pub struct SpriteInfo {
@@ -57,7 +60,16 @@ pub struct AppState<'a> {
     sprites: Vec<SpriteInfo>,
     sprites_view_feedbacks: Vec<Box<dyn FnMut(&[SpriteInfo]) + 'a>>,
     visible_menu: bool,
-    visible_menu_view_feedbacks: Vec<Box<dyn FnMut(bool, bool) + 'a>>,
+    visible_menu_view_feedbacks: Vec<
+        Box<
+            dyn FnMut(
+                    &mut ViewFeedbackContext,
+                    &mut HitTestTreeManager<AppUpdateContext<'a>>,
+                    bool,
+                    bool,
+                ) + 'a,
+        >,
+    >,
     current_open_path: Option<PathBuf>,
     current_open_path_view_feedbacks: Vec<Box<dyn FnMut(&Option<PathBuf>) + 'a>>,
 }
@@ -156,11 +168,15 @@ impl<'a> AppState<'a> {
         }
     }
 
-    pub fn toggle_menu(&mut self) {
+    pub fn toggle_menu(
+        &mut self,
+        vf_context: &mut ViewFeedbackContext,
+        ht: &mut HitTestTreeManager<AppUpdateContext<'a>>,
+    ) {
         self.visible_menu = !self.visible_menu;
 
         for cb in self.visible_menu_view_feedbacks.iter_mut() {
-            cb(self.visible_menu, false);
+            cb(vf_context, ht, self.visible_menu, false);
         }
     }
 
@@ -257,8 +273,15 @@ impl<'a> AppState<'a> {
     }
 
     // TODO: unregister
-    pub fn register_visible_menu_view_feedback(&mut self, mut fb: impl FnMut(bool, bool) + 'a) {
-        fb(self.visible_menu, true);
+    pub fn register_visible_menu_view_feedback(
+        &mut self,
+        fb: impl FnMut(
+            &mut ViewFeedbackContext,
+            &mut HitTestTreeManager<AppUpdateContext<'a>>,
+            bool,
+            bool,
+        ) + 'a,
+    ) {
         self.visible_menu_view_feedbacks.push(Box::new(fb));
     }
 

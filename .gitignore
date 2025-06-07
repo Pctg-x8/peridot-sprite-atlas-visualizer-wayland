@@ -2,3 +2,4 @@
 *.vert
 *.frag
 /local
+/resources/icons/*.svg

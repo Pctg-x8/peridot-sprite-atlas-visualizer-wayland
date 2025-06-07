@@ -10,13 +10,16 @@ mod input;
 mod linux_input_event_codes;
 mod peridot;
 mod subsystem;
+mod svg;
 mod text;
 mod wl;
 
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
+    path::Path,
     rc::Rc,
+    str::FromStr,
     time::Duration,
 };
 
@@ -82,6 +85,8 @@ const IA_STATE_TRILIST: &'static br::PipelineInputAssemblyStateCreateInfo =
     &br::PipelineInputAssemblyStateCreateInfo::new(br::PrimitiveTopology::TriangleList);
 const IA_STATE_TRISTRIP: &'static br::PipelineInputAssemblyStateCreateInfo =
     &br::PipelineInputAssemblyStateCreateInfo::new(br::PrimitiveTopology::TriangleStrip);
+const IA_STATE_TRIFAN: &'static br::PipelineInputAssemblyStateCreateInfo =
+    &br::PipelineInputAssemblyStateCreateInfo::new(br::PrimitiveTopology::TriangleFan);
 const VI_STATE_EMPTY: &'static br::PipelineVertexInputStateCreateInfo<'static> =
     &br::PipelineVertexInputStateCreateInfo::new(&[], &[]);
 const VI_STATE_POSITION4_ONLY: &'static br::PipelineVertexInputStateCreateInfo<'static> =
@@ -96,6 +101,30 @@ const VI_STATE_POSITION4_ONLY: &'static br::PipelineVertexInputStateCreateInfo<'
             offset: 0,
         }],
     );
+const VI_STATE_POSITION2_ONLY: &'static br::PipelineVertexInputStateCreateInfo<'static> =
+    &br::PipelineVertexInputStateCreateInfo::new(
+        &[br::VertexInputBindingDescription::per_vertex_typed::<
+            [f32; 2],
+        >(0)],
+        &[br::VertexInputAttributeDescription {
+            location: 0,
+            binding: 0,
+            format: br::vk::VK_FORMAT_R32G32_SFLOAT,
+            offset: 0,
+        }],
+    );
+
+#[derive(br::SpecializationConstants)]
+pub struct FillcolorRConstants {
+    #[constant_id = 0]
+    pub r: f32,
+}
+
+#[derive(br::SpecializationConstants)]
+pub struct RoundedRectConstants {
+    #[constant_id = 0]
+    pub corner_radius: f32,
+}
 
 pub struct FontSet {
     pub ui_default: freetype::Owned<freetype::Face>,
@@ -112,13 +141,345 @@ pub struct ViewInitContext<'d, 'r> {
     pub fonts: &'r mut FontSet,
 }
 
+pub struct PresenterInitContext<'d, 'r> {
+    pub for_view: ViewInitContext<'d, 'r>,
+    pub app_state: &'r mut AppState<'d>,
+}
+
+pub struct ViewFeedbackContext {
+    pub composite_tree: CompositeTree,
+    pub current_sec: f32,
+}
+
+pub struct AppUpdateContext<'d> {
+    pub for_view_feedback: ViewFeedbackContext,
+    pub state: AppState<'d>,
+    pub editing_atlas_renderer: Rc<RefCell<EditingAtlasRenderer<'d>>>,
+}
+
+pub struct AppHeaderMenuButtonView {
+    ct_root: CompositeTreeRef,
+    ct_bg: CompositeTreeRef,
+    ht_root: HitTestTreeRef,
+    hovering: Cell<bool>,
+    pressing: Cell<bool>,
+}
+impl AppHeaderMenuButtonView {
+    const ICON_VERTICES: &'static [[f32; 2]] = &[
+        [-1.0, -1.0],
+        [1.0, -1.0],
+        [-1.0, -1.0 + 2.0 / 5.0],
+        [1.0, -1.0 + 2.0 / 5.0],
+        [-1.0, -1.0 + 4.0 / 5.0],
+        [1.0, -1.0 + 4.0 / 5.0],
+        [-1.0, -1.0 + 6.0 / 5.0],
+        [1.0, -1.0 + 6.0 / 5.0],
+        [-1.0, -1.0 + 8.0 / 5.0],
+        [1.0, -1.0 + 8.0 / 5.0],
+        [-1.0, -1.0 + 10.0 / 5.0],
+        [1.0, -1.0 + 10.0 / 5.0],
+    ];
+    const ICON_INDICES: &'static [u16] = &[0, 1, 2, 2, 3, 1, 4, 5, 6, 6, 7, 5, 8, 9, 10, 10, 11, 9];
+    const ICON_SIZE: f32 = 10.0;
+
+    pub fn new(init: &mut ViewInitContext, height: f32) -> Self {
+        let icon_atlas_rect = init.atlas.alloc(
+            (Self::ICON_SIZE * init.ui_scale_factor) as _,
+            (Self::ICON_SIZE * init.ui_scale_factor) as _,
+        );
+
+        let mut vbuf = br::BufferObject::new(
+            init.subsystem,
+            &br::BufferCreateInfo::new(
+                core::mem::size_of::<[f32; 2]>() * Self::ICON_VERTICES.len()
+                    + core::mem::size_of::<u16>() * Self::ICON_INDICES.len(),
+                br::BufferUsage::VERTEX_BUFFER | br::BufferUsage::INDEX_BUFFER,
+            ),
+        )
+        .unwrap();
+        let req = vbuf.requirements();
+        let memindex = init
+            .subsystem
+            .adapter_memory_info
+            .types()
+            .iter()
+            .enumerate()
+            .find(|(n, t)| {
+                (req.memoryTypeBits & (1 << n)) != 0
+                    && t.property_flags().has_all(
+                        br::MemoryPropertyFlags::DEVICE_LOCAL
+                            | br::MemoryPropertyFlags::HOST_VISIBLE,
+                    )
+            })
+            .expect("no suitable memory")
+            .0 as u32;
+        let mut mem = br::DeviceMemoryObject::new(
+            init.subsystem,
+            &br::MemoryAllocateInfo::new(req.size, memindex),
+        )
+        .unwrap();
+        vbuf.bind(&mem, 0).unwrap();
+
+        let h = mem.native_ptr();
+        let requires_flush = !init.subsystem.adapter_memory_info.is_coherent(memindex);
+        let ptr = mem.map(0..req.size as _).unwrap();
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                Self::ICON_VERTICES.as_ptr(),
+                ptr.addr_of_mut::<[f32; 2]>(0),
+                Self::ICON_VERTICES.len(),
+            );
+            core::ptr::copy_nonoverlapping(
+                Self::ICON_INDICES.as_ptr(),
+                ptr.addr_of_mut::<u16>(
+                    core::mem::size_of::<[f32; 2]>() * Self::ICON_VERTICES.len(),
+                ),
+                Self::ICON_INDICES.len(),
+            );
+        }
+        if requires_flush {
+            unsafe {
+                init.subsystem
+                    .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(h, 0, req.size)])
+                    .unwrap();
+            }
+        }
+        unsafe {
+            mem.unmap();
+        }
+
+        let rp = br::RenderPassObject::new(
+            init.subsystem,
+            &br::RenderPassCreateInfo2::new(
+                &[br::AttachmentDescription2::new(br::vk::VK_FORMAT_R8_UNORM)
+                    .color_memory_op(br::LoadOp::Clear, br::StoreOp::Store)
+                    .layout_transition(
+                        br::ImageLayout::Undefined,
+                        br::ImageLayout::ShaderReadOnlyOpt,
+                    )],
+                &[br::SubpassDescription2::new()
+                    .colors(&[br::AttachmentReference2::color_attachment_opt(0)])],
+                &[br::SubpassDependency2::new(
+                    br::SubpassIndex::Internal(0),
+                    br::SubpassIndex::External,
+                )
+                .by_region()
+                .of_memory(
+                    br::AccessFlags::COLOR_ATTACHMENT.write,
+                    br::AccessFlags::SHADER.read,
+                )
+                .of_execution(
+                    br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    br::PipelineStageFlags::FRAGMENT_SHADER,
+                )],
+            ),
+        )
+        .unwrap();
+        let fb = br::FramebufferObject::new(
+            init.subsystem,
+            &br::FramebufferCreateInfo::new(
+                &rp,
+                &[init.atlas.resource().as_transparent_ref()],
+                init.atlas.size(),
+                init.atlas.size(),
+            ),
+        )
+        .unwrap();
+
+        let vsh = init
+            .subsystem
+            .load_shader("resources/notrans.vert")
+            .unwrap();
+        let fsh = init
+            .subsystem
+            .load_shader("resources/fillcolor_r.frag")
+            .unwrap();
+
+        let pipeline_layout = br::PipelineLayoutObject::new(
+            init.subsystem,
+            &br::PipelineLayoutCreateInfo::new(&[], &[]),
+        )
+        .unwrap();
+        let [pipeline] = init
+            .subsystem
+            .new_graphics_pipeline_array(
+                &[br::GraphicsPipelineCreateInfo::new(
+                    &pipeline_layout,
+                    rp.subpass(0),
+                    &[
+                        vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+                        fsh.on_stage(br::ShaderStage::Fragment, c"main")
+                            .with_specialization_info(&br::SpecializationInfo::new(
+                                &FillcolorRConstants { r: 1.0 },
+                            )),
+                    ],
+                    VI_STATE_POSITION2_ONLY,
+                    IA_STATE_TRILIST,
+                    &br::PipelineViewportStateCreateInfo::new_array(
+                        &[icon_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
+                        &[icon_atlas_rect.vk_rect()],
+                    ),
+                    RASTER_STATE_DEFAULT_FILL_NOCULL,
+                    BLEND_STATE_SINGLE_NONE,
+                )
+                .multisample_state(MS_STATE_EMPTY)],
+                None::<&br::PipelineCacheObject<&Subsystem>>,
+            )
+            .unwrap();
+
+        let mut cp = br::CommandPoolObject::new(
+            init.subsystem,
+            &br::CommandPoolCreateInfo::new(init.subsystem.graphics_queue_family_index).transient(),
+        )
+        .unwrap();
+        let [mut cb] = br::CommandBufferObject::alloc_array(
+            init.subsystem,
+            &br::CommandBufferFixedCountAllocateInfo::new(&mut cp, br::CommandBufferLevel::Primary),
+        )
+        .unwrap();
+        unsafe {
+            cb.begin(
+                &br::CommandBufferBeginInfo::new().onetime_submit(),
+                init.subsystem,
+            )
+            .unwrap()
+        }
+        .begin_render_pass2(
+            &br::RenderPassBeginInfo::new(
+                &rp,
+                &fb,
+                icon_atlas_rect.vk_rect(),
+                &[br::ClearValue::color_f32([0.0; 4])],
+            ),
+            &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+        )
+        .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline)
+        .bind_vertex_buffer_array(0, &[vbuf.as_transparent_ref()], &[0])
+        .bind_index_buffer(
+            &vbuf,
+            core::mem::size_of::<[f32; 2]>() * Self::ICON_VERTICES.len(),
+            br::IndexType::U16,
+        )
+        .draw_indexed(Self::ICON_INDICES.len() as _, 1, 0, 0, 0)
+        .end_render_pass2(&br::SubpassEndInfo::new())
+        .end()
+        .unwrap();
+        init.subsystem
+            .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&cb)])
+            .unwrap();
+
+        let ct_root = init.composite_tree.register(CompositeRect {
+            size: [height * init.ui_scale_factor, height * init.ui_scale_factor],
+            ..Default::default()
+        });
+        let ct_bg = init.composite_tree.register(CompositeRect {
+            relative_size_adjustment: [1.0, 1.0],
+            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            composite_mode: CompositeMode::FillColor(AnimatableColor::Value([1.0, 1.0, 1.0, 0.0])),
+            ..Default::default()
+        });
+        let ct_icon = init.composite_tree.register(CompositeRect {
+            size: [
+                Self::ICON_SIZE * init.ui_scale_factor,
+                Self::ICON_SIZE * init.ui_scale_factor,
+            ],
+            offset: [
+                -Self::ICON_SIZE * 0.5 * init.ui_scale_factor,
+                -Self::ICON_SIZE * 0.5 * init.ui_scale_factor,
+            ],
+            relative_offset_adjustment: [0.5, 0.5],
+            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            texatlas_rect: icon_atlas_rect,
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
+            ..Default::default()
+        });
+
+        init.composite_tree.add_child(ct_root, ct_bg);
+        init.composite_tree.add_child(ct_root, ct_icon);
+
+        let ht_root = init.ht.create(HitTestTreeData {
+            width: height,
+            height,
+            ..Default::default()
+        });
+
+        Self {
+            ct_root,
+            ct_bg,
+            ht_root,
+            hovering: Cell::new(false),
+            pressing: Cell::new(false),
+        }
+    }
+
+    pub fn mount(
+        &self,
+        ct_parent: CompositeTreeRef,
+        ct: &mut CompositeTree,
+        ht_parent: HitTestTreeRef,
+        ht: &mut HitTestTreeManager<AppUpdateContext<'_>>,
+    ) {
+        ct.add_child(ct_parent, self.ct_root);
+        ht.add_child(ht_parent, self.ht_root);
+    }
+
+    fn update_button_bg_opacity(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
+        let opacity = match (self.hovering.get(), self.pressing.get()) {
+            (_, true) => 0.375,
+            (true, _) => 0.25,
+            _ => 0.0,
+        };
+
+        let current = match composite_tree.get(self.ct_bg).composite_mode {
+            CompositeMode::FillColor(ref x) => x.compute(current_sec),
+            _ => unreachable!(),
+        };
+        composite_tree.get_mut(self.ct_bg).composite_mode =
+            CompositeMode::FillColor(AnimatableColor::Animated(
+                current,
+                AnimationData {
+                    to_value: [1.0, 1.0, 1.0, opacity],
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.1,
+                    curve_p1: (0.5, 0.0),
+                    curve_p2: (0.5, 1.0),
+                },
+            ));
+        composite_tree.mark_dirty(self.ct_bg);
+    }
+
+    pub fn on_hover(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
+        self.hovering.set(true);
+        self.update_button_bg_opacity(composite_tree, current_sec);
+    }
+
+    pub fn on_leave(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
+        self.hovering.set(false);
+        // はずれたらpressingもなかったことにする
+        self.pressing.set(false);
+
+        self.update_button_bg_opacity(composite_tree, current_sec);
+    }
+
+    pub fn on_press(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
+        self.pressing.set(true);
+        self.update_button_bg_opacity(composite_tree, current_sec);
+    }
+
+    pub fn on_release(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
+        self.pressing.set(false);
+        self.update_button_bg_opacity(composite_tree, current_sec);
+    }
+}
+
 pub struct AppHeaderBaseView {
     height: f32,
     ct_root: CompositeTreeRef,
+    ht_root: HitTestTreeRef,
 }
 impl AppHeaderBaseView {
     const TITLE_SPACING: f32 = 16.0;
-    const TITLE_LEFT_OFFSET: f32 = 36.0;
+    const TITLE_LEFT_OFFSET: f32 = 48.0;
 
     pub fn new(ctx: &mut ViewInitContext) -> Self {
         let title = "Peridot SpriteAtlas Visualizer/Editor";
@@ -254,26 +615,163 @@ impl AppHeaderBaseView {
 
         ctx.composite_tree.add_child(ct_root, ct_title);
 
-        Self { height, ct_root }
+        let ht_root = ctx.ht.create(HitTestTreeData {
+            height,
+            width_adjustment_factor: 1.0,
+            ..Default::default()
+        });
+
+        Self {
+            height,
+            ct_root,
+            ht_root,
+        }
     }
 
-    pub fn mount(&self, ct_parent: CompositeTreeRef, ct: &mut CompositeTree) {
+    pub fn mount(
+        &self,
+        ct_parent: CompositeTreeRef,
+        ct: &mut CompositeTree,
+        ht_parent: HitTestTreeRef,
+        ht: &mut HitTestTreeManager<AppUpdateContext<'_>>,
+    ) {
         ct.add_child(ct_parent, self.ct_root);
+        ht.add_child(ht_parent, self.ht_root);
+    }
+}
+
+struct AppHeaderActionHandler {
+    menu_button_view: AppHeaderMenuButtonView,
+}
+impl<'c> HitTestTreeActionHandler<'c> for AppHeaderActionHandler {
+    type Context = AppUpdateContext<'c>;
+
+    fn on_pointer_enter(
+        &self,
+        sender: HitTestTreeRef,
+        context: &mut Self::Context,
+        ht: &mut HitTestTreeManager<Self::Context>,
+        args: hittest::PointerActionArgs,
+    ) -> EventContinueControl {
+        if sender == self.menu_button_view.ht_root {
+            self.menu_button_view.on_hover(
+                &mut context.for_view_feedback.composite_tree,
+                context.for_view_feedback.current_sec,
+            );
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_pointer_leave(
+        &self,
+        sender: HitTestTreeRef,
+        context: &mut Self::Context,
+        ht: &mut HitTestTreeManager<Self::Context>,
+        args: hittest::PointerActionArgs,
+    ) -> EventContinueControl {
+        if sender == self.menu_button_view.ht_root {
+            self.menu_button_view.on_leave(
+                &mut context.for_view_feedback.composite_tree,
+                context.for_view_feedback.current_sec,
+            );
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_pointer_down(
+        &self,
+        sender: HitTestTreeRef,
+        context: &mut Self::Context,
+        ht: &mut HitTestTreeManager<Self::Context>,
+        args: hittest::PointerActionArgs,
+    ) -> EventContinueControl {
+        if sender == self.menu_button_view.ht_root {
+            self.menu_button_view.on_press(
+                &mut context.for_view_feedback.composite_tree,
+                context.for_view_feedback.current_sec,
+            );
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_pointer_up(
+        &self,
+        sender: HitTestTreeRef,
+        context: &mut Self::Context,
+        ht: &mut HitTestTreeManager<Self::Context>,
+        args: hittest::PointerActionArgs,
+    ) -> EventContinueControl {
+        if sender == self.menu_button_view.ht_root {
+            self.menu_button_view.on_release(
+                &mut context.for_view_feedback.composite_tree,
+                context.for_view_feedback.current_sec,
+            );
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_click(
+        &self,
+        sender: HitTestTreeRef,
+        context: &mut Self::Context,
+        ht: &mut HitTestTreeManager<Self::Context>,
+        args: hittest::PointerActionArgs,
+    ) -> EventContinueControl {
+        if sender == self.menu_button_view.ht_root {
+            context
+                .state
+                .toggle_menu(&mut context.for_view_feedback, ht);
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        EventContinueControl::empty()
     }
 }
 
 pub struct AppHeaderPresenter {
     base_view: AppHeaderBaseView,
+    _action_handler: Rc<AppHeaderActionHandler>,
 }
 impl AppHeaderPresenter {
-    pub fn new(init: &mut ViewInitContext) -> Self {
-        let base_view = AppHeaderBaseView::new(init);
+    pub fn new(init: &mut PresenterInitContext) -> Self {
+        let base_view = AppHeaderBaseView::new(&mut init.for_view);
+        let menu_button_view = AppHeaderMenuButtonView::new(&mut init.for_view, base_view.height);
 
-        Self { base_view }
+        menu_button_view.mount(
+            base_view.ct_root,
+            init.for_view.composite_tree,
+            base_view.ht_root,
+            init.for_view.ht,
+        );
+
+        let action_handler = Rc::new(AppHeaderActionHandler { menu_button_view });
+        init.for_view
+            .ht
+            .get_data_mut(action_handler.menu_button_view.ht_root)
+            .action_handler = Some(Rc::downgrade(&action_handler) as _);
+
+        Self {
+            base_view,
+            _action_handler: action_handler,
+        }
     }
 
-    pub fn mount(&self, ct_parent: CompositeTreeRef, ct: &mut CompositeTree) {
-        self.base_view.mount(ct_parent, ct);
+    pub fn mount(
+        &self,
+        ct_parent: CompositeTreeRef,
+        ct: &mut CompositeTree,
+        ht_parent: HitTestTreeRef,
+        ht: &mut HitTestTreeManager<AppUpdateContext<'_>>,
+    ) {
+        self.base_view.mount(ct_parent, ct, ht_parent, ht);
     }
 
     pub const fn height(&self) -> f32 {
@@ -1762,8 +2260,10 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
         _args: hittest::PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.toggle_button_view.ht_root {
-            self.toggle_button_view
-                .on_hover(&mut context.composite_tree, context.current_sec);
+            self.toggle_button_view.on_hover(
+                &mut context.for_view_feedback.composite_tree,
+                context.for_view_feedback.current_sec,
+            );
 
             return EventContinueControl::STOP_PROPAGATION;
         }
@@ -1779,8 +2279,10 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
         _args: hittest::PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.toggle_button_view.ht_root {
-            self.toggle_button_view
-                .on_leave(&mut context.composite_tree, context.current_sec);
+            self.toggle_button_view.on_leave(
+                &mut context.for_view_feedback.composite_tree,
+                context.for_view_feedback.current_sec,
+            );
 
             return EventContinueControl::STOP_PROPAGATION;
         }
@@ -1811,8 +2313,10 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
         }
 
         if sender == self.toggle_button_view.ht_root {
-            self.toggle_button_view
-                .on_press(&mut context.composite_tree, context.current_sec);
+            self.toggle_button_view.on_press(
+                &mut context.for_view_feedback.composite_tree,
+                context.for_view_feedback.current_sec,
+            );
 
             return EventContinueControl::STOP_PROPAGATION;
         }
@@ -1836,7 +2340,8 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
             if sender == self.ht_resize_area {
                 if let Some((base_width, base_cx)) = self.resize_state.get() {
                     let w = (base_width + (args.client_x - base_cx)).max(16.0);
-                    self.view.set_width(w, &mut context.composite_tree, ht);
+                    self.view
+                        .set_width(w, &mut context.for_view_feedback.composite_tree, ht);
 
                     return EventContinueControl::STOP_PROPAGATION;
                 }
@@ -1862,7 +2367,8 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
             if sender == self.ht_resize_area {
                 if let Some((base_width, base_cx)) = self.resize_state.replace(None) {
                     let w = (base_width + (args.client_x - base_cx)).max(16.0);
-                    self.view.set_width(w, &mut context.composite_tree, ht);
+                    self.view
+                        .set_width(w, &mut context.for_view_feedback.composite_tree, ht);
 
                     return EventContinueControl::RELEASE_CAPTURE_ELEMENT;
                 }
@@ -1870,8 +2376,10 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
         }
 
         if sender == self.toggle_button_view.ht_root {
-            self.toggle_button_view
-                .on_release(&mut context.composite_tree, context.current_sec);
+            self.toggle_button_view.on_release(
+                &mut context.for_view_feedback.composite_tree,
+                context.for_view_feedback.current_sec,
+            );
 
             return EventContinueControl::STOP_PROPAGATION;
         }
@@ -1896,25 +2404,31 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
             self.shown.set(show);
 
             if show {
-                self.view
-                    .show(&mut context.composite_tree, ht, context.current_sec);
-                self.toggle_button_view.place_inner(
-                    &mut context.composite_tree,
+                self.view.show(
+                    &mut context.for_view_feedback.composite_tree,
                     ht,
-                    context.current_sec,
+                    context.for_view_feedback.current_sec,
+                );
+                self.toggle_button_view.place_inner(
+                    &mut context.for_view_feedback.composite_tree,
+                    ht,
+                    context.for_view_feedback.current_sec,
                 );
             } else {
-                self.view
-                    .hide(&mut context.composite_tree, ht, context.current_sec);
-                self.toggle_button_view.place_outer(
-                    &mut context.composite_tree,
+                self.view.hide(
+                    &mut context.for_view_feedback.composite_tree,
                     ht,
-                    context.current_sec,
+                    context.for_view_feedback.current_sec,
+                );
+                self.toggle_button_view.place_outer(
+                    &mut context.for_view_feedback.composite_tree,
+                    ht,
+                    context.for_view_feedback.current_sec,
                 );
             }
 
             self.toggle_button_view
-                .flip_icon(!show, &mut context.composite_tree);
+                .flip_icon(!show, &mut context.for_view_feedback.composite_tree);
 
             return EventContinueControl::STOP_PROPAGATION
                 | EventContinueControl::RECOMPUTE_POINTER_ENTER;
@@ -1930,16 +2444,21 @@ pub struct SpriteListPanePresenter {
     _ht_action_handler: Rc<SpriteListPaneActionHandler>,
 }
 impl SpriteListPanePresenter {
-    pub fn new(init: &mut ViewInitContext, header_height: f32) -> Self {
-        let view = Rc::new(SpriteListPaneView::new(init, header_height));
-        let toggle_button_view = Rc::new(SpriteListToggleButtonView::new(init));
+    pub fn new(init: &mut PresenterInitContext, header_height: f32) -> Self {
+        let view = Rc::new(SpriteListPaneView::new(&mut init.for_view, header_height));
+        let toggle_button_view = Rc::new(SpriteListToggleButtonView::new(&mut init.for_view));
 
-        let cell_view = SpriteListCellView::new(init, "sprite cell", 32.0);
+        let cell_view = SpriteListCellView::new(&mut init.for_view, "sprite cell", 32.0);
 
-        toggle_button_view.mount(init.composite_tree, view.ct_root, init.ht, view.ht_frame);
-        toggle_button_view.place_inner(init.composite_tree, init.ht, -0.25);
+        toggle_button_view.mount(
+            init.for_view.composite_tree,
+            view.ct_root,
+            init.for_view.ht,
+            view.ht_frame,
+        );
+        toggle_button_view.place_inner(init.for_view.composite_tree, init.for_view.ht, -0.25);
 
-        cell_view.mount(view.ct_root, init.composite_tree);
+        cell_view.mount(view.ct_root, init.for_view.composite_tree);
 
         let ht_action_handler = Rc::new(SpriteListPaneActionHandler {
             view: view.clone(),
@@ -1948,11 +2467,14 @@ impl SpriteListPanePresenter {
             resize_state: Cell::new(None),
             shown: Cell::new(true),
         });
-        init.ht.get_data_mut(view.ht_frame).action_handler =
+        init.for_view.ht.get_data_mut(view.ht_frame).action_handler =
             Some(Rc::downgrade(&ht_action_handler) as _);
-        init.ht.get_data_mut(view.ht_resize_area).action_handler =
-            Some(Rc::downgrade(&ht_action_handler) as _);
-        init.ht
+        init.for_view
+            .ht
+            .get_data_mut(view.ht_resize_area)
+            .action_handler = Some(Rc::downgrade(&ht_action_handler) as _);
+        init.for_view
+            .ht
             .get_data_mut(toggle_button_view.ht_root)
             .action_handler = Some(Rc::downgrade(&ht_action_handler) as _);
 
@@ -1974,11 +2496,1391 @@ impl SpriteListPanePresenter {
     }
 }
 
-pub struct AppUpdateContext<'d> {
-    composite_tree: CompositeTree,
-    state: AppState<'d>,
-    editing_atlas_renderer: Rc<RefCell<EditingAtlasRenderer<'d>>>,
-    current_sec: f32,
+struct AppMenuButtonView {
+    ct_root: CompositeTreeRef,
+    ct_icon: CompositeTreeRef,
+    ct_label: CompositeTreeRef,
+    ht_root: HitTestTreeRef,
+    left: f32,
+    top: f32,
+    ui_scale_factor: f32,
+}
+impl AppMenuButtonView {
+    const ICON_SIZE: f32 = 24.0;
+    const BUTTON_HEIGHT: f32 = Self::ICON_SIZE + 8.0 * 2.0;
+    const HPADDING: f32 = 16.0;
+    const ICON_LABEL_GAP: f32 = 4.0;
+
+    const BG_COLOR_SHOWN: [f32; 4] = [1.0, 1.0, 1.0, 0.25];
+    const BG_COLOR_HIDDEN: [f32; 4] = [1.0, 1.0, 1.0, 0.0];
+    const CONTENT_COLOR_SHOWN: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+    const CONTENT_COLOR_HIDDEN: [f32; 4] = [1.0, 1.0, 1.0, 0.0];
+
+    pub fn new(
+        init: &mut ViewInitContext,
+        label: &str,
+        icon_path: impl AsRef<Path>,
+        left: f32,
+        top: f32,
+    ) -> Self {
+        let label_layout = TextLayout::build_simple(label, &mut init.fonts.ui_default);
+
+        let bg_atlas_rect = init.atlas.alloc(
+            ((Self::BUTTON_HEIGHT + 1.0) * init.ui_scale_factor) as u32,
+            ((Self::BUTTON_HEIGHT + 1.0) * init.ui_scale_factor) as u32,
+        );
+        let icon_atlas_rect = init.atlas.alloc(
+            (Self::ICON_SIZE * init.ui_scale_factor) as _,
+            (Self::ICON_SIZE * init.ui_scale_factor) as _,
+        );
+        let label_atlas_rect = init
+            .atlas
+            .alloc(label_layout.width_px(), label_layout.height_px());
+
+        let icon_svg_content = std::fs::read_to_string(icon_path).unwrap();
+        let mut reader = quick_xml::Reader::from_str(&icon_svg_content);
+        let mut svg_path_commands = Vec::new();
+        let mut viewbox = None;
+        loop {
+            match reader.read_event().unwrap() {
+                quick_xml::events::Event::Start(x) => {
+                    println!("xml start: {x:?}");
+                    println!("  name {:?}", x.name());
+                    for a in x.attributes().with_checks(false) {
+                        let a = a.unwrap();
+                        println!("  attr {:?} = {:?}", a.key, a.unescape_value());
+                    }
+
+                    if x.name().0 == b"svg" {
+                        let viewbox_value = &x
+                            .attributes()
+                            .with_checks(false)
+                            .find(|x| x.as_ref().is_ok_and(|x| x.key.0 == b"viewBox"))
+                            .unwrap()
+                            .unwrap()
+                            .value;
+                        viewbox = Some(svg::ViewBox::from_str_bytes(viewbox_value));
+                    }
+                }
+                quick_xml::events::Event::End(x) => {
+                    println!("xml end: {x:?}");
+                    println!("  name {:?}", x.name());
+                }
+                quick_xml::events::Event::Empty(x) => {
+                    println!("xml empty: {x:?}");
+                    println!("  name {:?}", x.name());
+                    for a in x.attributes().with_checks(false) {
+                        let a = a.unwrap();
+                        println!("  attr {:?} = {:?}", a.key, a.unescape_value());
+                    }
+
+                    if x.name().0 == b"path" {
+                        let path_data = &x
+                            .attributes()
+                            .with_checks(false)
+                            .find(|x| x.as_ref().is_ok_and(|x| x.key.0 == b"d"))
+                            .unwrap()
+                            .unwrap()
+                            .value;
+                        for x in svg::InstructionParser::new_bytes(path_data) {
+                            println!("  path inst: {x:?}");
+                            svg_path_commands.push(x);
+                        }
+                    }
+                }
+                quick_xml::events::Event::Text(x) => println!("xml text: {x:?}"),
+                quick_xml::events::Event::CData(x) => println!("xml cdata: {x:?}"),
+                quick_xml::events::Event::Comment(x) => println!("xml comment: {x:?}"),
+                quick_xml::events::Event::Decl(x) => println!("xml decl: {x:?}"),
+                quick_xml::events::Event::PI(x) => println!("xml pi: {x:?}"),
+                quick_xml::events::Event::DocType(x) => println!("xml doctype: {x:?}"),
+                quick_xml::events::Event::Eof => {
+                    println!("eof");
+                    break;
+                }
+            }
+        }
+
+        let viewbox = viewbox.unwrap();
+
+        // rasterize icon svg
+        let mut stencil_buffer = br::ImageObject::new(
+            init.subsystem,
+            &br::ImageCreateInfo::new(icon_atlas_rect.extent(), br::vk::VK_FORMAT_S8_UINT)
+                .as_depth_stencil_attachment()
+                .as_transient_attachment()
+                .sample_counts(4),
+        )
+        .unwrap();
+        let req = stencil_buffer.requirements();
+        let memindex = init
+            .subsystem
+            .adapter_memory_info
+            .find_device_local_index(req.memoryTypeBits)
+            .unwrap();
+        let stencil_buffer_mem = br::DeviceMemoryObject::new(
+            init.subsystem,
+            &br::MemoryAllocateInfo::new(req.size, memindex),
+        )
+        .unwrap();
+        stencil_buffer.bind(&stencil_buffer_mem, 0).unwrap();
+        let stencil_buffer = br::ImageViewBuilder::new(
+            stencil_buffer,
+            br::ImageSubresourceRange::new(br::AspectMask::STENCIL, 0..1, 0..1),
+        )
+        .create()
+        .unwrap();
+
+        let mut ms_color_buffer = br::ImageObject::new(
+            init.subsystem,
+            &br::ImageCreateInfo::new(icon_atlas_rect.extent(), br::vk::VK_FORMAT_R8_UNORM)
+                .as_color_attachment()
+                .usage_with(br::ImageUsageFlags::TRANSFER_SRC)
+                .sample_counts(4),
+        )
+        .unwrap();
+        let req = ms_color_buffer.requirements();
+        let memindex = init
+            .subsystem
+            .adapter_memory_info
+            .find_device_local_index(req.memoryTypeBits)
+            .unwrap();
+        let ms_color_buffer_mem = br::DeviceMemoryObject::new(
+            init.subsystem,
+            &br::MemoryAllocateInfo::new(req.size, memindex),
+        )
+        .unwrap();
+        ms_color_buffer.bind(&ms_color_buffer_mem, 0).unwrap();
+        let ms_color_buffer = br::ImageViewBuilder::new(
+            ms_color_buffer,
+            br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+        )
+        .create()
+        .unwrap();
+
+        let render_pass = br::RenderPassObject::new(
+            init.subsystem,
+            &br::RenderPassCreateInfo2::new(
+                &[
+                    br::AttachmentDescription2::new(br::vk::VK_FORMAT_R8_UNORM)
+                        .color_memory_op(br::LoadOp::Clear, br::StoreOp::DontCare)
+                        .layout_transition(
+                            br::ImageLayout::Undefined,
+                            br::ImageLayout::TransferSrcOpt,
+                        )
+                        .samples(4),
+                    br::AttachmentDescription2::new(br::vk::VK_FORMAT_S8_UINT)
+                        .stencil_memory_op(br::LoadOp::Clear, br::StoreOp::DontCare)
+                        .layout_transition(
+                            br::ImageLayout::Undefined,
+                            br::ImageLayout::DepthStencilReadOnlyOpt,
+                        )
+                        .samples(4),
+                ],
+                &[
+                    br::SubpassDescription2::new()
+                        .depth_stencil(&br::AttachmentReference2::depth_stencil_attachment_opt(1)),
+                    br::SubpassDescription2::new()
+                        .colors(&[br::AttachmentReference2::color_attachment_opt(0)])
+                        .depth_stencil(&br::AttachmentReference2::depth_stencil_readonly_opt(1)),
+                ],
+                &[
+                    br::SubpassDependency2::new(
+                        br::SubpassIndex::Internal(0),
+                        br::SubpassIndex::Internal(1),
+                    )
+                    .by_region()
+                    .of_memory(
+                        br::AccessFlags::DEPTH_STENCIL_ATTACHMENT.write,
+                        br::AccessFlags::DEPTH_STENCIL_ATTACHMENT.read,
+                    )
+                    .of_execution(
+                        br::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                        br::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+                    ),
+                    br::SubpassDependency2::new(
+                        br::SubpassIndex::Internal(1),
+                        br::SubpassIndex::External,
+                    )
+                    .by_region()
+                    .of_memory(
+                        br::AccessFlags::COLOR_ATTACHMENT.write,
+                        br::AccessFlags::TRANSFER.read,
+                    )
+                    .of_execution(
+                        br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                        br::PipelineStageFlags::TRANSFER,
+                    ),
+                ],
+            ),
+        )
+        .unwrap();
+        let fb = br::FramebufferObject::new(
+            init.subsystem,
+            &br::FramebufferCreateInfo::new(
+                &render_pass,
+                &[
+                    ms_color_buffer.as_transparent_ref(),
+                    stencil_buffer.as_transparent_ref(),
+                ],
+                icon_atlas_rect.width(),
+                icon_atlas_rect.height(),
+            ),
+        )
+        .unwrap();
+
+        let round_rect_rp = br::RenderPassObject::new(
+            init.subsystem,
+            &br::RenderPassCreateInfo2::new(
+                &[br::AttachmentDescription2::new(br::vk::VK_FORMAT_R8_UNORM)
+                    .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store)
+                    .layout_transition(
+                        br::ImageLayout::Undefined,
+                        br::ImageLayout::TransferDestOpt,
+                    )],
+                &[br::SubpassDescription2::new()
+                    .colors(&[br::AttachmentReference2::color_attachment_opt(0)])],
+                &[],
+            ),
+        )
+        .unwrap();
+        let round_rect_fb = br::FramebufferObject::new(
+            init.subsystem,
+            &br::FramebufferCreateInfo::new(
+                &round_rect_rp,
+                &[init.atlas.resource().as_transparent_ref()],
+                init.atlas.size(),
+                init.atlas.size(),
+            ),
+        )
+        .unwrap();
+
+        let round_rect_vsh = init
+            .subsystem
+            .load_shader("resources/filltri.vert")
+            .unwrap();
+        let round_rect_fsh = init
+            .subsystem
+            .load_shader("resources/rounded_rect.frag")
+            .unwrap();
+        let first_stencil_shape_vsh = init
+            .subsystem
+            .load_shader("resources/normalized_01_2d.vert")
+            .unwrap();
+        let first_stencil_shape_fsh = init
+            .subsystem
+            .load_shader("resources/stencil_only.frag")
+            .unwrap();
+        let curve_stencil_shape_vsh = init
+            .subsystem
+            .load_shader("resources/normalized_01_2d_with_uv.vert")
+            .unwrap();
+        let curve_stencil_shape_fsh = init
+            .subsystem
+            .load_shader("resources/stencil_loop_blinn_curve.frag")
+            .unwrap();
+        let colorize_vsh = init
+            .subsystem
+            .load_shader("resources/filltri.vert")
+            .unwrap();
+        let colorize_fsh = init
+            .subsystem
+            .load_shader("resources/fillcolor_r.frag")
+            .unwrap();
+
+        let empty_pipeline_layout = br::PipelineLayoutObject::new(
+            init.subsystem,
+            &br::PipelineLayoutCreateInfo::new(&[], &[]),
+        )
+        .unwrap();
+        let local_viewports = [icon_atlas_rect
+            .extent()
+            .into_rect(br::Offset2D::ZERO)
+            .make_viewport(0.0..1.0)];
+        let local_scissor_rects = [icon_atlas_rect.extent().into_rect(br::Offset2D::ZERO)];
+        let vp_state_local =
+            br::PipelineViewportStateCreateInfo::new_array(&local_viewports, &local_scissor_rects);
+        let sop_invert_always = br::vk::VkStencilOpState {
+            failOp: br::StencilOp::Invert as _,
+            passOp: br::StencilOp::Invert as _,
+            depthFailOp: br::StencilOp::Invert as _,
+            compareOp: br::CompareOp::Always as _,
+            compareMask: 0,
+            writeMask: 0x01,
+            reference: 0x01,
+        };
+        let sop_testonly_equal_1 = br::vk::VkStencilOpState {
+            failOp: br::StencilOp::Keep as _,
+            passOp: br::StencilOp::Keep as _,
+            depthFailOp: br::StencilOp::Keep as _,
+            compareOp: br::CompareOp::Equal as _,
+            compareMask: 0x01,
+            reference: 0x01,
+            writeMask: 0,
+        };
+        let [
+            round_rect_pipeline,
+            first_stencil_shape_pipeline,
+            curve_stencil_shape_pipeline,
+            colorize_pipeline,
+        ] = init
+            .subsystem
+            .new_graphics_pipeline_array(
+                &[
+                    br::GraphicsPipelineCreateInfo::new(
+                        &empty_pipeline_layout,
+                        round_rect_rp.subpass(0),
+                        &[
+                            round_rect_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+                            round_rect_fsh
+                                .on_stage(br::ShaderStage::Fragment, c"main")
+                                .with_specialization_info(&br::SpecializationInfo::new(
+                                    &RoundedRectConstants {
+                                        corner_radius: Self::BUTTON_HEIGHT * 0.5,
+                                    },
+                                )),
+                        ],
+                        VI_STATE_EMPTY,
+                        IA_STATE_TRILIST,
+                        &br::PipelineViewportStateCreateInfo::new_array(
+                            &[bg_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
+                            &[bg_atlas_rect.vk_rect()],
+                        ),
+                        RASTER_STATE_DEFAULT_FILL_NOCULL,
+                        BLEND_STATE_SINGLE_NONE,
+                    )
+                    .multisample_state(MS_STATE_EMPTY),
+                    br::GraphicsPipelineCreateInfo::new(
+                        &empty_pipeline_layout,
+                        render_pass.subpass(0),
+                        &[
+                            first_stencil_shape_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+                            first_stencil_shape_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
+                        ],
+                        VI_STATE_POSITION2_ONLY,
+                        IA_STATE_TRIFAN,
+                        &vp_state_local,
+                        RASTER_STATE_DEFAULT_FILL_NOCULL,
+                        BLEND_STATE_SINGLE_NONE,
+                    )
+                    .depth_stencil_state(
+                        &br::PipelineDepthStencilStateCreateInfo::new()
+                            .stencil_test(true)
+                            .stencil_state_back(sop_invert_always.clone())
+                            .stencil_state_front(sop_invert_always.clone()),
+                    )
+                    .multisample_state(
+                        &br::PipelineMultisampleStateCreateInfo::new().rasterization_samples(4),
+                    ),
+                    br::GraphicsPipelineCreateInfo::new(
+                        &empty_pipeline_layout,
+                        render_pass.subpass(0),
+                        &[
+                            curve_stencil_shape_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+                            curve_stencil_shape_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
+                        ],
+                        &br::PipelineVertexInputStateCreateInfo::new(
+                            &[br::VertexInputBindingDescription::per_vertex_typed::<
+                                [f32; 4],
+                            >(0)],
+                            &[
+                                br::VertexInputAttributeDescription {
+                                    location: 0,
+                                    binding: 0,
+                                    format: br::vk::VK_FORMAT_R32G32_SFLOAT,
+                                    offset: 0,
+                                },
+                                br::VertexInputAttributeDescription {
+                                    location: 1,
+                                    binding: 0,
+                                    format: br::vk::VK_FORMAT_R32G32_SFLOAT,
+                                    offset: core::mem::size_of::<[f32; 2]>() as _,
+                                },
+                            ],
+                        ),
+                        IA_STATE_TRILIST,
+                        &vp_state_local,
+                        RASTER_STATE_DEFAULT_FILL_NOCULL,
+                        BLEND_STATE_SINGLE_NONE,
+                    )
+                    .depth_stencil_state(
+                        &br::PipelineDepthStencilStateCreateInfo::new()
+                            .stencil_test(true)
+                            .stencil_state_back(sop_invert_always.clone())
+                            .stencil_state_front(sop_invert_always),
+                    )
+                    .multisample_state(
+                        &br::PipelineMultisampleStateCreateInfo::new().rasterization_samples(4),
+                    ),
+                    br::GraphicsPipelineCreateInfo::new(
+                        &empty_pipeline_layout,
+                        render_pass.subpass(1),
+                        &[
+                            colorize_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+                            colorize_fsh
+                                .on_stage(br::ShaderStage::Fragment, c"main")
+                                .with_specialization_info(&br::SpecializationInfo::new(
+                                    &FillcolorRConstants { r: 1.0 },
+                                )),
+                        ],
+                        VI_STATE_EMPTY,
+                        IA_STATE_TRILIST,
+                        &vp_state_local,
+                        RASTER_STATE_DEFAULT_FILL_NOCULL,
+                        BLEND_STATE_SINGLE_NONE,
+                    )
+                    .depth_stencil_state(
+                        &br::PipelineDepthStencilStateCreateInfo::new()
+                            .stencil_test(true)
+                            .stencil_state_back(sop_testonly_equal_1.clone())
+                            .stencil_state_front(sop_testonly_equal_1),
+                    )
+                    .multisample_state(
+                        &br::PipelineMultisampleStateCreateInfo::new()
+                            .rasterization_samples(4)
+                            .enable_alpha_to_coverage(),
+                    ),
+                ],
+                None::<&br::PipelineCacheObject<&Subsystem>>,
+            )
+            .unwrap();
+
+        let mut trifan_points = Vec::<[f32; 2]>::new();
+        let mut trifan_point_ranges = Vec::new();
+        let mut curve_triangle_points = Vec::<[f32; 4]>::new();
+        let mut cubic_last_control_point = None::<(f32, f32)>;
+        let mut quadratic_last_control_point = None::<(f32, f32)>;
+        let mut current_figure_first_index = None;
+        let mut p = (0.0f32, 0.0f32);
+        for x in svg_path_commands.iter() {
+            match x {
+                &svg::Instruction::Move { absolute, x, y } => {
+                    if current_figure_first_index.is_some() {
+                        panic!("not closed last figure");
+                    }
+
+                    cubic_last_control_point = None;
+                    quadratic_last_control_point = None;
+                    p = if absolute { (x, y) } else { (p.0 + x, p.1 + y) };
+                    current_figure_first_index = Some(trifan_points.len());
+
+                    trifan_points.push([viewbox.translate_x(p.0), viewbox.translate_y(p.1)]);
+                }
+                &svg::Instruction::Line { absolute, x, y } => {
+                    cubic_last_control_point = None;
+                    quadratic_last_control_point = None;
+                    p = if absolute { (x, y) } else { (p.0 + x, p.1 + y) };
+
+                    trifan_points.push([viewbox.translate_x(p.0), viewbox.translate_y(p.1)]);
+                }
+                &svg::Instruction::HLine { absolute, x } => {
+                    cubic_last_control_point = None;
+                    quadratic_last_control_point = None;
+                    p.0 = if absolute { x } else { p.0 + x };
+
+                    trifan_points.push([viewbox.translate_x(p.0), viewbox.translate_y(p.1)]);
+                }
+                &svg::Instruction::VLine { absolute, y } => {
+                    cubic_last_control_point = None;
+                    quadratic_last_control_point = None;
+                    p.1 = if absolute { y } else { p.1 + y };
+
+                    trifan_points.push([viewbox.translate_x(p.0), viewbox.translate_y(p.1)]);
+                }
+                &svg::Instruction::BezierCurve {
+                    absolute,
+                    c1_x,
+                    c1_y,
+                    c2_x,
+                    c2_y,
+                    x,
+                    y,
+                } => {
+                    let figure = lyon_geom::CubicBezierSegment {
+                        from: lyon_geom::point(p.0, p.1),
+                        ctrl1: if absolute {
+                            lyon_geom::point(c1_x, c1_y)
+                        } else {
+                            lyon_geom::point(p.0 + c1_x, p.1 + c1_y)
+                        },
+                        ctrl2: if absolute {
+                            lyon_geom::point(c2_x, c2_y)
+                        } else {
+                            lyon_geom::point(p.0 + c2_x, p.1 + c2_y)
+                        },
+                        to: if absolute {
+                            lyon_geom::point(x, y)
+                        } else {
+                            lyon_geom::point(p.0 + x, p.1 + y)
+                        },
+                    };
+
+                    figure.for_each_quadratic_bezier(1.0, &mut |q| {
+                        curve_triangle_points.extend([
+                            [
+                                viewbox.translate_x(q.from.x),
+                                viewbox.translate_y(q.from.y),
+                                0.0,
+                                0.0,
+                            ],
+                            [
+                                viewbox.translate_x(q.ctrl.x),
+                                viewbox.translate_y(q.ctrl.y),
+                                0.5,
+                                0.0,
+                            ],
+                            [
+                                viewbox.translate_x(q.to.x),
+                                viewbox.translate_y(q.to.y),
+                                1.0,
+                                1.0,
+                            ],
+                        ]);
+
+                        // TODO: おなじ位置の頂点を出力する場合があるのでもうちょい最適化したいかも
+                        trifan_points
+                            .push([viewbox.translate_x(q.from.x), viewbox.translate_y(q.from.y)]);
+                        trifan_points
+                            .push([viewbox.translate_x(q.to.x), viewbox.translate_y(q.to.y)]);
+                    });
+
+                    cubic_last_control_point = Some((figure.ctrl2.x, figure.ctrl2.y));
+                    quadratic_last_control_point = None;
+                    p = (figure.to.x, figure.to.y);
+                }
+                &svg::Instruction::SequentialBezierCurve {
+                    absolute,
+                    c2_x,
+                    c2_y,
+                    x,
+                    y,
+                } => {
+                    let figure = lyon_geom::CubicBezierSegment {
+                        from: lyon_geom::point(p.0, p.1),
+                        ctrl1: if let Some((lc2_x, lc2_y)) = cubic_last_control_point {
+                            let d = (p.0 - lc2_x, p.1 - lc2_y);
+                            lyon_geom::point(p.0 + d.0, p.1 + d.1)
+                        } else {
+                            lyon_geom::point(p.0, p.1)
+                        },
+                        ctrl2: if absolute {
+                            lyon_geom::point(c2_x, c2_y)
+                        } else {
+                            lyon_geom::point(p.0 + c2_x, p.1 + c2_y)
+                        },
+                        to: if absolute {
+                            lyon_geom::point(x, y)
+                        } else {
+                            lyon_geom::point(p.0 + x, p.1 + y)
+                        },
+                    };
+
+                    figure.for_each_quadratic_bezier(1.0, &mut |q| {
+                        curve_triangle_points.extend([
+                            [
+                                viewbox.translate_x(q.from.x),
+                                viewbox.translate_y(q.from.y),
+                                0.0,
+                                0.0,
+                            ],
+                            [
+                                viewbox.translate_x(q.ctrl.x),
+                                viewbox.translate_y(q.ctrl.y),
+                                0.5,
+                                0.0,
+                            ],
+                            [
+                                viewbox.translate_x(q.to.x),
+                                viewbox.translate_y(q.to.y),
+                                1.0,
+                                1.0,
+                            ],
+                        ]);
+
+                        // TODO: おなじ位置の頂点を出力する場合があるのでもうちょい最適化したい
+                        trifan_points
+                            .push([viewbox.translate_x(q.from.x), viewbox.translate_y(q.from.y)]);
+                        trifan_points
+                            .push([viewbox.translate_x(q.to.x), viewbox.translate_y(q.to.y)]);
+                    });
+
+                    cubic_last_control_point = Some((figure.ctrl2.x, figure.ctrl2.y));
+                    quadratic_last_control_point = None;
+                    p = (figure.to.x, figure.to.y);
+                }
+                &svg::Instruction::QuadraticBezierCurve {
+                    absolute,
+                    cx,
+                    cy,
+                    x,
+                    y,
+                } => {
+                    curve_triangle_points.extend([
+                        [viewbox.translate_x(p.0), viewbox.translate_y(p.1), 0.0, 0.0],
+                        if absolute {
+                            [viewbox.translate_x(cx), viewbox.translate_y(cy), 0.5, 0.0]
+                        } else {
+                            [
+                                viewbox.translate_x(p.0 + cx),
+                                viewbox.translate_y(p.1 + cy),
+                                0.5,
+                                0.0,
+                            ]
+                        },
+                        if absolute {
+                            [viewbox.translate_x(x), viewbox.translate_y(y), 1.0, 1.0]
+                        } else {
+                            [
+                                viewbox.translate_x(p.0 + x),
+                                viewbox.translate_y(p.1 + y),
+                                1.0,
+                                1.0,
+                            ]
+                        },
+                    ]);
+                    cubic_last_control_point = None;
+                    quadratic_last_control_point = Some(if absolute {
+                        (cx, cy)
+                    } else {
+                        (p.0 + cx, p.1 + cy)
+                    });
+                    p = if absolute { (x, y) } else { (p.0 + x, p.1 + y) };
+
+                    trifan_points.push([viewbox.translate_x(p.0), viewbox.translate_y(p.1)]);
+                }
+                &svg::Instruction::SequentialQuadraticBezierCurve { absolute, x, y } => {
+                    let (cx, cy) = if let Some((lcx, lcy)) = quadratic_last_control_point {
+                        let d = (p.0 - lcx, p.1 - lcy);
+                        (p.0 + d.0, p.1 + d.1)
+                    } else {
+                        p
+                    };
+
+                    curve_triangle_points.extend([
+                        [viewbox.translate_x(p.0), viewbox.translate_y(p.1), 0.0, 0.0],
+                        [viewbox.translate_x(cx), viewbox.translate_y(cy), 0.5, 0.0],
+                        if absolute {
+                            [viewbox.translate_x(x), viewbox.translate_y(y), 1.0, 1.0]
+                        } else {
+                            [
+                                viewbox.translate_x(p.0 + x),
+                                viewbox.translate_y(p.1 + y),
+                                1.0,
+                                1.0,
+                            ]
+                        },
+                    ]);
+                    cubic_last_control_point = None;
+                    quadratic_last_control_point = Some((cx, cy));
+                    p = if absolute { (x, y) } else { (p.0 + x, p.1 + y) };
+
+                    trifan_points.push([viewbox.translate_x(p.0), viewbox.translate_y(p.1)]);
+                }
+                &svg::Instruction::Arc {
+                    absolute,
+                    rx,
+                    ry,
+                    angle,
+                    large_arc_flag,
+                    sweep_flag,
+                    x,
+                    y,
+                } => {
+                    let figure = lyon_geom::SvgArc {
+                        from: lyon_geom::point(p.0, p.1),
+                        to: if absolute {
+                            lyon_geom::point(x, y)
+                        } else {
+                            lyon_geom::point(p.0 + x, p.1 + y)
+                        },
+                        radii: lyon_geom::vector(rx, ry),
+                        x_rotation: lyon_geom::Angle::degrees(angle),
+                        flags: lyon_geom::ArcFlags {
+                            large_arc: large_arc_flag,
+                            sweep: sweep_flag,
+                        },
+                    };
+
+                    figure.for_each_quadratic_bezier(&mut |q| {
+                        curve_triangle_points.extend([
+                            [
+                                viewbox.translate_x(q.from.x),
+                                viewbox.translate_y(q.from.y),
+                                0.0,
+                                0.0,
+                            ],
+                            [
+                                viewbox.translate_x(q.ctrl.x),
+                                viewbox.translate_y(q.ctrl.y),
+                                0.5,
+                                0.0,
+                            ],
+                            [
+                                viewbox.translate_x(q.to.x),
+                                viewbox.translate_y(q.to.y),
+                                1.0,
+                                1.0,
+                            ],
+                        ]);
+
+                        // TODO: おなじ位置の頂点を出力する場合があるのでもうちょい最適化したい
+                        trifan_points
+                            .push([viewbox.translate_x(q.from.x), viewbox.translate_y(q.from.y)]);
+                        trifan_points
+                            .push([viewbox.translate_x(q.to.x), viewbox.translate_y(q.to.y)]);
+                    });
+
+                    cubic_last_control_point = None;
+                    quadratic_last_control_point = None;
+                    p = (figure.to.x, figure.to.y);
+                }
+                &svg::Instruction::Close => {
+                    cubic_last_control_point = None;
+                    quadratic_last_control_point = None;
+                    let x = current_figure_first_index.take().unwrap();
+                    let p = (trifan_points[x][0], trifan_points[x][1]);
+                    trifan_point_ranges.push(x..trifan_points.len());
+
+                    trifan_points.push([viewbox.translate_x(p.0), viewbox.translate_y(p.1)]);
+                }
+            }
+        }
+        if let Some(x) = current_figure_first_index {
+            // unprocessed final figure
+            trifan_point_ranges.push(x..trifan_points.len());
+        }
+
+        let curve_triangle_points_offset = trifan_points.len() * core::mem::size_of::<[f32; 2]>();
+        let mut vbuf = br::BufferObject::new(
+            init.subsystem,
+            &br::BufferCreateInfo::new(
+                curve_triangle_points_offset
+                    + curve_triangle_points.len() * core::mem::size_of::<[f32; 4]>(),
+                br::BufferUsage::VERTEX_BUFFER,
+            ),
+        )
+        .unwrap();
+        let req = vbuf.requirements();
+        let memindex = init
+            .subsystem
+            .adapter_memory_info
+            .types()
+            .iter()
+            .enumerate()
+            .find(|(n, p)| {
+                (req.memoryTypeBits & (1 << n)) != 0
+                    && p.property_flags().has_all(
+                        br::MemoryPropertyFlags::DEVICE_LOCAL
+                            | br::MemoryPropertyFlags::HOST_VISIBLE,
+                    )
+            })
+            .unwrap()
+            .0 as u32;
+        let mut mem = br::DeviceMemoryObject::new(
+            init.subsystem,
+            &br::MemoryAllocateInfo::new(req.size, memindex),
+        )
+        .unwrap();
+        vbuf.bind(&mem, 0).unwrap();
+        let h = mem.native_ptr();
+        let requires_flush = !init.subsystem.adapter_memory_info.is_coherent(memindex);
+        let ptr = mem.map(0..req.size as _).unwrap();
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                trifan_points.as_ptr(),
+                ptr.addr_of_mut(0),
+                trifan_points.len(),
+            );
+            core::ptr::copy_nonoverlapping(
+                curve_triangle_points.as_ptr(),
+                ptr.addr_of_mut(curve_triangle_points_offset),
+                curve_triangle_points.len(),
+            );
+        }
+        if requires_flush {
+            unsafe {
+                init.subsystem
+                    .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(h, 0, req.size)])
+                    .unwrap();
+            }
+        }
+        unsafe {
+            mem.unmap();
+        }
+
+        let label_image_pixels =
+            label_layout.build_stg_image_pixel_buffer(&mut init.staging_scratch_buffer);
+
+        let mut cp = br::CommandPoolObject::new(
+            init.subsystem,
+            &br::CommandPoolCreateInfo::new(init.subsystem.graphics_queue_family_index).transient(),
+        )
+        .unwrap();
+        let [mut cb] = br::CommandBufferObject::alloc_array(
+            init.subsystem,
+            &br::CommandBufferFixedCountAllocateInfo::new(&mut cp, br::CommandBufferLevel::Primary),
+        )
+        .unwrap();
+        unsafe {
+            cb.begin(
+                &br::CommandBufferBeginInfo::new().onetime_submit(),
+                init.subsystem,
+            )
+            .unwrap()
+        }
+        .begin_render_pass2(
+            &br::RenderPassBeginInfo::new(
+                &round_rect_rp,
+                &round_rect_fb,
+                bg_atlas_rect.vk_rect(),
+                &[],
+            ),
+            &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+        )
+        .bind_pipeline(br::PipelineBindPoint::Graphics, &round_rect_pipeline)
+        .draw(3, 1, 0, 0)
+        .end_render_pass2(&br::SubpassEndInfo::new())
+        .begin_render_pass2(
+            &br::RenderPassBeginInfo::new(
+                &render_pass,
+                &fb,
+                icon_atlas_rect.extent().into_rect(br::Offset2D::ZERO),
+                &[
+                    br::ClearValue::color_f32([0.0; 4]),
+                    br::ClearValue::depth_stencil(1.0, 0),
+                ],
+            ),
+            &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+        )
+        .bind_pipeline(
+            br::PipelineBindPoint::Graphics,
+            &first_stencil_shape_pipeline,
+        )
+        .bind_vertex_buffer_array(0, &[vbuf.as_transparent_ref()], &[0])
+        .inject(|r| {
+            trifan_point_ranges
+                .into_iter()
+                .fold(r, |r, vr| r.draw(vr.len() as _, 1, vr.start as _, 0))
+        })
+        .bind_pipeline(
+            br::PipelineBindPoint::Graphics,
+            &curve_stencil_shape_pipeline,
+        )
+        .bind_vertex_buffer_array(
+            0,
+            &[vbuf.as_transparent_ref()],
+            &[curve_triangle_points_offset as _],
+        )
+        .draw(curve_triangle_points.len() as _, 1, 0, 0)
+        .next_subpass2(
+            &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+            &br::SubpassEndInfo::new(),
+        )
+        .bind_pipeline(br::PipelineBindPoint::Graphics, &colorize_pipeline)
+        .draw(3, 1, 0, 0)
+        .end_render_pass2(&br::SubpassEndInfo::new())
+        .pipeline_barrier_2(&br::DependencyInfo::new(
+            &[],
+            &[],
+            &[br::ImageMemoryBarrier2::new(
+                init.atlas.resource().image(),
+                br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+            )
+            .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())
+            .of_execution(br::PipelineStageFlags2(0), br::PipelineStageFlags2::RESOLVE)],
+        ))
+        .resolve_image(
+            ms_color_buffer.image(),
+            br::ImageLayout::TransferSrcOpt,
+            init.atlas.resource().image(),
+            br::ImageLayout::TransferDestOpt,
+            &[br::vk::VkImageResolve {
+                srcSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
+                srcOffset: br::Offset3D::ZERO,
+                dstSubresource: br::ImageSubresourceLayers::new(br::AspectMask::COLOR, 0, 0..1),
+                dstOffset: icon_atlas_rect.lt_offset().with_z(0),
+                extent: icon_atlas_rect.extent().with_depth(1),
+            }],
+        )
+        .inject(|r| {
+            let (b, o) = init.staging_scratch_buffer.of(&label_image_pixels);
+
+            r.copy_buffer_to_image(
+                b,
+                init.atlas.resource().image(),
+                br::ImageLayout::TransferDestOpt,
+                &[br::vk::VkBufferImageCopy {
+                    bufferOffset: o,
+                    bufferRowLength: label_layout.width_px(),
+                    bufferImageHeight: label_layout.height_px(),
+                    imageSubresource: br::ImageSubresourceLayers::new(
+                        br::AspectMask::COLOR,
+                        0,
+                        0..1,
+                    ),
+                    imageOffset: label_atlas_rect.lt_offset().with_z(0),
+                    imageExtent: label_atlas_rect.extent().with_depth(1),
+                }],
+            )
+        })
+        .pipeline_barrier_2(&br::DependencyInfo::new(
+            &[],
+            &[],
+            &[br::ImageMemoryBarrier2::new(
+                init.atlas.resource().image(),
+                br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+            )
+            .transit_from(br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt))
+            .of_memory(
+                br::AccessFlags2::TRANSFER.write,
+                br::AccessFlags2::SHADER.read,
+            )
+            .of_execution(
+                br::PipelineStageFlags2::RESOLVE,
+                br::PipelineStageFlags2::FRAGMENT_SHADER,
+            )],
+        ))
+        .end()
+        .unwrap();
+        init.subsystem
+            .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&cb)])
+            .unwrap();
+
+        let ct_root = init.composite_tree.register(CompositeRect {
+            offset: [left * init.ui_scale_factor, top * init.ui_scale_factor],
+            size: [
+                (Self::ICON_SIZE + Self::ICON_LABEL_GAP + Self::HPADDING * 2.0)
+                    * init.ui_scale_factor
+                    + label_layout.width(),
+                Self::BUTTON_HEIGHT * init.ui_scale_factor,
+            ],
+            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            texatlas_rect: bg_atlas_rect,
+            slice_borders: [Self::BUTTON_HEIGHT * 0.5 * init.ui_scale_factor; 4],
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value(Self::BG_COLOR_HIDDEN)),
+            ..Default::default()
+        });
+        let ct_icon = init.composite_tree.register(CompositeRect {
+            size: [
+                Self::ICON_SIZE * init.ui_scale_factor,
+                Self::ICON_SIZE * init.ui_scale_factor,
+            ],
+            offset: [
+                Self::HPADDING * init.ui_scale_factor,
+                -Self::ICON_SIZE * 0.5 * init.ui_scale_factor,
+            ],
+            relative_offset_adjustment: [0.0, 0.5],
+            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            texatlas_rect: icon_atlas_rect,
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value(
+                Self::CONTENT_COLOR_HIDDEN,
+            )),
+            ..Default::default()
+        });
+        let ct_label = init.composite_tree.register(CompositeRect {
+            size: [label_layout.width(), label_layout.height()],
+            offset: [
+                (Self::HPADDING + Self::ICON_SIZE + Self::ICON_LABEL_GAP) * init.ui_scale_factor,
+                -label_layout.height() * 0.5,
+            ],
+            relative_offset_adjustment: [0.0, 0.5],
+            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            texatlas_rect: label_atlas_rect,
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value(
+                Self::CONTENT_COLOR_HIDDEN,
+            )),
+            ..Default::default()
+        });
+
+        init.composite_tree.add_child(ct_root, ct_icon);
+        init.composite_tree.add_child(ct_root, ct_label);
+
+        let ht_root = init.ht.create(HitTestTreeData {
+            left,
+            top,
+            ..Default::default()
+        });
+
+        Self {
+            ct_root,
+            ct_icon,
+            ct_label,
+            ht_root,
+            left,
+            top,
+            ui_scale_factor: init.ui_scale_factor,
+        }
+    }
+
+    pub fn mount(
+        &self,
+        ct_parent: CompositeTreeRef,
+        ct: &mut CompositeTree,
+        ht_parent: HitTestTreeRef,
+        ht: &mut HitTestTreeManager<AppUpdateContext<'_>>,
+    ) {
+        ct.add_child(ct_parent, self.ct_root);
+        ht.add_child(ht_parent, self.ht_root);
+    }
+
+    pub fn show(&self, ct: &mut CompositeTree, current_sec: f32) {
+        ct.get_mut(self.ct_root).composite_mode =
+            CompositeMode::ColorTint(AnimatableColor::Animated(
+                Self::BG_COLOR_HIDDEN,
+                AnimationData {
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.25,
+                    to_value: Self::BG_COLOR_SHOWN,
+                    curve_p1: (0.5, 0.5),
+                    curve_p2: (0.5, 0.5),
+                },
+            ));
+        ct.get_mut(self.ct_icon).composite_mode =
+            CompositeMode::ColorTint(AnimatableColor::Animated(
+                Self::CONTENT_COLOR_HIDDEN,
+                AnimationData {
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.25,
+                    to_value: Self::CONTENT_COLOR_SHOWN,
+                    curve_p1: (0.5, 0.5),
+                    curve_p2: (0.5, 0.5),
+                },
+            ));
+        ct.get_mut(self.ct_label).composite_mode =
+            CompositeMode::ColorTint(AnimatableColor::Animated(
+                Self::CONTENT_COLOR_HIDDEN,
+                AnimationData {
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.25,
+                    to_value: Self::CONTENT_COLOR_SHOWN,
+                    curve_p1: (0.5, 0.5),
+                    curve_p2: (0.5, 0.5),
+                },
+            ));
+        // TODO: ここでui_scale_factor適用するとui_scale_factorがかわったときにアニメーションが破綻するので別のところにおいたほうがよさそう(CompositeTreeで位置計算するときに適用する)
+        ct.get_mut(self.ct_root).offset[0] = (self.left + 8.0) * self.ui_scale_factor;
+        ct.get_mut(self.ct_root).animation_data_left = Some(AnimationData {
+            start_sec: current_sec,
+            end_sec: current_sec + 0.25,
+            to_value: self.left * self.ui_scale_factor,
+            curve_p1: (0.5, 0.5),
+            curve_p2: (0.5, 1.0),
+        });
+        ct.mark_dirty(self.ct_root);
+        ct.mark_dirty(self.ct_icon);
+        ct.mark_dirty(self.ct_label);
+    }
+
+    pub fn hide(&self, ct: &mut CompositeTree, current_sec: f32) {
+        ct.get_mut(self.ct_root).composite_mode =
+            CompositeMode::ColorTint(AnimatableColor::Animated(
+                Self::BG_COLOR_SHOWN,
+                AnimationData {
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.25,
+                    to_value: Self::BG_COLOR_HIDDEN,
+                    curve_p1: (0.5, 0.5),
+                    curve_p2: (0.5, 0.5),
+                },
+            ));
+        ct.get_mut(self.ct_icon).composite_mode =
+            CompositeMode::ColorTint(AnimatableColor::Animated(
+                Self::CONTENT_COLOR_SHOWN,
+                AnimationData {
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.25,
+                    to_value: Self::CONTENT_COLOR_HIDDEN,
+                    curve_p1: (0.5, 0.5),
+                    curve_p2: (0.5, 0.5),
+                },
+            ));
+        ct.get_mut(self.ct_label).composite_mode =
+            CompositeMode::ColorTint(AnimatableColor::Animated(
+                Self::CONTENT_COLOR_SHOWN,
+                AnimationData {
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.25,
+                    to_value: Self::CONTENT_COLOR_HIDDEN,
+                    curve_p1: (0.5, 0.5),
+                    curve_p2: (0.5, 0.5),
+                },
+            ));
+        ct.mark_dirty(self.ct_root);
+        ct.mark_dirty(self.ct_icon);
+        ct.mark_dirty(self.ct_label);
+    }
+}
+
+struct AppMenuBaseView {
+    ct_root: CompositeTreeRef,
+    ht_root: HitTestTreeRef,
+}
+impl AppMenuBaseView {
+    pub fn new(init: &mut ViewInitContext) -> Self {
+        let ct_root = init.composite_tree.register(CompositeRect {
+            relative_size_adjustment: [1.0, 1.0],
+            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            composite_mode: CompositeMode::FillColor(AnimatableColor::Value([0.0, 0.0, 0.0, 0.0])),
+            ..Default::default()
+        });
+
+        let ht_root = init.ht.create(HitTestTreeData {
+            width_adjustment_factor: 1.0,
+            height_adjustment_factor: 1.0,
+            ..Default::default()
+        });
+
+        Self { ct_root, ht_root }
+    }
+
+    pub fn mount(
+        &self,
+        ct_parent: CompositeTreeRef,
+        ct: &mut CompositeTree,
+        ht_parent: HitTestTreeRef,
+        ht: &mut HitTestTreeManager<AppUpdateContext<'_>>,
+    ) {
+        ct.add_child(ct_parent, self.ct_root);
+        ht.add_child(ht_parent, self.ht_root);
+    }
+
+    pub fn show(&self, ct: &mut CompositeTree, current_sec: f32) {
+        ct.get_mut(self.ct_root).composite_mode =
+            CompositeMode::FillColor(AnimatableColor::Animated(
+                [0.0, 0.0, 0.0, 0.0],
+                AnimationData {
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.25,
+                    to_value: [0.0, 0.0, 0.0, 0.25],
+                    curve_p1: (0.5, 0.5),
+                    curve_p2: (0.5, 0.5),
+                },
+            ));
+        ct.mark_dirty(self.ct_root);
+    }
+
+    pub fn hide(&self, ct: &mut CompositeTree, current_sec: f32) {
+        ct.get_mut(self.ct_root).composite_mode =
+            CompositeMode::FillColor(AnimatableColor::Animated(
+                [0.0, 0.0, 0.0, 0.25],
+                AnimationData {
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.25,
+                    to_value: [0.0, 0.0, 0.0, 0.0],
+                    curve_p1: (0.5, 0.5),
+                    curve_p2: (0.5, 0.5),
+                },
+            ));
+        ct.mark_dirty(self.ct_root);
+    }
+}
+
+struct AppMenuActionHandler {
+    base_view: Rc<AppMenuBaseView>,
+    shown: Cell<bool>,
+}
+impl<'c> HitTestTreeActionHandler<'c> for AppMenuActionHandler {
+    type Context = AppUpdateContext<'c>;
+
+    fn hit_active(&self, sender: HitTestTreeRef, context: &Self::Context) -> bool {
+        self.shown.get()
+    }
+
+    fn on_pointer_enter(
+        &self,
+        sender: HitTestTreeRef,
+        _context: &mut Self::Context,
+        _ht: &mut HitTestTreeManager<Self::Context>,
+        _args: hittest::PointerActionArgs,
+    ) -> EventContinueControl {
+        if sender == self.base_view.ht_root {
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_pointer_leave(
+        &self,
+        sender: HitTestTreeRef,
+        _context: &mut Self::Context,
+        _ht: &mut HitTestTreeManager<Self::Context>,
+        _args: hittest::PointerActionArgs,
+    ) -> EventContinueControl {
+        if sender == self.base_view.ht_root {
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_pointer_down(
+        &self,
+        sender: HitTestTreeRef,
+        context: &mut Self::Context,
+        ht: &mut HitTestTreeManager<Self::Context>,
+        _args: hittest::PointerActionArgs,
+    ) -> EventContinueControl {
+        if sender == self.base_view.ht_root {
+            context
+                .state
+                .toggle_menu(&mut context.for_view_feedback, ht);
+
+            return EventContinueControl::STOP_PROPAGATION
+                | EventContinueControl::RECOMPUTE_POINTER_ENTER;
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_pointer_move(
+        &self,
+        sender: HitTestTreeRef,
+        _context: &mut Self::Context,
+        _ht: &mut HitTestTreeManager<Self::Context>,
+        _args: hittest::PointerActionArgs,
+    ) -> EventContinueControl {
+        if sender == self.base_view.ht_root {
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_pointer_up(
+        &self,
+        sender: HitTestTreeRef,
+        _context: &mut Self::Context,
+        _ht: &mut HitTestTreeManager<Self::Context>,
+        _args: hittest::PointerActionArgs,
+    ) -> EventContinueControl {
+        if sender == self.base_view.ht_root {
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_click(
+        &self,
+        sender: HitTestTreeRef,
+        _context: &mut Self::Context,
+        _ht: &mut HitTestTreeManager<Self::Context>,
+        _args: hittest::PointerActionArgs,
+    ) -> EventContinueControl {
+        if sender == self.base_view.ht_root {
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        EventContinueControl::empty()
+    }
+}
+
+pub struct AppMenuPresenter {
+    base_view: Rc<AppMenuBaseView>,
+    _action_handler: Rc<AppMenuActionHandler>,
+}
+impl AppMenuPresenter {
+    pub fn new(init: &mut PresenterInitContext, header_height: f32) -> Self {
+        let base_view = Rc::new(AppMenuBaseView::new(&mut init.for_view));
+        let add_button = AppMenuButtonView::new(
+            &mut init.for_view,
+            "Add Sprite",
+            "resources/icons/add.svg",
+            64.0,
+            header_height + 32.0,
+        );
+        let save_button = AppMenuButtonView::new(
+            &mut init.for_view,
+            "Save",
+            "resources/icons/save.svg",
+            64.0,
+            header_height + 32.0 + AppMenuButtonView::BUTTON_HEIGHT + 16.0,
+        );
+
+        add_button.mount(
+            base_view.ct_root,
+            init.for_view.composite_tree,
+            base_view.ht_root,
+            init.for_view.ht,
+        );
+        save_button.mount(
+            base_view.ct_root,
+            init.for_view.composite_tree,
+            base_view.ht_root,
+            init.for_view.ht,
+        );
+
+        let action_handler = Rc::new(AppMenuActionHandler {
+            base_view: base_view.clone(),
+            shown: Cell::new(false),
+        });
+
+        init.app_state.register_visible_menu_view_feedback({
+            let base_view = Rc::downgrade(&base_view);
+            let action_handler = Rc::downgrade(&action_handler);
+
+            move |update_context, _, visible, _| {
+                let Some(base_view) = base_view.upgrade() else {
+                    // app teardown-ed
+                    return;
+                };
+                let Some(action_handler) = action_handler.upgrade() else {
+                    // app teardown-ed
+                    return;
+                };
+
+                if visible {
+                    base_view.show(
+                        &mut update_context.composite_tree,
+                        update_context.current_sec,
+                    );
+                    add_button.show(
+                        &mut update_context.composite_tree,
+                        update_context.current_sec,
+                    );
+                    save_button.show(
+                        &mut update_context.composite_tree,
+                        update_context.current_sec + 0.05,
+                    );
+                } else {
+                    base_view.hide(
+                        &mut update_context.composite_tree,
+                        update_context.current_sec,
+                    );
+                    add_button.hide(
+                        &mut update_context.composite_tree,
+                        update_context.current_sec,
+                    );
+                    save_button.hide(
+                        &mut update_context.composite_tree,
+                        update_context.current_sec,
+                    );
+                }
+
+                action_handler.shown.set(visible);
+            }
+        });
+        init.for_view
+            .ht
+            .get_data_mut(base_view.ht_root)
+            .action_handler = Some(Rc::downgrade(&action_handler) as _);
+
+        Self {
+            base_view,
+            _action_handler: action_handler,
+        }
+    }
+
+    pub fn mount(
+        &self,
+        ct_parent: CompositeTreeRef,
+        ct: &mut CompositeTree,
+        ht_parent: HitTestTreeRef,
+        ht: &mut HitTestTreeManager<AppUpdateContext<'_>>,
+    ) {
+        self.base_view.mount(ct_parent, ct, ht_parent, ht);
+    }
 }
 
 struct HitTestRootTreeActionHandler {
@@ -2853,27 +4755,46 @@ fn main() {
         }
     });
 
-    let mut init_context = ViewInitContext {
-        subsystem: &subsystem,
-        staging_scratch_buffer: &mut staging_scratch_buffer,
-        atlas: &mut composition_alphamask_surface_atlas,
-        ui_scale_factor: app_shell.ui_scale_factor(),
-        fonts: &mut font_set,
-        composite_tree: &mut composite_tree,
-        composite_instance_manager: &mut composite_instance_buffer,
-        ht: &mut ht_manager,
+    let mut init_context = PresenterInitContext {
+        for_view: ViewInitContext {
+            subsystem: &subsystem,
+            staging_scratch_buffer: &mut staging_scratch_buffer,
+            atlas: &mut composition_alphamask_surface_atlas,
+            ui_scale_factor: app_shell.ui_scale_factor(),
+            fonts: &mut font_set,
+            composite_tree: &mut composite_tree,
+            composite_instance_manager: &mut composite_instance_buffer,
+            ht: &mut ht_manager,
+        },
+        app_state: &mut app_state,
     };
 
     let app_header = AppHeaderPresenter::new(&mut init_context);
-    app_header.mount(CompositeTree::ROOT, init_context.composite_tree);
-
     let sprite_list_pane = SpriteListPanePresenter::new(&mut init_context, app_header.height());
+    let app_menu = AppMenuPresenter::new(&mut init_context, app_header.height());
+
     sprite_list_pane.mount(
         &mut composite_tree,
         CompositeTree::ROOT,
         &mut ht_manager,
         ht_root,
     );
+    app_menu.mount(
+        CompositeTree::ROOT,
+        &mut composite_tree,
+        ht_root,
+        &mut ht_manager,
+    );
+    app_header.mount(
+        CompositeTree::ROOT,
+        &mut composite_tree,
+        ht_root,
+        &mut ht_manager,
+    );
+
+    editing_atlas_renderer
+        .borrow_mut()
+        .set_offset(0.0, app_header.height() * app_shell.ui_scale_factor());
 
     println!(
         "Reserved Staging Buffers during UI initialization: {}",
@@ -3077,10 +4998,12 @@ fn main() {
         .unwrap();
 
     let mut app_update_context = AppUpdateContext {
-        composite_tree,
+        for_view_feedback: ViewFeedbackContext {
+            composite_tree,
+            current_sec: 0.0,
+        },
         state: app_state,
         editing_atlas_renderer,
-        current_sec: 0.0,
     };
 
     app_shell.flush();
@@ -3109,7 +5032,10 @@ fn main() {
                         last_rendering = false;
                     }
 
-                    if app_update_context.composite_tree.take_dirty()
+                    if app_update_context
+                        .for_view_feedback
+                        .composite_tree
+                        .take_dirty()
                         || last_render_scale != app_shell.ui_scale_factor()
                         || last_render_size != sc_size
                         || true
@@ -3123,14 +5049,17 @@ fn main() {
                             .map(r.clone())
                             .unwrap();
                         composite_instance_count = unsafe {
-                            app_update_context.composite_tree.sink_all(
-                                sc_size,
-                                current_t.as_secs_f32(),
-                                br::Extent2D::spread1(
-                                    composition_alphamask_surface_atlas.size() as _
-                                ),
-                                &ptr,
-                            )
+                            app_update_context
+                                .for_view_feedback
+                                .composite_tree
+                                .sink_all(
+                                    sc_size,
+                                    current_t.as_secs_f32(),
+                                    br::Extent2D::spread1(
+                                        composition_alphamask_surface_atlas.size() as _,
+                                    ),
+                                    &ptr,
+                                )
                         };
                         if flush_required {
                             unsafe {
@@ -3549,7 +5478,7 @@ fn main() {
                     surface_x,
                     surface_y,
                 } => {
-                    app_update_context.current_sec = t.elapsed().as_secs_f32();
+                    app_update_context.for_view_feedback.current_sec = t.elapsed().as_secs_f32();
                     let (cw, ch) = client_size.get();
                     pointer_input_manager.handle_mouse_move(
                         surface_x,
@@ -3569,7 +5498,7 @@ fn main() {
                     last_pointer_pos = (surface_x, surface_y);
                 }
                 AppEvent::MainWindowPointerLeftDown { enter_serial } => {
-                    app_update_context.current_sec = t.elapsed().as_secs_f32();
+                    app_update_context.for_view_feedback.current_sec = t.elapsed().as_secs_f32();
                     let (cw, ch) = client_size.get();
                     pointer_input_manager.handle_mouse_left_down(
                         last_pointer_pos.0,
@@ -3588,7 +5517,7 @@ fn main() {
                     );
                 }
                 AppEvent::MainWindowPointerLeftUp { enter_serial } => {
-                    app_update_context.current_sec = t.elapsed().as_secs_f32();
+                    app_update_context.for_view_feedback.current_sec = t.elapsed().as_secs_f32();
                     let (cw, ch) = client_size.get();
                     pointer_input_manager.handle_mouse_left_up(
                         last_pointer_pos.0,

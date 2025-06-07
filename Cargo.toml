@@ -17,3 +17,5 @@ fontconfig = { git = "https://github.com/Pctg-x8/fc-rs", features = [
 bitflags = "2.9.0"
 uuid = { version = "1.17.0", features = ["v4"] }
 thiserror = "2.0.12"
+quick-xml = "0.37.5"
+lyon_geom = "1.0.6"

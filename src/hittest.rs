@@ -250,8 +250,9 @@ impl<'c, ActionContext> HitTestTreeManager<'c, ActionContext> {
             && global_x <= global_right
             && global_top <= global_y
             && global_y <= global_bottom
+            && d.action_handler.is_some()
         {
-            // 自分にヒット
+            // 自分にヒット ただしaction handlerが設定されていない場合は透過とみなす(うしろにあるHitTestTreeにあたってほしいため)
             return Some(root);
         }
 

@@ -224,19 +224,8 @@ impl SpriteListToggleButtonView {
         let mreq = buf.requirements();
         let memindex = init
             .subsystem
-            .adapter_memory_info
-            .types()
-            .iter()
-            .enumerate()
-            .find(|(n, t)| {
-                (mreq.memoryTypeBits & (1 << n)) != 0
-                    && t.property_flags().has_all(
-                        br::MemoryPropertyFlags::DEVICE_LOCAL
-                            | br::MemoryPropertyFlags::HOST_VISIBLE,
-                    )
-            })
-            .expect("no suitable memory")
-            .0 as u32;
+            .find_direct_memory_index(mreq.memoryTypeBits)
+            .expect("no suitable memory");
         let mut mem = br::DeviceMemoryObject::new(
             &init.subsystem,
             &br::MemoryAllocateInfo::new(mreq.size, memindex),
@@ -257,7 +246,7 @@ impl SpriteListToggleButtonView {
                 Self::ICON_INDICES.len(),
             );
         }
-        if !init.subsystem.adapter_memory_info.is_coherent(memindex) {
+        if !init.subsystem.is_coherent_memory_type(memindex) {
             unsafe {
                 init.subsystem
                     .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(
@@ -404,64 +393,60 @@ impl SpriteListToggleButtonView {
         }
         let [pipeline, pipeline_circle] = init
             .subsystem
-            .new_graphics_pipeline_array(
-                &[
-                    br::GraphicsPipelineCreateInfo::new(
-                        &pl,
-                        rp.subpass(0),
-                        &[
-                            vsh.on_stage(br::ShaderStage::Vertex, c"main"),
-                            fsh.on_stage(br::ShaderStage::Fragment, c"main")
-                                .with_specialization_info(&br::SpecializationInfo::new(
-                                    &FillcolorRConstants { r: 1.0 },
-                                )),
-                        ],
-                        VI_STATE_FLOAT2_ONLY,
-                        IA_STATE_TRILIST,
-                        &br::PipelineViewportStateCreateInfo::new(
-                            &[icon_atlas_rect
-                                .extent()
-                                .into_rect(br::Offset2D::ZERO)
-                                .make_viewport(0.0..1.0)],
-                            &[icon_atlas_rect.extent().into_rect(br::Offset2D::ZERO)],
-                        ),
-                        RASTER_STATE_DEFAULT_FILL_NOCULL,
-                        BLEND_STATE_SINGLE_NONE,
-                    )
-                    .multisample_state(
-                        &br::PipelineMultisampleStateCreateInfo::new().rasterization_samples(4),
+            .create_graphics_pipelines_array(&[
+                br::GraphicsPipelineCreateInfo::new(
+                    &pl,
+                    rp.subpass(0),
+                    &[
+                        vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+                        fsh.on_stage(br::ShaderStage::Fragment, c"main")
+                            .with_specialization_info(&br::SpecializationInfo::new(
+                                &FillcolorRConstants { r: 1.0 },
+                            )),
+                    ],
+                    VI_STATE_FLOAT2_ONLY,
+                    IA_STATE_TRILIST,
+                    &br::PipelineViewportStateCreateInfo::new(
+                        &[icon_atlas_rect
+                            .extent()
+                            .into_rect(br::Offset2D::ZERO)
+                            .make_viewport(0.0..1.0)],
+                        &[icon_atlas_rect.extent().into_rect(br::Offset2D::ZERO)],
                     ),
-                    br::GraphicsPipelineCreateInfo::new(
-                        &pl,
-                        rp_direct.subpass(0),
-                        &[
-                            vsh_circle.on_stage(br::ShaderStage::Vertex, c"main"),
-                            fsh_circle
-                                .on_stage(br::ShaderStage::Fragment, c"main")
-                                .with_specialization_info(&br::SpecializationInfo::new(
-                                    &CircleFragmentShaderParams { softness: 0.0 },
-                                )),
-                        ],
-                        &VI_STATE_EMPTY,
-                        &IA_STATE_TRILIST,
-                        &br::PipelineViewportStateCreateInfo::new(
-                            &[circle_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
-                            &[circle_atlas_rect.vk_rect()],
-                        ),
-                        &RASTER_STATE_DEFAULT_FILL_NOCULL,
-                        &BLEND_STATE_SINGLE_NONE,
-                    )
-                    .multisample_state(&MS_STATE_EMPTY),
-                ],
-                None::<&br::PipelineCacheObject<&br::DeviceObject<&br::InstanceObject>>>,
-            )
+                    RASTER_STATE_DEFAULT_FILL_NOCULL,
+                    BLEND_STATE_SINGLE_NONE,
+                )
+                .multisample_state(
+                    &br::PipelineMultisampleStateCreateInfo::new().rasterization_samples(4),
+                ),
+                br::GraphicsPipelineCreateInfo::new(
+                    &pl,
+                    rp_direct.subpass(0),
+                    &[
+                        vsh_circle.on_stage(br::ShaderStage::Vertex, c"main"),
+                        fsh_circle
+                            .on_stage(br::ShaderStage::Fragment, c"main")
+                            .with_specialization_info(&br::SpecializationInfo::new(
+                                &CircleFragmentShaderParams { softness: 0.0 },
+                            )),
+                    ],
+                    &VI_STATE_EMPTY,
+                    &IA_STATE_TRILIST,
+                    &br::PipelineViewportStateCreateInfo::new(
+                        &[circle_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
+                        &[circle_atlas_rect.vk_rect()],
+                    ),
+                    &RASTER_STATE_DEFAULT_FILL_NOCULL,
+                    &BLEND_STATE_SINGLE_NONE,
+                )
+                .multisample_state(&MS_STATE_EMPTY),
+            ])
             .unwrap();
 
-        let mut cp = br::CommandPoolObject::new(
-            &init.subsystem,
-            &br::CommandPoolCreateInfo::new(init.subsystem.graphics_queue_family_index).transient(),
-        )
-        .unwrap();
+        let mut cp = init
+            .subsystem
+            .create_transient_graphics_command_pool()
+            .unwrap();
         let [mut cb] = br::CommandBufferObject::alloc_array(
             &init.subsystem,
             &br::CommandBufferFixedCountAllocateInfo::new(&mut cp, br::CommandBufferLevel::Primary),
@@ -809,26 +794,23 @@ impl SpriteListCellView {
         .unwrap();
         let [pipeline] = init
             .subsystem
-            .new_graphics_pipeline_array(
-                &[br::GraphicsPipelineCreateInfo::new(
-                    &pipeline_layout,
-                    render_pass.subpass(0),
-                    &[
-                        br::PipelineShaderStage::new(br::ShaderStage::Vertex, &vsh, c"main"),
-                        br::PipelineShaderStage::new(br::ShaderStage::Fragment, &fsh, c"main"),
-                    ],
-                    VI_STATE_EMPTY,
-                    IA_STATE_TRILIST,
-                    &br::PipelineViewportStateCreateInfo::new(
-                        &[bg_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
-                        &[bg_atlas_rect.vk_rect()],
-                    ),
-                    RASTER_STATE_DEFAULT_FILL_NOCULL,
-                    BLEND_STATE_SINGLE_NONE,
-                )
-                .multisample_state(MS_STATE_EMPTY)],
-                None::<&br::PipelineCacheObject<&br::DeviceObject<&br::InstanceObject>>>,
+            .create_graphics_pipelines_array(&[br::GraphicsPipelineCreateInfo::new(
+                &pipeline_layout,
+                render_pass.subpass(0),
+                &[
+                    br::PipelineShaderStage::new(br::ShaderStage::Vertex, &vsh, c"main"),
+                    br::PipelineShaderStage::new(br::ShaderStage::Fragment, &fsh, c"main"),
+                ],
+                VI_STATE_EMPTY,
+                IA_STATE_TRILIST,
+                &br::PipelineViewportStateCreateInfo::new(
+                    &[bg_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
+                    &[bg_atlas_rect.vk_rect()],
+                ),
+                RASTER_STATE_DEFAULT_FILL_NOCULL,
+                BLEND_STATE_SINGLE_NONE,
             )
+            .multisample_state(MS_STATE_EMPTY)])
             .unwrap();
 
         let mut cp = br::CommandPoolObject::new(
@@ -1183,79 +1165,76 @@ impl SpriteListPaneView {
         .unwrap();
         let [pipeline, pipeline_blur1, pipeline_blur] = init
             .subsystem
-            .new_graphics_pipeline_array(
-                &[
-                    br::GraphicsPipelineCreateInfo::new(
-                        &pipeline_layout,
-                        render_pass.subpass(0),
-                        &[
-                            br::PipelineShaderStage::new(br::ShaderStage::Vertex, &vsh, c"main"),
-                            br::PipelineShaderStage::new(br::ShaderStage::Fragment, &fsh, c"main"),
-                        ],
-                        VI_STATE_EMPTY,
-                        IA_STATE_TRILIST,
-                        &br::PipelineViewportStateCreateInfo::new(
-                            &[frame_image_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
-                            &[frame_image_atlas_rect.vk_rect()],
-                        ),
-                        RASTER_STATE_DEFAULT_FILL_NOCULL,
-                        BLEND_STATE_SINGLE_NONE,
-                    )
-                    .multisample_state(MS_STATE_EMPTY),
-                    br::GraphicsPipelineCreateInfo::new(
-                        &blur_pipeline_layout,
-                        render_pass.subpass(0),
-                        &[
-                            vsh_blur.on_stage(br::ShaderStage::Vertex, c"main"),
-                            fsh_blur
-                                .on_stage(br::ShaderStage::Fragment, c"main")
-                                .with_specialization_info(&br::SpecializationInfo::new(
-                                    &ConvolutionFragmentShaderParams {
-                                        max_count: title_blur_pixels,
-                                    },
-                                )),
-                        ],
-                        VI_STATE_EMPTY,
-                        IA_STATE_TRILIST,
-                        &br::PipelineViewportStateCreateInfo::new(
-                            &[title_blurred_atlas_rect
-                                .extent()
-                                .into_rect(br::Offset2D::ZERO)
-                                .make_viewport(0.0..1.0)],
-                            &[title_blurred_atlas_rect
-                                .extent()
-                                .into_rect(br::Offset2D::ZERO)],
-                        ),
-                        RASTER_STATE_DEFAULT_FILL_NOCULL,
-                        BLEND_STATE_SINGLE_NONE,
-                    )
-                    .multisample_state(MS_STATE_EMPTY),
-                    br::GraphicsPipelineCreateInfo::new(
-                        &blur_pipeline_layout,
-                        render_pass.subpass(0),
-                        &[
-                            vsh_blur.on_stage(br::ShaderStage::Vertex, c"main"),
-                            fsh_blur
-                                .on_stage(br::ShaderStage::Fragment, c"main")
-                                .with_specialization_info(&br::SpecializationInfo::new(
-                                    &ConvolutionFragmentShaderParams {
-                                        max_count: title_blur_pixels,
-                                    },
-                                )),
-                        ],
-                        VI_STATE_EMPTY,
-                        IA_STATE_TRILIST,
-                        &br::PipelineViewportStateCreateInfo::new(
-                            &[title_blurred_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
-                            &[title_blurred_atlas_rect.vk_rect()],
-                        ),
-                        RASTER_STATE_DEFAULT_FILL_NOCULL,
-                        BLEND_STATE_SINGLE_NONE,
-                    )
-                    .multisample_state(MS_STATE_EMPTY),
-                ],
-                None::<&br::PipelineCacheObject<&br::DeviceObject<&br::InstanceObject>>>,
-            )
+            .create_graphics_pipelines_array(&[
+                br::GraphicsPipelineCreateInfo::new(
+                    &pipeline_layout,
+                    render_pass.subpass(0),
+                    &[
+                        br::PipelineShaderStage::new(br::ShaderStage::Vertex, &vsh, c"main"),
+                        br::PipelineShaderStage::new(br::ShaderStage::Fragment, &fsh, c"main"),
+                    ],
+                    VI_STATE_EMPTY,
+                    IA_STATE_TRILIST,
+                    &br::PipelineViewportStateCreateInfo::new(
+                        &[frame_image_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
+                        &[frame_image_atlas_rect.vk_rect()],
+                    ),
+                    RASTER_STATE_DEFAULT_FILL_NOCULL,
+                    BLEND_STATE_SINGLE_NONE,
+                )
+                .multisample_state(MS_STATE_EMPTY),
+                br::GraphicsPipelineCreateInfo::new(
+                    &blur_pipeline_layout,
+                    render_pass.subpass(0),
+                    &[
+                        vsh_blur.on_stage(br::ShaderStage::Vertex, c"main"),
+                        fsh_blur
+                            .on_stage(br::ShaderStage::Fragment, c"main")
+                            .with_specialization_info(&br::SpecializationInfo::new(
+                                &ConvolutionFragmentShaderParams {
+                                    max_count: title_blur_pixels,
+                                },
+                            )),
+                    ],
+                    VI_STATE_EMPTY,
+                    IA_STATE_TRILIST,
+                    &br::PipelineViewportStateCreateInfo::new(
+                        &[title_blurred_atlas_rect
+                            .extent()
+                            .into_rect(br::Offset2D::ZERO)
+                            .make_viewport(0.0..1.0)],
+                        &[title_blurred_atlas_rect
+                            .extent()
+                            .into_rect(br::Offset2D::ZERO)],
+                    ),
+                    RASTER_STATE_DEFAULT_FILL_NOCULL,
+                    BLEND_STATE_SINGLE_NONE,
+                )
+                .multisample_state(MS_STATE_EMPTY),
+                br::GraphicsPipelineCreateInfo::new(
+                    &blur_pipeline_layout,
+                    render_pass.subpass(0),
+                    &[
+                        vsh_blur.on_stage(br::ShaderStage::Vertex, c"main"),
+                        fsh_blur
+                            .on_stage(br::ShaderStage::Fragment, c"main")
+                            .with_specialization_info(&br::SpecializationInfo::new(
+                                &ConvolutionFragmentShaderParams {
+                                    max_count: title_blur_pixels,
+                                },
+                            )),
+                    ],
+                    VI_STATE_EMPTY,
+                    IA_STATE_TRILIST,
+                    &br::PipelineViewportStateCreateInfo::new(
+                        &[title_blurred_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
+                        &[title_blurred_atlas_rect.vk_rect()],
+                    ),
+                    RASTER_STATE_DEFAULT_FILL_NOCULL,
+                    BLEND_STATE_SINGLE_NONE,
+                )
+                .multisample_state(MS_STATE_EMPTY),
+            ])
             .unwrap();
 
         fn gauss_distrib(x: f32, p: f32) -> f32 {
@@ -1288,11 +1267,10 @@ impl SpriteListPaneView {
             fsh_v_params[n + 6] /= t;
         }
 
-        let mut cp = br::CommandPoolObject::new(
-            &init.subsystem,
-            &br::CommandPoolCreateInfo::new(init.subsystem.graphics_queue_family_index).transient(),
-        )
-        .unwrap();
+        let mut cp = init
+            .subsystem
+            .create_transient_graphics_command_pool()
+            .unwrap();
         let [mut cb] = br::CommandBufferObject::alloc_array(
             &init.subsystem,
             &br::CommandBufferFixedCountAllocateInfo::new(&mut cp, br::CommandBufferLevel::Primary),
@@ -1465,12 +1443,7 @@ impl SpriteListPaneView {
             relative_size_adjustment: [0.0, 1.0],
             instance_slot_index: Some(init.composite_instance_manager.alloc()),
             texatlas_rect: frame_image_atlas_rect.clone(),
-            slice_borders: [
-                Self::CORNER_RADIUS * init.ui_scale_factor,
-                Self::CORNER_RADIUS * init.ui_scale_factor,
-                Self::CORNER_RADIUS * init.ui_scale_factor,
-                Self::CORNER_RADIUS * init.ui_scale_factor,
-            ],
+            slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 0.5])),
             ..Default::default()
         });
@@ -1523,6 +1496,7 @@ impl SpriteListPaneView {
             height_adjustment_factor: 1.0,
             ..Default::default()
         });
+
         init.ht.add_child(ht_frame, ht_resize_area);
 
         Self {
@@ -2193,124 +2167,121 @@ impl AppMenuButtonView {
             colorize_pipeline,
         ] = init
             .subsystem
-            .new_graphics_pipeline_array(
-                &[
-                    br::GraphicsPipelineCreateInfo::new(
-                        &empty_pipeline_layout,
-                        round_rect_rp.subpass(0),
-                        &[
-                            round_rect_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
-                            round_rect_fsh
-                                .on_stage(br::ShaderStage::Fragment, c"main")
-                                .with_specialization_info(&br::SpecializationInfo::new(
-                                    &RoundedRectConstants {
-                                        corner_radius: Self::BUTTON_HEIGHT * 0.5,
-                                    },
-                                )),
-                        ],
-                        VI_STATE_EMPTY,
-                        IA_STATE_TRILIST,
-                        &br::PipelineViewportStateCreateInfo::new_array(
-                            &[bg_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
-                            &[bg_atlas_rect.vk_rect()],
-                        ),
-                        RASTER_STATE_DEFAULT_FILL_NOCULL,
-                        BLEND_STATE_SINGLE_NONE,
-                    )
-                    .multisample_state(MS_STATE_EMPTY),
-                    br::GraphicsPipelineCreateInfo::new(
-                        &empty_pipeline_layout,
-                        render_pass.subpass(0),
-                        &[
-                            first_stencil_shape_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
-                            first_stencil_shape_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
-                        ],
-                        VI_STATE_FLOAT2_ONLY,
-                        IA_STATE_TRIFAN,
-                        &vp_state_local,
-                        RASTER_STATE_DEFAULT_FILL_NOCULL,
-                        BLEND_STATE_SINGLE_NONE,
-                    )
-                    .depth_stencil_state(
-                        &br::PipelineDepthStencilStateCreateInfo::new()
-                            .stencil_test(true)
-                            .stencil_state_back(sop_invert_always.clone())
-                            .stencil_state_front(sop_invert_always.clone()),
-                    )
-                    .multisample_state(
-                        &br::PipelineMultisampleStateCreateInfo::new().rasterization_samples(4),
-                    ),
-                    br::GraphicsPipelineCreateInfo::new(
-                        &empty_pipeline_layout,
-                        render_pass.subpass(0),
-                        &[
-                            curve_stencil_shape_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
-                            curve_stencil_shape_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
-                        ],
-                        &br::PipelineVertexInputStateCreateInfo::new(
-                            &[br::VertexInputBindingDescription::per_vertex_typed::<
-                                [f32; 4],
-                            >(0)],
-                            &[
-                                br::VertexInputAttributeDescription {
-                                    location: 0,
-                                    binding: 0,
-                                    format: br::vk::VK_FORMAT_R32G32_SFLOAT,
-                                    offset: 0,
+            .create_graphics_pipelines_array(&[
+                br::GraphicsPipelineCreateInfo::new(
+                    &empty_pipeline_layout,
+                    round_rect_rp.subpass(0),
+                    &[
+                        round_rect_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+                        round_rect_fsh
+                            .on_stage(br::ShaderStage::Fragment, c"main")
+                            .with_specialization_info(&br::SpecializationInfo::new(
+                                &RoundedRectConstants {
+                                    corner_radius: Self::BUTTON_HEIGHT * 0.5,
                                 },
-                                br::VertexInputAttributeDescription {
-                                    location: 1,
-                                    binding: 0,
-                                    format: br::vk::VK_FORMAT_R32G32_SFLOAT,
-                                    offset: core::mem::size_of::<[f32; 2]>() as _,
-                                },
-                            ],
-                        ),
-                        IA_STATE_TRILIST,
-                        &vp_state_local,
-                        RASTER_STATE_DEFAULT_FILL_NOCULL,
-                        BLEND_STATE_SINGLE_NONE,
-                    )
-                    .depth_stencil_state(
-                        &br::PipelineDepthStencilStateCreateInfo::new()
-                            .stencil_test(true)
-                            .stencil_state_back(sop_invert_always.clone())
-                            .stencil_state_front(sop_invert_always),
-                    )
-                    .multisample_state(
-                        &br::PipelineMultisampleStateCreateInfo::new().rasterization_samples(4),
+                            )),
+                    ],
+                    VI_STATE_EMPTY,
+                    IA_STATE_TRILIST,
+                    &br::PipelineViewportStateCreateInfo::new_array(
+                        &[bg_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
+                        &[bg_atlas_rect.vk_rect()],
                     ),
-                    br::GraphicsPipelineCreateInfo::new(
-                        &empty_pipeline_layout,
-                        render_pass.subpass(1),
+                    RASTER_STATE_DEFAULT_FILL_NOCULL,
+                    BLEND_STATE_SINGLE_NONE,
+                )
+                .multisample_state(MS_STATE_EMPTY),
+                br::GraphicsPipelineCreateInfo::new(
+                    &empty_pipeline_layout,
+                    render_pass.subpass(0),
+                    &[
+                        first_stencil_shape_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+                        first_stencil_shape_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
+                    ],
+                    VI_STATE_FLOAT2_ONLY,
+                    IA_STATE_TRIFAN,
+                    &vp_state_local,
+                    RASTER_STATE_DEFAULT_FILL_NOCULL,
+                    BLEND_STATE_SINGLE_NONE,
+                )
+                .depth_stencil_state(
+                    &br::PipelineDepthStencilStateCreateInfo::new()
+                        .stencil_test(true)
+                        .stencil_state_back(sop_invert_always.clone())
+                        .stencil_state_front(sop_invert_always.clone()),
+                )
+                .multisample_state(
+                    &br::PipelineMultisampleStateCreateInfo::new().rasterization_samples(4),
+                ),
+                br::GraphicsPipelineCreateInfo::new(
+                    &empty_pipeline_layout,
+                    render_pass.subpass(0),
+                    &[
+                        curve_stencil_shape_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+                        curve_stencil_shape_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
+                    ],
+                    &br::PipelineVertexInputStateCreateInfo::new(
+                        &[br::VertexInputBindingDescription::per_vertex_typed::<
+                            [f32; 4],
+                        >(0)],
                         &[
-                            colorize_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
-                            colorize_fsh
-                                .on_stage(br::ShaderStage::Fragment, c"main")
-                                .with_specialization_info(&br::SpecializationInfo::new(
-                                    &FillcolorRConstants { r: 1.0 },
-                                )),
+                            br::VertexInputAttributeDescription {
+                                location: 0,
+                                binding: 0,
+                                format: br::vk::VK_FORMAT_R32G32_SFLOAT,
+                                offset: 0,
+                            },
+                            br::VertexInputAttributeDescription {
+                                location: 1,
+                                binding: 0,
+                                format: br::vk::VK_FORMAT_R32G32_SFLOAT,
+                                offset: core::mem::size_of::<[f32; 2]>() as _,
+                            },
                         ],
-                        VI_STATE_EMPTY,
-                        IA_STATE_TRILIST,
-                        &vp_state_local,
-                        RASTER_STATE_DEFAULT_FILL_NOCULL,
-                        BLEND_STATE_SINGLE_NONE,
-                    )
-                    .depth_stencil_state(
-                        &br::PipelineDepthStencilStateCreateInfo::new()
-                            .stencil_test(true)
-                            .stencil_state_back(sop_testonly_equal_1.clone())
-                            .stencil_state_front(sop_testonly_equal_1),
-                    )
-                    .multisample_state(
-                        &br::PipelineMultisampleStateCreateInfo::new()
-                            .rasterization_samples(4)
-                            .enable_alpha_to_coverage(),
                     ),
-                ],
-                None::<&br::PipelineCacheObject<&Subsystem>>,
-            )
+                    IA_STATE_TRILIST,
+                    &vp_state_local,
+                    RASTER_STATE_DEFAULT_FILL_NOCULL,
+                    BLEND_STATE_SINGLE_NONE,
+                )
+                .depth_stencil_state(
+                    &br::PipelineDepthStencilStateCreateInfo::new()
+                        .stencil_test(true)
+                        .stencil_state_back(sop_invert_always.clone())
+                        .stencil_state_front(sop_invert_always),
+                )
+                .multisample_state(
+                    &br::PipelineMultisampleStateCreateInfo::new().rasterization_samples(4),
+                ),
+                br::GraphicsPipelineCreateInfo::new(
+                    &empty_pipeline_layout,
+                    render_pass.subpass(1),
+                    &[
+                        colorize_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+                        colorize_fsh
+                            .on_stage(br::ShaderStage::Fragment, c"main")
+                            .with_specialization_info(&br::SpecializationInfo::new(
+                                &FillcolorRConstants { r: 1.0 },
+                            )),
+                    ],
+                    VI_STATE_EMPTY,
+                    IA_STATE_TRILIST,
+                    &vp_state_local,
+                    RASTER_STATE_DEFAULT_FILL_NOCULL,
+                    BLEND_STATE_SINGLE_NONE,
+                )
+                .depth_stencil_state(
+                    &br::PipelineDepthStencilStateCreateInfo::new()
+                        .stencil_test(true)
+                        .stencil_state_back(sop_testonly_equal_1.clone())
+                        .stencil_state_front(sop_testonly_equal_1),
+                )
+                .multisample_state(
+                    &br::PipelineMultisampleStateCreateInfo::new()
+                        .rasterization_samples(4)
+                        .enable_alpha_to_coverage(),
+                ),
+            ])
             .unwrap();
 
         let mut trifan_points = Vec::<[f32; 2]>::new();

@@ -3,3 +3,4 @@
 *.frag
 /local
 /resources/icons/*.svg
+.vk-pipeline-cache

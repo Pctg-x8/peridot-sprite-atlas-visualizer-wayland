@@ -46,10 +46,40 @@ pub struct Subsystem {
     pub adapter_properties: br::PhysicalDeviceProperties,
     pub graphics_queue_family_index: u32,
     graphics_queue: br::vk::VkQueue,
+    pipeline_cache: br::vk::VkPipelineCache,
 }
 impl Drop for Subsystem {
     fn drop(&mut self) {
         unsafe {
+            match br::vkfn_wrapper::get_pipeline_cache_data_byte_length(
+                self.device,
+                self.pipeline_cache,
+            ) {
+                Ok(dl) => {
+                    let mut sink = Vec::with_capacity(dl);
+                    sink.set_len(dl);
+                    match br::vkfn_wrapper::get_pipeline_cache_data(
+                        self.device,
+                        self.pipeline_cache,
+                        &mut sink,
+                    ) {
+                        Ok(_) => match std::fs::write(".vk-pipeline-cache", &sink) {
+                            Ok(_) => (),
+                            Err(e) => {
+                                eprintln!("persist pipeline cache failed: {e:?}");
+                            }
+                        },
+                        Err(e) => {
+                            eprintln!("get pipeline cache data failed: {e:?}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("get pipeline cache data length failed: {e:?}");
+                }
+            }
+
+            br::vkfn::destroy_pipeline_cache(self.device, self.pipeline_cache, core::ptr::null());
             br::vkfn::destroy_device(self.device, core::ptr::null());
             br::vkfn::destroy_instance(self.instance, core::ptr::null());
         }
@@ -216,6 +246,25 @@ impl Subsystem {
         )
         .unwrap();
 
+        let pipeline_cache_path = std::path::Path::new(".vk-pipeline-cache");
+        let pipeline_cache = if pipeline_cache_path.try_exists().is_ok_and(|x| x) {
+            // try load from persistent
+            match std::fs::read(&pipeline_cache_path) {
+                Ok(blob) => {
+                    br::PipelineCacheObject::new(&device, &br::PipelineCacheCreateInfo::new(&blob))
+                        .unwrap()
+                }
+                Err(e) => {
+                    eprintln!("pipeline cache load err: {e:?}");
+                    br::PipelineCacheObject::new(&device, &br::PipelineCacheCreateInfo::new(&[]))
+                        .unwrap()
+                }
+            }
+        } else {
+            br::PipelineCacheObject::new(&device, &br::PipelineCacheCreateInfo::new(&[])).unwrap()
+        };
+
+        let (pipeline_cache, _) = pipeline_cache.unmanage();
         let (device, _) = device.unmanage();
         let (adapter, _) = adapter.unmanage();
         let instance = instance.unmanage();
@@ -230,6 +279,7 @@ impl Subsystem {
             instance,
             adapter_memory_info,
             adapter_properties,
+            pipeline_cache,
         }
     }
 
@@ -265,6 +315,18 @@ impl Subsystem {
         br::ShaderModuleObject::new(
             self,
             &br::ShaderModuleCreateInfo::new(&load_spv_file(path).unwrap()),
+        )
+    }
+
+    #[inline]
+    pub fn create_graphics_pipelines_array<const N: usize>(
+        &self,
+        create_info_array: &[br::GraphicsPipelineCreateInfo; N],
+    ) -> br::Result<[br::PipelineObject<&Self>; N]> {
+        br::Device::new_graphics_pipeline_array(
+            self,
+            create_info_array,
+            Some(&unsafe { br::VkHandleRef::dangling(self.pipeline_cache) }),
         )
     }
 

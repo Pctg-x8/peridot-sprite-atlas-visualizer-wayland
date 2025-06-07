@@ -120,49 +120,46 @@ impl<'d> EditingAtlasRenderer<'d> {
         )
         .unwrap();
         let [render_pipeline, bg_render_pipeline] = subsystem
-            .new_graphics_pipeline_array(
-                &[
-                    br::GraphicsPipelineCreateInfo::new(
-                        &render_pipeline_layout,
-                        rendered_pass,
-                        &[
-                            vsh.on_stage(br::ShaderStage::Vertex, c"main"),
-                            fsh.on_stage(br::ShaderStage::Fragment, c"main"),
-                        ],
-                        VI_STATE_EMPTY,
-                        IA_STATE_TRILIST,
-                        &br::PipelineViewportStateCreateInfo::new(
-                            &[main_buffer_size
-                                .into_rect(br::Offset2D::ZERO)
-                                .make_viewport(0.0..1.0)],
-                            &[main_buffer_size.into_rect(br::Offset2D::ZERO)],
-                        ),
-                        RASTER_STATE_DEFAULT_FILL_NOCULL,
-                        BLEND_STATE_SINGLE_NONE,
-                    )
-                    .multisample_state(MS_STATE_EMPTY),
-                    br::GraphicsPipelineCreateInfo::new(
-                        &render_pipeline_layout,
-                        rendered_pass,
-                        &[
-                            bg_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
-                            bg_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
-                        ],
-                        VI_STATE_FLOAT4_ONLY,
-                        IA_STATE_TRISTRIP,
-                        &br::PipelineViewportStateCreateInfo::new(
-                            &[main_buffer_size
-                                .into_rect(br::Offset2D::ZERO)
-                                .make_viewport(0.0..1.0)],
-                            &[main_buffer_size.into_rect(br::Offset2D::ZERO)],
-                        ),
-                        RASTER_STATE_DEFAULT_FILL_NOCULL,
-                        BLEND_STATE_SINGLE_NONE,
-                    )
-                    .multisample_state(MS_STATE_EMPTY),
-                ],
-                None::<&br::PipelineCacheObject<&'d Subsystem>>,
-            )
+            .create_graphics_pipelines_array(&[
+                br::GraphicsPipelineCreateInfo::new(
+                    &render_pipeline_layout,
+                    rendered_pass,
+                    &[
+                        vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+                        fsh.on_stage(br::ShaderStage::Fragment, c"main"),
+                    ],
+                    VI_STATE_EMPTY,
+                    IA_STATE_TRILIST,
+                    &br::PipelineViewportStateCreateInfo::new(
+                        &[main_buffer_size
+                            .into_rect(br::Offset2D::ZERO)
+                            .make_viewport(0.0..1.0)],
+                        &[main_buffer_size.into_rect(br::Offset2D::ZERO)],
+                    ),
+                    RASTER_STATE_DEFAULT_FILL_NOCULL,
+                    BLEND_STATE_SINGLE_NONE,
+                )
+                .multisample_state(MS_STATE_EMPTY),
+                br::GraphicsPipelineCreateInfo::new(
+                    &render_pipeline_layout,
+                    rendered_pass,
+                    &[
+                        bg_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+                        bg_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
+                    ],
+                    VI_STATE_FLOAT4_ONLY,
+                    IA_STATE_TRISTRIP,
+                    &br::PipelineViewportStateCreateInfo::new(
+                        &[main_buffer_size
+                            .into_rect(br::Offset2D::ZERO)
+                            .make_viewport(0.0..1.0)],
+                        &[main_buffer_size.into_rect(br::Offset2D::ZERO)],
+                    ),
+                    RASTER_STATE_DEFAULT_FILL_NOCULL,
+                    BLEND_STATE_SINGLE_NONE,
+                )
+                .multisample_state(MS_STATE_EMPTY),
+            ])
             .unwrap();
 
         Self {
@@ -260,49 +257,46 @@ impl<'d> EditingAtlasRenderer<'d> {
         main_buffer_size: br::Extent2D,
     ) {
         let [render_pipeline, bg_render_pipeline] = device
-            .new_graphics_pipeline_array(
-                &[
-                    br::GraphicsPipelineCreateInfo::new(
-                        &self.render_pipeline_layout,
-                        rendered_pass,
-                        &[
-                            self.grid_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
-                            self.grid_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
-                        ],
-                        VI_STATE_EMPTY,
-                        IA_STATE_TRILIST,
-                        &br::PipelineViewportStateCreateInfo::new(
-                            &[main_buffer_size
-                                .into_rect(br::Offset2D::ZERO)
-                                .make_viewport(0.0..1.0)],
-                            &[main_buffer_size.into_rect(br::Offset2D::ZERO)],
-                        ),
-                        RASTER_STATE_DEFAULT_FILL_NOCULL,
-                        BLEND_STATE_SINGLE_NONE,
-                    )
-                    .multisample_state(MS_STATE_EMPTY),
-                    br::GraphicsPipelineCreateInfo::new(
-                        &self.render_pipeline_layout,
-                        rendered_pass,
-                        &[
-                            self.bg_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
-                            self.bg_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
-                        ],
-                        VI_STATE_FLOAT4_ONLY,
-                        IA_STATE_TRISTRIP,
-                        &br::PipelineViewportStateCreateInfo::new(
-                            &[main_buffer_size
-                                .into_rect(br::Offset2D::ZERO)
-                                .make_viewport(0.0..1.0)],
-                            &[main_buffer_size.into_rect(br::Offset2D::ZERO)],
-                        ),
-                        RASTER_STATE_DEFAULT_FILL_NOCULL,
-                        BLEND_STATE_SINGLE_NONE,
-                    )
-                    .multisample_state(MS_STATE_EMPTY),
-                ],
-                None::<&br::PipelineCacheObject<&'d Subsystem>>,
-            )
+            .create_graphics_pipelines_array(&[
+                br::GraphicsPipelineCreateInfo::new(
+                    &self.render_pipeline_layout,
+                    rendered_pass,
+                    &[
+                        self.grid_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+                        self.grid_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
+                    ],
+                    VI_STATE_EMPTY,
+                    IA_STATE_TRILIST,
+                    &br::PipelineViewportStateCreateInfo::new(
+                        &[main_buffer_size
+                            .into_rect(br::Offset2D::ZERO)
+                            .make_viewport(0.0..1.0)],
+                        &[main_buffer_size.into_rect(br::Offset2D::ZERO)],
+                    ),
+                    RASTER_STATE_DEFAULT_FILL_NOCULL,
+                    BLEND_STATE_SINGLE_NONE,
+                )
+                .multisample_state(MS_STATE_EMPTY),
+                br::GraphicsPipelineCreateInfo::new(
+                    &self.render_pipeline_layout,
+                    rendered_pass,
+                    &[
+                        self.bg_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+                        self.bg_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
+                    ],
+                    VI_STATE_FLOAT4_ONLY,
+                    IA_STATE_TRISTRIP,
+                    &br::PipelineViewportStateCreateInfo::new(
+                        &[main_buffer_size
+                            .into_rect(br::Offset2D::ZERO)
+                            .make_viewport(0.0..1.0)],
+                        &[main_buffer_size.into_rect(br::Offset2D::ZERO)],
+                    ),
+                    RASTER_STATE_DEFAULT_FILL_NOCULL,
+                    BLEND_STATE_SINGLE_NONE,
+                )
+                .multisample_state(MS_STATE_EMPTY),
+            ])
             .unwrap();
 
         self.render_pipeline = render_pipeline;

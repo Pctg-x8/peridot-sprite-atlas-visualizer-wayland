@@ -17,7 +17,7 @@ use crate::{
         PointerActionArgs,
     },
     input::EventContinueControl,
-    subsystem::{StagingScratchBufferMapMode, Subsystem},
+    subsystem::StagingScratchBufferMapMode,
     text::TextLayout,
 };
 
@@ -155,29 +155,26 @@ impl MenuButtonView {
         .unwrap();
         let [pipeline] = init
             .subsystem
-            .new_graphics_pipeline_array(
-                &[br::GraphicsPipelineCreateInfo::new(
-                    &pipeline_layout,
-                    rp.subpass(0),
-                    &[
-                        vsh.on_stage(br::ShaderStage::Vertex, c"main"),
-                        fsh.on_stage(br::ShaderStage::Fragment, c"main")
-                            .with_specialization_info(&br::SpecializationInfo::new(
-                                &FillcolorRConstants { r: 1.0 },
-                            )),
-                    ],
-                    VI_STATE_FLOAT2_ONLY,
-                    IA_STATE_TRILIST,
-                    &br::PipelineViewportStateCreateInfo::new_array(
-                        &[icon_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
-                        &[icon_atlas_rect.vk_rect()],
-                    ),
-                    RASTER_STATE_DEFAULT_FILL_NOCULL,
-                    BLEND_STATE_SINGLE_NONE,
-                )
-                .multisample_state(MS_STATE_EMPTY)],
-                None::<&br::PipelineCacheObject<&Subsystem>>,
+            .create_graphics_pipelines_array(&[br::GraphicsPipelineCreateInfo::new(
+                &pipeline_layout,
+                rp.subpass(0),
+                &[
+                    vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+                    fsh.on_stage(br::ShaderStage::Fragment, c"main")
+                        .with_specialization_info(&br::SpecializationInfo::new(
+                            &FillcolorRConstants { r: 1.0 },
+                        )),
+                ],
+                VI_STATE_FLOAT2_ONLY,
+                IA_STATE_TRILIST,
+                &br::PipelineViewportStateCreateInfo::new_array(
+                    &[icon_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
+                    &[icon_atlas_rect.vk_rect()],
+                ),
+                RASTER_STATE_DEFAULT_FILL_NOCULL,
+                BLEND_STATE_SINGLE_NONE,
             )
+            .multisample_state(MS_STATE_EMPTY)])
             .unwrap();
 
         let mut cp = br::CommandPoolObject::new(

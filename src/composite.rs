@@ -62,14 +62,37 @@ const fn lerp4(x: f32, [a, c, e, g]: [f32; 4], [b, d, f, h]: [f32; 4]) -> [f32; 
     [lerp(x, a, b), lerp(x, c, d), lerp(x, e, f), lerp(x, g, h)]
 }
 
+// TODO: このへんうまくまとめたいが......
+
+pub enum AnimatableFloat {
+    Value(f32),
+    Animated(f32, AnimationData<f32>),
+}
+impl AnimatableFloat {
+    pub fn evaluate(&self, current_sec: f32) -> f32 {
+        match self {
+            &Self::Value(x) => x,
+            &Self::Animated(from_value, ref a) => {
+                lerp(a.interpolate(current_sec), from_value, a.to_value)
+            }
+        }
+    }
+}
+
 pub enum AnimatableColor {
     Value([f32; 4]),
+    Expression(Box<dyn Fn(&CompositeTreeParameterStore) -> [f32; 4]>),
     Animated([f32; 4], AnimationData<[f32; 4]>),
 }
 impl AnimatableColor {
-    pub fn compute(&self, current_sec: f32) -> [f32; 4] {
+    pub fn compute(
+        &self,
+        current_sec: f32,
+        parameter_store: &CompositeTreeParameterStore,
+    ) -> [f32; 4] {
         match self {
             &Self::Value(x) => x,
+            &Self::Expression(ref f) => f(parameter_store),
             &Self::Animated(from_value, ref a) => {
                 lerp4(a.interpolate(current_sec), from_value, a.to_value)
             }
@@ -467,10 +490,59 @@ impl<'d> CompositeInstanceManager<'d> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct CompositeTreeRef(usize);
 
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct CompositeTreeFloatParameterRef(usize);
+
+pub struct CompositeTreeParameterStore {
+    float_parameters: Vec<AnimatableFloat>,
+    float_values: Vec<f32>,
+    unused_float_parameters: BTreeSet<usize>,
+}
+impl CompositeTreeParameterStore {
+    pub fn alloc_float(&mut self, init: AnimatableFloat) -> CompositeTreeFloatParameterRef {
+        if let Some(x) = self.unused_float_parameters.pop_first() {
+            self.float_parameters[x] = init;
+            return CompositeTreeFloatParameterRef(x);
+        }
+
+        self.float_parameters.push(init);
+        self.float_values.push(0.0);
+        CompositeTreeFloatParameterRef(self.float_parameters.len() - 1)
+    }
+
+    pub fn free_float(&mut self, r: CompositeTreeFloatParameterRef) {
+        self.unused_float_parameters.insert(r.0);
+    }
+
+    pub fn set_float(&mut self, r: CompositeTreeFloatParameterRef, a: AnimatableFloat) {
+        self.float_parameters[r.0] = a;
+    }
+
+    pub fn evaluate_float(&self, r: CompositeTreeFloatParameterRef, current_sec: f32) -> f32 {
+        self.float_parameters[r.0].evaluate(current_sec)
+    }
+
+    pub fn float_value(&self, r: CompositeTreeFloatParameterRef) -> f32 {
+        self.float_values[r.0]
+    }
+
+    fn evaluate_all(&mut self, current_sec: f32) {
+        for (v, p) in self
+            .float_values
+            .iter_mut()
+            .zip(self.float_parameters.iter())
+        {
+            *v = p.evaluate(current_sec);
+        }
+    }
+}
+
 pub struct CompositeTree {
     rects: Vec<CompositeRect>,
     unused: BTreeSet<usize>,
     dirty: bool,
+    parameter_store: CompositeTreeParameterStore,
 }
 impl CompositeTree {
     /// ルートノード
@@ -488,6 +560,11 @@ impl CompositeTree {
             rects,
             unused: BTreeSet::new(),
             dirty: false,
+            parameter_store: CompositeTreeParameterStore {
+                float_parameters: Vec::new(),
+                float_values: Vec::new(),
+                unused_float_parameters: BTreeSet::new(),
+            },
         }
     }
 
@@ -539,6 +616,14 @@ impl CompositeTree {
         }
     }
 
+    pub const fn parameter_store(&self) -> &CompositeTreeParameterStore {
+        &self.parameter_store
+    }
+
+    pub const fn parameter_store_mut(&mut self) -> &mut CompositeTreeParameterStore {
+        &mut self.parameter_store
+    }
+
     /// return: bitmap count
     pub unsafe fn sink_all(
         &mut self,
@@ -547,6 +632,8 @@ impl CompositeTree {
         tex_size: br::Extent2D,
         mapped_ptr: &br::MappedMemory<'_, impl br::DeviceMemoryMut + ?Sized>,
     ) -> usize {
+        self.parameter_store.evaluate_all(current_sec);
+
         let mut instance_slot_index = 0;
         let mut processes = vec![(0, (0.0, 0.0, size.width as f32, size.height as f32))];
         while let Some((
@@ -613,8 +700,12 @@ impl CompositeTree {
                             ],
                             color_tint: match r.composite_mode {
                                 CompositeMode::DirectSourceOver => [0.0; 4],
-                                CompositeMode::ColorTint(ref t) => t.compute(current_sec),
-                                CompositeMode::FillColor(ref t) => t.compute(current_sec),
+                                CompositeMode::ColorTint(ref t) => {
+                                    t.compute(current_sec, &self.parameter_store)
+                                }
+                                CompositeMode::FillColor(ref t) => {
+                                    t.compute(current_sec, &self.parameter_store)
+                                }
                             },
                             pos_x_animation_data: [0.0; 4],
                             pos_x_curve_control_points: [0.0; 4],

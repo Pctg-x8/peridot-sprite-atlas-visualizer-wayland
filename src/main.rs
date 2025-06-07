@@ -30,9 +30,9 @@ use bedrock::{
     ShaderModule, SurfaceCreateInfo, Swapchain, VkHandle, VkHandleMut,
 };
 use composite::{
-    AnimatableColor, AnimationData, AtlasRect, CompositeInstanceData, CompositeInstanceManager,
-    CompositeMode, CompositeRect, CompositeStreamingData, CompositeTree, CompositeTreeRef,
-    CompositionSurfaceAtlas,
+    AnimatableColor, AnimatableFloat, AnimationData, AtlasRect, CompositeInstanceData,
+    CompositeInstanceManager, CompositeMode, CompositeRect, CompositeStreamingData, CompositeTree,
+    CompositeTreeFloatParameterRef, CompositeTreeRef, CompositionSurfaceAtlas,
 };
 use coordinate::SizePixels;
 use feature::editing_atlas_renderer::EditingAtlasRenderer;
@@ -431,7 +431,9 @@ impl AppHeaderMenuButtonView {
         };
 
         let current = match composite_tree.get(self.ct_bg).composite_mode {
-            CompositeMode::FillColor(ref x) => x.compute(current_sec),
+            CompositeMode::FillColor(ref x) => {
+                x.compute(current_sec, composite_tree.parameter_store())
+            }
             _ => unreachable!(),
         };
         composite_tree.get_mut(self.ct_bg).composite_mode =
@@ -1321,7 +1323,9 @@ impl SpriteListToggleButtonView {
         };
 
         let current = match composite_tree.get(self.ct_root).composite_mode {
-            CompositeMode::ColorTint(ref x) => x.compute(current_sec),
+            CompositeMode::ColorTint(ref x) => {
+                x.compute(current_sec, composite_tree.parameter_store())
+            }
             _ => unreachable!(),
         };
         composite_tree.get_mut(self.ct_root).composite_mode =
@@ -2500,10 +2504,14 @@ struct AppMenuButtonView {
     ct_root: CompositeTreeRef,
     ct_icon: CompositeTreeRef,
     ct_label: CompositeTreeRef,
+    ct_bg_alpha_rate_shown: CompositeTreeFloatParameterRef,
+    ct_bg_alpha_rate_pointer: CompositeTreeFloatParameterRef,
     ht_root: HitTestTreeRef,
     left: f32,
     top: f32,
     ui_scale_factor: f32,
+    hovering: Cell<bool>,
+    pressing: Cell<bool>,
 }
 impl AppMenuButtonView {
     const ICON_SIZE: f32 = 24.0;
@@ -3446,6 +3454,14 @@ impl AppMenuButtonView {
             .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&cb)])
             .unwrap();
 
+        let ct_bg_alpha_rate_shown = init
+            .composite_tree
+            .parameter_store_mut()
+            .alloc_float(AnimatableFloat::Value(0.0));
+        let ct_bg_alpha_rate_pointer = init
+            .composite_tree
+            .parameter_store_mut()
+            .alloc_float(AnimatableFloat::Value(0.0));
         let ct_root = init.composite_tree.register(CompositeRect {
             offset: [left * init.ui_scale_factor, top * init.ui_scale_factor],
             size: [
@@ -3457,7 +3473,14 @@ impl AppMenuButtonView {
             instance_slot_index: Some(init.composite_instance_manager.alloc()),
             texatlas_rect: bg_atlas_rect,
             slice_borders: [Self::BUTTON_HEIGHT * 0.5 * init.ui_scale_factor; 4],
-            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value(Self::BG_COLOR_HIDDEN)),
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Expression(Box::new(
+                move |ps| {
+                    let opacity = ps.float_value(ct_bg_alpha_rate_shown) * 0.25
+                        + ps.float_value(ct_bg_alpha_rate_pointer) * 0.25;
+
+                    [1.0, 1.0, 1.0, opacity]
+                },
+            ))),
             ..Default::default()
         });
         let ct_icon = init.composite_tree.register(CompositeRect {
@@ -3498,6 +3521,9 @@ impl AppMenuButtonView {
         let ht_root = init.ht.create(HitTestTreeData {
             left,
             top,
+            width: (Self::ICON_SIZE + Self::ICON_LABEL_GAP + Self::HPADDING * 2.0)
+                + label_layout.width() / init.ui_scale_factor,
+            height: Self::BUTTON_HEIGHT,
             ..Default::default()
         });
 
@@ -3505,10 +3531,14 @@ impl AppMenuButtonView {
             ct_root,
             ct_icon,
             ct_label,
+            ct_bg_alpha_rate_shown,
+            ct_bg_alpha_rate_pointer,
             ht_root,
             left,
             top,
             ui_scale_factor: init.ui_scale_factor,
+            hovering: Cell::new(false),
+            pressing: Cell::new(false),
         }
     }
 
@@ -3524,17 +3554,19 @@ impl AppMenuButtonView {
     }
 
     pub fn show(&self, ct: &mut CompositeTree, current_sec: f32) {
-        ct.get_mut(self.ct_root).composite_mode =
-            CompositeMode::ColorTint(AnimatableColor::Animated(
-                Self::BG_COLOR_HIDDEN,
+        ct.parameter_store_mut().set_float(
+            self.ct_bg_alpha_rate_shown,
+            AnimatableFloat::Animated(
+                0.0,
                 AnimationData {
+                    to_value: 1.0,
                     start_sec: current_sec,
                     end_sec: current_sec + 0.25,
-                    to_value: Self::BG_COLOR_SHOWN,
                     curve_p1: (0.5, 0.5),
                     curve_p2: (0.5, 0.5),
                 },
-            ));
+            ),
+        );
         ct.get_mut(self.ct_icon).composite_mode =
             CompositeMode::ColorTint(AnimatableColor::Animated(
                 Self::CONTENT_COLOR_HIDDEN,
@@ -3566,23 +3598,26 @@ impl AppMenuButtonView {
             curve_p1: (0.5, 0.5),
             curve_p2: (0.5, 1.0),
         });
+
         ct.mark_dirty(self.ct_root);
         ct.mark_dirty(self.ct_icon);
         ct.mark_dirty(self.ct_label);
     }
 
     pub fn hide(&self, ct: &mut CompositeTree, current_sec: f32) {
-        ct.get_mut(self.ct_root).composite_mode =
-            CompositeMode::ColorTint(AnimatableColor::Animated(
-                Self::BG_COLOR_SHOWN,
+        ct.parameter_store_mut().set_float(
+            self.ct_bg_alpha_rate_shown,
+            AnimatableFloat::Animated(
+                1.0,
                 AnimationData {
+                    to_value: 0.0,
                     start_sec: current_sec,
                     end_sec: current_sec + 0.25,
-                    to_value: Self::BG_COLOR_HIDDEN,
                     curve_p1: (0.5, 0.5),
                     curve_p2: (0.5, 0.5),
                 },
-            ));
+            ),
+        );
         ct.get_mut(self.ct_icon).composite_mode =
             CompositeMode::ColorTint(AnimatableColor::Animated(
                 Self::CONTENT_COLOR_SHOWN,
@@ -3605,9 +3640,56 @@ impl AppMenuButtonView {
                     curve_p2: (0.5, 0.5),
                 },
             ));
-        ct.mark_dirty(self.ct_root);
+
         ct.mark_dirty(self.ct_icon);
         ct.mark_dirty(self.ct_label);
+    }
+
+    fn update_pointer_opacity_value_rate(&self, ct: &mut CompositeTree, current_sec: f32) {
+        let current = ct
+            .parameter_store()
+            .evaluate_float(self.ct_bg_alpha_rate_pointer, current_sec);
+        let target = match (self.hovering.get(), self.pressing.get()) {
+            (true, true) => 1.0,
+            (false, _) => 0.0,
+            _ => 0.5,
+        };
+
+        ct.parameter_store_mut().set_float(
+            self.ct_bg_alpha_rate_pointer,
+            AnimatableFloat::Animated(
+                current,
+                AnimationData {
+                    to_value: target,
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.1,
+                    curve_p1: (0.5, 0.5),
+                    curve_p2: (0.5, 0.5),
+                },
+            ),
+        );
+    }
+
+    pub fn on_pointer_enter(&self, ct: &mut CompositeTree, current_sec: f32) {
+        self.hovering.set(true);
+        self.update_pointer_opacity_value_rate(ct, current_sec);
+    }
+
+    pub fn on_pointer_leave(&self, ct: &mut CompositeTree, current_sec: f32) {
+        // はなれた際はpressingもなかったことにする
+        self.hovering.set(false);
+        self.pressing.set(false);
+        self.update_pointer_opacity_value_rate(ct, current_sec);
+    }
+
+    pub fn on_press(&self, ct: &mut CompositeTree, current_sec: f32) {
+        self.pressing.set(true);
+        self.update_pointer_opacity_value_rate(ct, current_sec);
+    }
+
+    pub fn on_release(&self, ct: &mut CompositeTree, current_sec: f32) {
+        self.pressing.set(false);
+        self.update_pointer_opacity_value_rate(ct, current_sec);
     }
 }
 
@@ -3677,6 +3759,7 @@ impl AppMenuBaseView {
 
 struct AppMenuActionHandler {
     base_view: Rc<AppMenuBaseView>,
+    item_views: Vec<Rc<AppMenuButtonView>>,
     shown: Cell<bool>,
 }
 impl<'c> HitTestTreeActionHandler<'c> for AppMenuActionHandler {
@@ -3689,10 +3772,20 @@ impl<'c> HitTestTreeActionHandler<'c> for AppMenuActionHandler {
     fn on_pointer_enter(
         &self,
         sender: HitTestTreeRef,
-        _context: &mut Self::Context,
+        context: &mut Self::Context,
         _ht: &mut HitTestTreeManager<Self::Context>,
         _args: hittest::PointerActionArgs,
     ) -> EventContinueControl {
+        for v in self.item_views.iter() {
+            if sender == v.ht_root {
+                v.on_pointer_enter(
+                    &mut context.for_view_feedback.composite_tree,
+                    context.for_view_feedback.current_sec,
+                );
+                return EventContinueControl::STOP_PROPAGATION;
+            }
+        }
+
         if sender == self.base_view.ht_root {
             return EventContinueControl::STOP_PROPAGATION;
         }
@@ -3703,10 +3796,20 @@ impl<'c> HitTestTreeActionHandler<'c> for AppMenuActionHandler {
     fn on_pointer_leave(
         &self,
         sender: HitTestTreeRef,
-        _context: &mut Self::Context,
+        context: &mut Self::Context,
         _ht: &mut HitTestTreeManager<Self::Context>,
         _args: hittest::PointerActionArgs,
     ) -> EventContinueControl {
+        for v in self.item_views.iter() {
+            if sender == v.ht_root {
+                v.on_pointer_leave(
+                    &mut context.for_view_feedback.composite_tree,
+                    context.for_view_feedback.current_sec,
+                );
+                return EventContinueControl::STOP_PROPAGATION;
+            }
+        }
+
         if sender == self.base_view.ht_root {
             return EventContinueControl::STOP_PROPAGATION;
         }
@@ -3721,6 +3824,16 @@ impl<'c> HitTestTreeActionHandler<'c> for AppMenuActionHandler {
         ht: &mut HitTestTreeManager<Self::Context>,
         _args: hittest::PointerActionArgs,
     ) -> EventContinueControl {
+        for v in self.item_views.iter() {
+            if sender == v.ht_root {
+                v.on_press(
+                    &mut context.for_view_feedback.composite_tree,
+                    context.for_view_feedback.current_sec,
+                );
+                return EventContinueControl::STOP_PROPAGATION;
+            }
+        }
+
         if sender == self.base_view.ht_root {
             context
                 .state
@@ -3750,10 +3863,20 @@ impl<'c> HitTestTreeActionHandler<'c> for AppMenuActionHandler {
     fn on_pointer_up(
         &self,
         sender: HitTestTreeRef,
-        _context: &mut Self::Context,
+        context: &mut Self::Context,
         _ht: &mut HitTestTreeManager<Self::Context>,
         _args: hittest::PointerActionArgs,
     ) -> EventContinueControl {
+        for v in self.item_views.iter() {
+            if sender == v.ht_root {
+                v.on_release(
+                    &mut context.for_view_feedback.composite_tree,
+                    context.for_view_feedback.current_sec,
+                );
+                return EventContinueControl::STOP_PROPAGATION;
+            }
+        }
+
         if sender == self.base_view.ht_root {
             return EventContinueControl::STOP_PROPAGATION;
         }
@@ -3768,6 +3891,13 @@ impl<'c> HitTestTreeActionHandler<'c> for AppMenuActionHandler {
         _ht: &mut HitTestTreeManager<Self::Context>,
         _args: hittest::PointerActionArgs,
     ) -> EventContinueControl {
+        for v in self.item_views.iter() {
+            if sender == v.ht_root {
+                // TODO: click action
+                return EventContinueControl::STOP_PROPAGATION;
+            }
+        }
+
         if sender == self.base_view.ht_root {
             return EventContinueControl::STOP_PROPAGATION;
         }
@@ -3783,20 +3913,20 @@ pub struct AppMenuPresenter {
 impl AppMenuPresenter {
     pub fn new(init: &mut PresenterInitContext, header_height: f32) -> Self {
         let base_view = Rc::new(AppMenuBaseView::new(&mut init.for_view));
-        let add_button = AppMenuButtonView::new(
+        let add_button = Rc::new(AppMenuButtonView::new(
             &mut init.for_view,
             "Add Sprite",
             "resources/icons/add.svg",
             64.0,
             header_height + 32.0,
-        );
-        let save_button = AppMenuButtonView::new(
+        ));
+        let save_button = Rc::new(AppMenuButtonView::new(
             &mut init.for_view,
             "Save",
             "resources/icons/save.svg",
             64.0,
             header_height + 32.0 + AppMenuButtonView::BUTTON_HEIGHT + 16.0,
-        );
+        ));
 
         add_button.mount(
             base_view.ct_root,
@@ -3813,12 +3943,15 @@ impl AppMenuPresenter {
 
         let action_handler = Rc::new(AppMenuActionHandler {
             base_view: base_view.clone(),
+            item_views: vec![add_button.clone(), save_button.clone()],
             shown: Cell::new(false),
         });
 
         init.app_state.register_visible_menu_view_feedback({
             let base_view = Rc::downgrade(&base_view);
             let action_handler = Rc::downgrade(&action_handler);
+            let add_button = Rc::downgrade(&add_button);
+            let save_button = Rc::downgrade(&save_button);
 
             move |update_context, _, visible, _| {
                 let Some(base_view) = base_view.upgrade() else {
@@ -3826,6 +3959,14 @@ impl AppMenuPresenter {
                     return;
                 };
                 let Some(action_handler) = action_handler.upgrade() else {
+                    // app teardown-ed
+                    return;
+                };
+                let Some(add_button) = add_button.upgrade() else {
+                    // app teardown-ed
+                    return;
+                };
+                let Some(save_button) = save_button.upgrade() else {
                     // app teardown-ed
                     return;
                 };
@@ -3863,8 +4004,13 @@ impl AppMenuPresenter {
         });
         init.for_view
             .ht
-            .get_data_mut(base_view.ht_root)
-            .action_handler = Some(Rc::downgrade(&action_handler) as _);
+            .set_action_handler(base_view.ht_root, &action_handler);
+        init.for_view
+            .ht
+            .set_action_handler(add_button.ht_root, &action_handler);
+        init.for_view
+            .ht
+            .set_action_handler(save_button.ht_root, &action_handler);
 
         Self {
             base_view,

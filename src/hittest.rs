@@ -93,6 +93,15 @@ impl<'c, ActionContext> HitTestTreeManager<'c, ActionContext> {
     }
 
     #[inline]
+    pub fn set_action_handler(
+        &mut self,
+        r: HitTestTreeRef,
+        h: &std::rc::Rc<impl HitTestTreeActionHandler<'c, Context = ActionContext> + 'static>,
+    ) {
+        self.data[r.0].action_handler = Some(std::rc::Rc::downgrade(h) as _);
+    }
+
+    #[inline]
     pub fn parent_of(&self, r: HitTestTreeRef) -> Option<HitTestTreeRef> {
         self.relations
             .get(r.0)

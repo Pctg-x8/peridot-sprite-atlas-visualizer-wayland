@@ -1,5 +1,3 @@
-use crate::wl::ffi::Array;
-
 use super::{Interface, NEWID_ARG, Owned, Proxy, ffi, interface, message};
 use core::ptr::null;
 
@@ -328,7 +326,7 @@ impl XdgToplevel {
             toplevel: *mut ffi::Proxy,
             width: i32,
             height: i32,
-            states: *mut Array,
+            states: *mut ffi::Array,
         ) {
             let listener = unsafe { &mut *(data as *mut L) };
 
@@ -369,7 +367,7 @@ impl XdgToplevel {
         extern "C" fn wm_capabilities<L: XdgToplevelEventListener>(
             data: *mut core::ffi::c_void,
             toplevel: *mut ffi::Proxy,
-            capabilities: *mut Array,
+            capabilities: *mut ffi::Array,
         ) {
             let listener = unsafe { &mut *(data as *mut L) };
 
@@ -382,11 +380,13 @@ impl XdgToplevel {
         }
         #[repr(C)]
         struct FunctionPointers {
-            configure: extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy, i32, i32, *mut Array),
+            configure:
+                extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy, i32, i32, *mut ffi::Array),
             close: extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy),
             configure_bounds: extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy, i32, i32),
-            wm_capabilities: extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy, *mut Array),
-        };
+            wm_capabilities:
+                extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy, *mut ffi::Array),
+        }
         let fp: &'static FunctionPointers = &FunctionPointers {
             configure: configure::<L>,
             close: close::<L>,

@@ -2,17 +2,14 @@ mod app_state;
 mod composite;
 mod coordinate;
 mod feature;
-mod fontconfig;
-mod freetype;
-mod harfbuzz;
 mod hittest;
 mod input;
-mod linux_input_event_codes;
 mod peridot;
+mod platform;
 mod subsystem;
 mod svg;
 mod text;
-mod wl;
+mod thirdparty;
 
 use std::{
     cell::{Cell, RefCell},
@@ -35,15 +32,18 @@ use composite::{
 };
 use coordinate::SizePixels;
 use feature::editing_atlas_renderer::EditingAtlasRenderer;
-use freetype::FreeType;
 use hittest::{
     CursorShape, HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef,
 };
 use input::{EventContinueControl, PointerInputManager};
-use linux_input_event_codes::BTN_LEFT;
+use platform::linux_input_event_codes::BTN_LEFT;
 use subsystem::{StagingScratchBufferManager, Subsystem};
 use text::TextLayout;
-use wl::{WpCursorShapeDeviceV1Shape, WpCursorShapeManagerV1};
+use thirdparty::{
+    fontconfig,
+    freetype::{self, FreeType},
+    wl::{self, WpCursorShapeDeviceV1Shape, WpCursorShapeManagerV1},
+};
 
 pub enum AppEvent {
     ToplevelWindowConfigure {
@@ -228,7 +228,7 @@ impl SpriteListToggleButtonView {
             .find_direct_memory_index(mreq.memoryTypeBits)
             .expect("no suitable memory");
         let mut mem = br::DeviceMemoryObject::new(
-            &init.subsystem,
+            init.subsystem,
             &br::MemoryAllocateInfo::new(mreq.size, memindex),
         )
         .unwrap();
@@ -441,7 +441,7 @@ impl SpriteListToggleButtonView {
         unsafe {
             cb.begin(
                 &br::CommandBufferBeginInfo::new().onetime_submit(),
-                &init.subsystem,
+                init.subsystem,
             )
             .unwrap()
         }
@@ -727,18 +727,11 @@ impl SpriteListCellView {
         let render_pass = br::RenderPassObject::new(
             &init.subsystem,
             &br::RenderPassCreateInfo2::new(
-                &[br::AttachmentDescription2::new(br::vk::VK_FORMAT_R8_UNORM)
-                    .layout_transition(
-                        br::ImageLayout::Undefined,
-                        br::ImageLayout::ShaderReadOnlyOpt,
-                    )
+                &[br::AttachmentDescription2::new(init.atlas.format())
+                    .with_layout_to(br::ImageLayout::ShaderReadOnlyOpt.from_undefined())
                     .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store)],
-                &[
-                    br::SubpassDescription2::new().colors(&[br::AttachmentReference2::color(
-                        0,
-                        br::ImageLayout::ColorAttachmentOpt,
-                    )]),
-                ],
+                &[br::SubpassDescription2::new()
+                    .colors(&[br::AttachmentReference2::color_attachment_opt(0)])],
                 &[br::SubpassDependency2::new(
                     br::SubpassIndex::Internal(0),
                     br::SubpassIndex::External,
@@ -765,15 +758,10 @@ impl SpriteListCellView {
         )
         .unwrap();
 
-        let pipeline_layout = br::PipelineLayoutObject::new(
-            &init.subsystem,
-            &br::PipelineLayoutCreateInfo::new(&[], &[]),
-        )
-        .unwrap();
         let [pipeline] = init
             .subsystem
             .create_graphics_pipelines_array(&[br::GraphicsPipelineCreateInfo::new(
-                &pipeline_layout,
+                init.subsystem.require_empty_pipeline_layout(),
                 render_pass.subpass(0),
                 &[
                     init.subsystem
@@ -795,11 +783,10 @@ impl SpriteListCellView {
             .multisample_state(MS_STATE_EMPTY)])
             .unwrap();
 
-        let mut cp = br::CommandPoolObject::new(
-            &init.subsystem,
-            &br::CommandPoolCreateInfo::new(init.subsystem.graphics_queue_family_index).transient(),
-        )
-        .unwrap();
+        let mut cp = init
+            .subsystem
+            .create_transient_graphics_command_pool()
+            .unwrap();
         let [mut cb] = br::CommandBufferObject::alloc_array(
             &init.subsystem,
             &br::CommandBufferFixedCountAllocateInfo::new(&mut cp, br::CommandBufferLevel::Primary),
@@ -982,7 +969,7 @@ impl SpriteListPaneView {
             title_layout.build_stg_image_pixel_buffer(init.staging_scratch_buffer);
 
         let mut title_blurred_work_image = br::ImageObject::new(
-            &init.subsystem,
+            init.subsystem,
             &br::ImageCreateInfo::new(
                 title_blurred_atlas_rect.extent(),
                 br::vk::VK_FORMAT_R8_UNORM,
@@ -994,11 +981,10 @@ impl SpriteListPaneView {
         let mreq = title_blurred_work_image.requirements();
         let memindex = init
             .subsystem
-            .adapter_memory_info
-            .find_device_local_index(mreq.memoryTypeBits)
+            .find_device_local_memory_index(mreq.memoryTypeBits)
             .expect("no suitable memory index");
         let title_blurred_work_image_mem = br::DeviceMemoryObject::new(
-            &init.subsystem,
+            init.subsystem,
             &br::MemoryAllocateInfo::new(mreq.size, memindex),
         )
         .unwrap();
@@ -1013,20 +999,13 @@ impl SpriteListPaneView {
         .unwrap();
 
         let render_pass = br::RenderPassObject::new(
-            &init.subsystem,
+            init.subsystem,
             &br::RenderPassCreateInfo2::new(
-                &[br::AttachmentDescription2::new(br::vk::VK_FORMAT_R8_UNORM)
-                    .layout_transition(
-                        br::ImageLayout::Undefined,
-                        br::ImageLayout::ShaderReadOnlyOpt,
-                    )
+                &[br::AttachmentDescription2::new(init.atlas.format())
+                    .with_layout_to(br::ImageLayout::ShaderReadOnlyOpt.from_undefined())
                     .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store)],
-                &[
-                    br::SubpassDescription2::new().colors(&[br::AttachmentReference2::color(
-                        0,
-                        br::ImageLayout::ColorAttachmentOpt,
-                    )]),
-                ],
+                &[br::SubpassDescription2::new()
+                    .colors(&[br::AttachmentReference2::color_attachment_opt(0)])],
                 &[br::SubpassDependency2::new(
                     br::SubpassIndex::Internal(0),
                     br::SubpassIndex::External,
@@ -1063,22 +1042,12 @@ impl SpriteListPaneView {
         )
         .unwrap();
 
-        let vsh = init
-            .subsystem
-            .load_shader("resources/filltri.vert")
-            .unwrap();
-        let fsh = init
-            .subsystem
-            .load_shader("resources/rounded_rect.frag")
-            .unwrap();
         let vsh_blur = init
             .subsystem
-            .load_shader("resources/filltri_uvmod.vert")
-            .unwrap();
+            .require_shader("resources/filltri_uvmod.vert");
         let fsh_blur = init
             .subsystem
-            .load_shader("resources/blit_axis_convolved.frag")
-            .unwrap();
+            .require_shader("resources/blit_axis_convolved.frag");
         #[derive(br::SpecializationConstants)]
         struct ConvolutionFragmentShaderParams {
             #[constant_id = 0]
@@ -1128,13 +1097,8 @@ impl SpriteListPaneView {
             &[],
         );
 
-        let pipeline_layout = br::PipelineLayoutObject::new(
-            &init.subsystem,
-            &br::PipelineLayoutCreateInfo::new(&[], &[]),
-        )
-        .unwrap();
         let blur_pipeline_layout = br::PipelineLayoutObject::new(
-            &init.subsystem,
+            init.subsystem,
             &br::PipelineLayoutCreateInfo::new(
                 &[dsl_tex1.as_transparent_ref()],
                 &[
@@ -1159,11 +1123,15 @@ impl SpriteListPaneView {
             .subsystem
             .create_graphics_pipelines_array(&[
                 br::GraphicsPipelineCreateInfo::new(
-                    &pipeline_layout,
+                    init.subsystem.require_empty_pipeline_layout(),
                     render_pass.subpass(0),
                     &[
-                        br::PipelineShaderStage::new(br::ShaderStage::Vertex, &vsh, c"main"),
-                        br::PipelineShaderStage::new(br::ShaderStage::Fragment, &fsh, c"main"),
+                        init.subsystem
+                            .require_shader("resources/filltri.vert")
+                            .on_stage(br::ShaderStage::Vertex, c"main"),
+                        init.subsystem
+                            .require_shader("resources/rounded_rect.frag")
+                            .on_stage(br::ShaderStage::Fragment, c"main"),
                     ],
                     VI_STATE_EMPTY,
                     IA_STATE_TRILIST,
@@ -1948,9 +1916,8 @@ impl AppMenuButtonView {
         let req = stencil_buffer.requirements();
         let memindex = init
             .subsystem
-            .adapter_memory_info
-            .find_device_local_index(req.memoryTypeBits)
-            .unwrap();
+            .find_device_local_memory_index(req.memoryTypeBits)
+            .expect("No suitable memory for stencil buffer");
         let stencil_buffer_mem = br::DeviceMemoryObject::new(
             init.subsystem,
             &br::MemoryAllocateInfo::new(req.size, memindex),
@@ -1976,7 +1943,7 @@ impl AppMenuButtonView {
         let memindex = init
             .subsystem
             .find_device_local_memory_index(req.memoryTypeBits)
-            .unwrap();
+            .expect("No suitable memory for msaa color buffer");
         let ms_color_buffer_mem = br::DeviceMemoryObject::new(
             init.subsystem,
             &br::MemoryAllocateInfo::new(req.size, memindex),
@@ -1996,17 +1963,11 @@ impl AppMenuButtonView {
                 &[
                     br::AttachmentDescription2::new(br::vk::VK_FORMAT_R8_UNORM)
                         .color_memory_op(br::LoadOp::Clear, br::StoreOp::DontCare)
-                        .layout_transition(
-                            br::ImageLayout::Undefined,
-                            br::ImageLayout::TransferSrcOpt,
-                        )
+                        .with_layout_to(br::ImageLayout::TransferSrcOpt.from_undefined())
                         .samples(4),
                     br::AttachmentDescription2::new(br::vk::VK_FORMAT_S8_UINT)
                         .stencil_memory_op(br::LoadOp::Clear, br::StoreOp::DontCare)
-                        .layout_transition(
-                            br::ImageLayout::Undefined,
-                            br::ImageLayout::DepthStencilReadOnlyOpt,
-                        )
+                        .with_layout_to(br::ImageLayout::DepthStencilReadOnlyOpt.from_undefined())
                         .samples(4),
                 ],
                 &[
@@ -2064,12 +2025,9 @@ impl AppMenuButtonView {
         let round_rect_rp = br::RenderPassObject::new(
             init.subsystem,
             &br::RenderPassCreateInfo2::new(
-                &[br::AttachmentDescription2::new(br::vk::VK_FORMAT_R8_UNORM)
+                &[br::AttachmentDescription2::new(init.atlas.format())
                     .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store)
-                    .layout_transition(
-                        br::ImageLayout::Undefined,
-                        br::ImageLayout::TransferDestOpt,
-                    )],
+                    .with_layout_to(br::ImageLayout::TransferDestOpt.from_undefined())],
                 &[br::SubpassDescription2::new()
                     .colors(&[br::AttachmentReference2::color_attachment_opt(0)])],
                 &[],
@@ -2087,26 +2045,6 @@ impl AppMenuButtonView {
         )
         .unwrap();
 
-        let round_rect_vsh = init.subsystem.require_shader("resources/filltri.vert");
-        let round_rect_fsh = init.subsystem.require_shader("resources/rounded_rect.frag");
-        let first_stencil_shape_vsh = init
-            .subsystem
-            .require_shader("resources/normalized_01_2d.vert");
-        let first_stencil_shape_fsh = init.subsystem.require_shader("resources/stencil_only.frag");
-        let curve_stencil_shape_vsh = init
-            .subsystem
-            .require_shader("resources/normalized_01_2d_with_uv.vert");
-        let curve_stencil_shape_fsh = init
-            .subsystem
-            .require_shader("resources/stencil_loop_blinn_curve.frag");
-        let colorize_vsh = init.subsystem.require_shader("resources/filltri.vert");
-        let colorize_fsh = init.subsystem.require_shader("resources/fillcolor_r.frag");
-
-        let empty_pipeline_layout = br::PipelineLayoutObject::new(
-            init.subsystem,
-            &br::PipelineLayoutCreateInfo::new(&[], &[]),
-        )
-        .unwrap();
         let local_viewports = [icon_atlas_rect
             .extent()
             .into_rect(br::Offset2D::ZERO)
@@ -2140,12 +2078,16 @@ impl AppMenuButtonView {
         ] = init
             .subsystem
             .create_graphics_pipelines_array(&[
+                // round rect pipeline
                 br::GraphicsPipelineCreateInfo::new(
-                    &empty_pipeline_layout,
+                    init.subsystem.require_empty_pipeline_layout(),
                     round_rect_rp.subpass(0),
                     &[
-                        round_rect_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
-                        round_rect_fsh
+                        init.subsystem
+                            .require_shader("resources/filltri.vert")
+                            .on_stage(br::ShaderStage::Vertex, c"main"),
+                        init.subsystem
+                            .require_shader("resources/rounded_rect.frag")
                             .on_stage(br::ShaderStage::Fragment, c"main")
                             .with_specialization_info(&br::SpecializationInfo::new(
                                 &RoundedRectConstants {
@@ -2163,12 +2105,17 @@ impl AppMenuButtonView {
                     BLEND_STATE_SINGLE_NONE,
                 )
                 .multisample_state(MS_STATE_EMPTY),
+                // first stencil shape pipeline
                 br::GraphicsPipelineCreateInfo::new(
-                    &empty_pipeline_layout,
+                    init.subsystem.require_empty_pipeline_layout(),
                     render_pass.subpass(0),
                     &[
-                        first_stencil_shape_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
-                        first_stencil_shape_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
+                        init.subsystem
+                            .require_shader("resources/normalized_01_2d.vert")
+                            .on_stage(br::ShaderStage::Vertex, c"main"),
+                        init.subsystem
+                            .require_shader("resources/stencil_only.frag")
+                            .on_stage(br::ShaderStage::Fragment, c"main"),
                     ],
                     VI_STATE_FLOAT2_ONLY,
                     IA_STATE_TRIFAN,
@@ -2185,12 +2132,17 @@ impl AppMenuButtonView {
                 .multisample_state(
                     &br::PipelineMultisampleStateCreateInfo::new().rasterization_samples(4),
                 ),
+                // curve stencil shape
                 br::GraphicsPipelineCreateInfo::new(
-                    &empty_pipeline_layout,
+                    init.subsystem.require_empty_pipeline_layout(),
                     render_pass.subpass(0),
                     &[
-                        curve_stencil_shape_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
-                        curve_stencil_shape_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
+                        init.subsystem
+                            .require_shader("resources/normalized_01_2d_with_uv.vert")
+                            .on_stage(br::ShaderStage::Vertex, c"main"),
+                        init.subsystem
+                            .require_shader("resources/stencil_loop_blinn_curve.frag")
+                            .on_stage(br::ShaderStage::Fragment, c"main"),
                     ],
                     &br::PipelineVertexInputStateCreateInfo::new(
                         &[br::VertexInputBindingDescription::per_vertex_typed::<
@@ -2225,12 +2177,16 @@ impl AppMenuButtonView {
                 .multisample_state(
                     &br::PipelineMultisampleStateCreateInfo::new().rasterization_samples(4),
                 ),
+                // colorize pipeline
                 br::GraphicsPipelineCreateInfo::new(
-                    &empty_pipeline_layout,
+                    init.subsystem.require_empty_pipeline_layout(),
                     render_pass.subpass(1),
                     &[
-                        colorize_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
-                        colorize_fsh
+                        init.subsystem
+                            .require_shader("resources/filltri.vert")
+                            .on_stage(br::ShaderStage::Vertex, c"main"),
+                        init.subsystem
+                            .require_shader("resources/fillcolor_r.frag")
                             .on_stage(br::ShaderStage::Fragment, c"main")
                             .with_specialization_info(&br::SpecializationInfo::new(
                                 &FillcolorRConstants { r: 1.0 },
@@ -3919,7 +3875,7 @@ fn main() {
     let mut app_shell = AppShell::new(&mut events);
 
     // initialize font systems
-    crate::fontconfig::init();
+    fontconfig::init();
     let mut ft = FreeType::new().expect("Failed to initialize FreeType");
     let hinting = unsafe { ft.get_property::<u32>(c"cff", c"hinting-engine").unwrap() };
     let no_stem_darkening = unsafe {

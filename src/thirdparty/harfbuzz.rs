@@ -108,7 +108,7 @@ impl DerefMut for FontOwned {
 #[repr(transparent)]
 pub struct Font(ffi::hb_font_t);
 impl Font {
-    pub fn from_ft_face_referenced(face: &mut crate::freetype::Face) -> FontOwned {
+    pub fn from_ft_face_referenced(face: &mut super::freetype::Face) -> FontOwned {
         let ptr = unsafe { ffi::hb_ft_font_create_referenced(face.as_raw()) };
 
         FontOwned(unsafe { core::ptr::NonNull::new_unchecked(ptr as _) })

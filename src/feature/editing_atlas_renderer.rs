@@ -2,8 +2,9 @@ use bedrock::{self as br, DescriptorPoolMut, Device, MemoryBound, ShaderModule, 
 
 use crate::{
     BLEND_STATE_SINGLE_NONE, IA_STATE_TRILIST, IA_STATE_TRISTRIP, MS_STATE_EMPTY,
-    RASTER_STATE_DEFAULT_FILL_NOCULL, VI_STATE_EMPTY, VI_STATE_FLOAT4_ONLY, coordinate::SizePixels,
-    subsystem::Subsystem,
+    RASTER_STATE_DEFAULT_FILL_NOCULL, VI_STATE_EMPTY, VI_STATE_FLOAT4_ONLY,
+    coordinate::SizePixels,
+    subsystem::{Subsystem, SubsystemShaderModuleRef},
 };
 
 #[repr(C)]
@@ -21,10 +22,10 @@ pub struct EditingAtlasRenderer<'d> {
     bg_vertex_buffer_is_dirty: bool,
     pub bg_vertex_buffer: br::BufferObject<&'d Subsystem>,
     _bg_vertex_buffer_memory: br::DeviceMemoryObject<&'d Subsystem>,
-    grid_vsh: br::ShaderModuleObject<&'d Subsystem>,
-    grid_fsh: br::ShaderModuleObject<&'d Subsystem>,
-    bg_vsh: br::ShaderModuleObject<&'d Subsystem>,
-    bg_fsh: br::ShaderModuleObject<&'d Subsystem>,
+    grid_vsh: SubsystemShaderModuleRef<'d>,
+    grid_fsh: SubsystemShaderModuleRef<'d>,
+    bg_vsh: SubsystemShaderModuleRef<'d>,
+    bg_fsh: SubsystemShaderModuleRef<'d>,
     pub render_pipeline_layout: br::PipelineLayoutObject<&'d Subsystem>,
     pub render_pipeline: br::PipelineObject<&'d Subsystem>,
     pub bg_render_pipeline: br::PipelineObject<&'d Subsystem>,

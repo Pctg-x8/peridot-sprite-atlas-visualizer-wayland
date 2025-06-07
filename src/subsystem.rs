@@ -1,8 +1,8 @@
 use std::{
-    cell::OnceCell,
+    cell::{OnceCell, RefCell},
     collections::{HashMap, HashSet},
     io::Read,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use bedrock::{self as br, Device, Instance, MemoryBound, PhysicalDevice, VkHandle};
@@ -47,6 +47,18 @@ impl br::InstanceChild for SubsystemAdapterAccess {
 }
 impl br::PhysicalDevice for SubsystemAdapterAccess {}
 
+#[repr(transparent)]
+pub struct SubsystemShaderModuleRef<'a>(br::VkHandleRef<'a, br::vk::VkShaderModule>);
+impl br::VkHandle for SubsystemShaderModuleRef<'_> {
+    type Handle = br::vk::VkShaderModule;
+
+    #[inline]
+    fn native_ptr(&self) -> Self::Handle {
+        self.0.native_ptr()
+    }
+}
+impl br::ShaderModule for SubsystemShaderModuleRef<'_> {}
+
 pub struct Subsystem {
     instance: br::vk::VkInstance,
     adapter: br::vk::VkPhysicalDevice,
@@ -57,6 +69,7 @@ pub struct Subsystem {
     graphics_queue: br::vk::VkQueue,
     pipeline_cache: br::vk::VkPipelineCache,
     empty_pipeline_layout: OnceCell<br::VkHandleRef<'static, br::vk::VkPipelineLayout>>,
+    loaded_shader_modules: RefCell<HashMap<PathBuf, br::vk::VkShaderModule>>,
 }
 impl Drop for Subsystem {
     fn drop(&mut self) {
@@ -87,6 +100,10 @@ impl Drop for Subsystem {
                 Err(e) => {
                     eprintln!("get pipeline cache data length failed: {e:?}");
                 }
+            }
+
+            for (_, v) in self.loaded_shader_modules.get_mut().drain() {
+                br::vkfn::destroy_shader_module(self.device, v, core::ptr::null());
             }
 
             if let Some(x) = self.empty_pipeline_layout.take() {
@@ -351,6 +368,7 @@ impl Subsystem {
             adapter_properties,
             pipeline_cache,
             empty_pipeline_layout: OnceCell::new(),
+            loaded_shader_modules: RefCell::new(HashMap::new()),
         }
     }
 
@@ -389,29 +407,37 @@ impl Subsystem {
         self.adapter_memory_info.is_coherent(index)
     }
 
-    #[inline]
+    #[tracing::instrument(skip(self), fields(path = %path.as_ref().display()), err(Display))]
     pub fn load_shader<'d>(
         &'d self,
         path: impl AsRef<Path>,
-    ) -> Result<br::ShaderModuleObject<&'d Self>, LoadShaderError> {
-        br::ShaderModuleObject::new(
+    ) -> Result<SubsystemShaderModuleRef<'d>, LoadShaderError> {
+        if let Some(&loaded) = self.loaded_shader_modules.borrow().get(path.as_ref()) {
+            return Ok(SubsystemShaderModuleRef(unsafe {
+                br::VkHandleRef::dangling(loaded)
+            }));
+        }
+
+        tracing::info!("Loading fresh shader");
+        let obj = br::ShaderModuleObject::new(
             self,
-            &br::ShaderModuleCreateInfo::new(&load_spv_file(path)?),
-        )
-        .map_err(From::from)
+            &br::ShaderModuleCreateInfo::new(&load_spv_file(&path)?),
+        )?
+        .unmanage()
+        .0;
+        self.loaded_shader_modules
+            .borrow_mut()
+            .insert(path.as_ref().to_owned(), obj);
+        Ok(SubsystemShaderModuleRef(unsafe {
+            br::VkHandleRef::dangling(obj)
+        }))
     }
 
     #[tracing::instrument(skip(self), fields(path = %path.as_ref().display()))]
-    pub fn require_shader<'d>(
-        &'d self,
-        path: impl AsRef<Path>,
-    ) -> br::ShaderModuleObject<&'d Self> {
+    pub fn require_shader<'d>(&'d self, path: impl AsRef<Path>) -> SubsystemShaderModuleRef<'d> {
         match self.load_shader(path) {
             Ok(x) => x,
-            Err(e) => {
-                tracing::error!(reason = ?e, "Failed to load required shader blob");
-                std::process::abort();
-            }
+            Err(_) => panic!("could not load required shader"),
         }
     }
 

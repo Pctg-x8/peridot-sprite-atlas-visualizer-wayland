@@ -105,12 +105,9 @@ impl MenuButtonView {
         let rp = br::RenderPassObject::new(
             init.subsystem,
             &br::RenderPassCreateInfo2::new(
-                &[br::AttachmentDescription2::new(br::vk::VK_FORMAT_R8_UNORM)
+                &[br::AttachmentDescription2::new(init.atlas.format())
                     .color_memory_op(br::LoadOp::Clear, br::StoreOp::Store)
-                    .layout_transition(
-                        br::ImageLayout::Undefined,
-                        br::ImageLayout::ShaderReadOnlyOpt,
-                    )],
+                    .with_layout_to(br::ImageLayout::ShaderReadOnlyOpt.from_undefined())],
                 &[br::SubpassDescription2::new()
                     .colors(&[br::AttachmentReference2::color_attachment_opt(0)])],
                 &[br::SubpassDependency2::new(
@@ -140,15 +137,10 @@ impl MenuButtonView {
         )
         .unwrap();
 
-        let pipeline_layout = br::PipelineLayoutObject::new(
-            init.subsystem,
-            &br::PipelineLayoutCreateInfo::new(&[], &[]),
-        )
-        .unwrap();
         let [pipeline] = init
             .subsystem
             .create_graphics_pipelines_array(&[br::GraphicsPipelineCreateInfo::new(
-                &pipeline_layout,
+                init.subsystem.require_empty_pipeline_layout(),
                 rp.subpass(0),
                 &[
                     init.subsystem
@@ -173,11 +165,10 @@ impl MenuButtonView {
             .multisample_state(MS_STATE_EMPTY)])
             .unwrap();
 
-        let mut cp = br::CommandPoolObject::new(
-            init.subsystem,
-            &br::CommandPoolCreateInfo::new(init.subsystem.graphics_queue_family_index).transient(),
-        )
-        .unwrap();
+        let mut cp = init
+            .subsystem
+            .create_transient_graphics_command_pool()
+            .unwrap();
         let [mut cb] = br::CommandBufferObject::alloc_array(
             init.subsystem,
             &br::CommandBufferFixedCountAllocateInfo::new(&mut cp, br::CommandBufferLevel::Primary),

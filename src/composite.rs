@@ -769,6 +769,7 @@ pub struct CompositionSurfaceAtlas<'d> {
     memory: br::DeviceMemoryObject<&'d Subsystem>,
     residency_bitmap: Vec<u8>,
     size: u32,
+    format: br::vk::VkFormat,
     used_left: u32,
     used_top: u32,
     current_line_top: u32,
@@ -904,6 +905,7 @@ impl<'d> CompositionSurfaceAtlas<'d> {
             memory,
             residency_bitmap,
             size,
+            format: pixel_format,
             used_left: 0,
             used_top: 0,
             current_line_top: 0,
@@ -916,6 +918,10 @@ impl<'d> CompositionSurfaceAtlas<'d> {
 
     pub const fn size(&self) -> u32 {
         self.size
+    }
+
+    pub const fn format(&self) -> br::vk::VkFormat {
+        self.format
     }
 
     pub const fn vk_extent(&self) -> br::Extent2D {

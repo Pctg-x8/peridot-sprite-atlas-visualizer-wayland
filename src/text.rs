@@ -1,8 +1,8 @@
 use crate::{
-    freetype as ft, harfbuzz as hb,
     subsystem::{
         StagingScratchBufferManager, StagingScratchBufferMapMode, StagingScratchBufferReservation,
     },
+    thirdparty::{freetype as ft, harfbuzz as hb},
 };
 use bedrock::{self as br, DeviceMemoryMut, Image, MemoryBound, VkHandle};
 use freetype2::*;

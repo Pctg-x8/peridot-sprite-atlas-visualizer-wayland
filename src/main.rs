@@ -203,6 +203,7 @@ impl SpriteListToggleButtonView {
         0u16, 1, 2, 2, 1, 3, 2, 3, 4, 4, 3, 5, 6, 7, 8, 8, 7, 9, 8, 9, 10, 10, 9, 11,
     ];
 
+    #[tracing::instrument(name = "SpriteListToggleButtonView::new", skip(init))]
     pub fn new(init: &mut ViewInitContext) -> Self {
         let icon_size_px = (Self::ICON_SIZE * init.ui_scale_factor).ceil() as u32;
         let icon_atlas_rect = init.atlas.alloc(icon_size_px, icon_size_px);
@@ -214,7 +215,7 @@ impl SpriteListToggleButtonView {
         let bufsize = Self::ICON_VERTICES.len() * core::mem::size_of::<[f32; 2]>()
             + Self::ICON_INDICES.len() * core::mem::size_of::<u16>();
         let mut buf = br::BufferObject::new(
-            &init.subsystem,
+            init.subsystem,
             &br::BufferCreateInfo::new(
                 bufsize,
                 br::BufferUsage::VERTEX_BUFFER | br::BufferUsage::INDEX_BUFFER,
@@ -260,7 +261,7 @@ impl SpriteListToggleButtonView {
         ptr.end();
 
         let mut msaa_buffer = br::ImageObject::new(
-            &init.subsystem,
+            init.subsystem,
             &br::ImageCreateInfo::new(icon_atlas_rect.extent(), br::vk::VK_FORMAT_R8_UNORM)
                 .as_color_attachment()
                 .usage_with(br::ImageUsageFlags::TRANSFER_SRC)
@@ -270,11 +271,10 @@ impl SpriteListToggleButtonView {
         let mreq = msaa_buffer.requirements();
         let memindex = init
             .subsystem
-            .adapter_memory_info
-            .find_device_local_index(mreq.memoryTypeBits)
+            .find_device_local_memory_index(mreq.memoryTypeBits)
             .expect("no suitable memory for msaa buffer");
         let msaa_mem = br::DeviceMemoryObject::new(
-            &init.subsystem,
+            init.subsystem,
             &br::MemoryAllocateInfo::new(mreq.size, memindex),
         )
         .unwrap();
@@ -287,7 +287,7 @@ impl SpriteListToggleButtonView {
         .unwrap();
 
         let rp = br::RenderPassObject::new(
-            &init.subsystem,
+            init.subsystem,
             &br::RenderPassCreateInfo2::new(
                 &[br::AttachmentDescription2::new(br::vk::VK_FORMAT_R8_UNORM)
                     .color_memory_op(br::LoadOp::Clear, br::StoreOp::Store)
@@ -315,7 +315,7 @@ impl SpriteListToggleButtonView {
         )
         .unwrap();
         let fb = br::FramebufferObject::new(
-            &init.subsystem,
+            init.subsystem,
             &br::FramebufferCreateInfo::new(
                 &rp,
                 &[msaa_buffer.as_transparent_ref()],
@@ -325,7 +325,7 @@ impl SpriteListToggleButtonView {
         )
         .unwrap();
         let rp_direct = br::RenderPassObject::new(
-            &init.subsystem,
+            init.subsystem,
             &br::RenderPassCreateInfo2::new(
                 &[br::AttachmentDescription2::new(br::vk::VK_FORMAT_R8_UNORM)
                     .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store)
@@ -355,7 +355,7 @@ impl SpriteListToggleButtonView {
         )
         .unwrap();
         let fb_direct = br::FramebufferObject::new(
-            &init.subsystem,
+            init.subsystem,
             &br::FramebufferCreateInfo::new(
                 &rp_direct,
                 &[init.atlas.resource().as_transparent_ref()],
@@ -365,27 +365,6 @@ impl SpriteListToggleButtonView {
         )
         .unwrap();
 
-        let vsh = init
-            .subsystem
-            .load_shader("resources/notrans.vert")
-            .unwrap();
-        let fsh = init
-            .subsystem
-            .load_shader("resources/fillcolor_r.frag")
-            .unwrap();
-        let vsh_circle = init
-            .subsystem
-            .load_shader("resources/filltri.vert")
-            .unwrap();
-        let fsh_circle = init
-            .subsystem
-            .load_shader("resources/aa_circle.frag")
-            .unwrap();
-        let pl = br::PipelineLayoutObject::new(
-            &init.subsystem,
-            &br::PipelineLayoutCreateInfo::new(&[], &[]),
-        )
-        .unwrap();
         #[derive(br::SpecializationConstants)]
         struct CircleFragmentShaderParams {
             #[constant_id = 0]
@@ -395,11 +374,15 @@ impl SpriteListToggleButtonView {
             .subsystem
             .create_graphics_pipelines_array(&[
                 br::GraphicsPipelineCreateInfo::new(
-                    &pl,
+                    init.subsystem.require_empty_pipeline_layout(),
                     rp.subpass(0),
                     &[
-                        vsh.on_stage(br::ShaderStage::Vertex, c"main"),
-                        fsh.on_stage(br::ShaderStage::Fragment, c"main")
+                        init.subsystem
+                            .require_shader("resources/notrans.vert")
+                            .on_stage(br::ShaderStage::Vertex, c"main"),
+                        init.subsystem
+                            .require_shader("resources/fillcolor_r.frag")
+                            .on_stage(br::ShaderStage::Fragment, c"main")
                             .with_specialization_info(&br::SpecializationInfo::new(
                                 &FillcolorRConstants { r: 1.0 },
                             )),
@@ -420,26 +403,29 @@ impl SpriteListToggleButtonView {
                     &br::PipelineMultisampleStateCreateInfo::new().rasterization_samples(4),
                 ),
                 br::GraphicsPipelineCreateInfo::new(
-                    &pl,
+                    init.subsystem.require_empty_pipeline_layout(),
                     rp_direct.subpass(0),
                     &[
-                        vsh_circle.on_stage(br::ShaderStage::Vertex, c"main"),
-                        fsh_circle
+                        init.subsystem
+                            .require_shader("resources/filltri.vert")
+                            .on_stage(br::ShaderStage::Vertex, c"main"),
+                        init.subsystem
+                            .require_shader("resources/aa_circle.frag")
                             .on_stage(br::ShaderStage::Fragment, c"main")
                             .with_specialization_info(&br::SpecializationInfo::new(
                                 &CircleFragmentShaderParams { softness: 0.0 },
                             )),
                     ],
-                    &VI_STATE_EMPTY,
-                    &IA_STATE_TRILIST,
+                    VI_STATE_EMPTY,
+                    IA_STATE_TRILIST,
                     &br::PipelineViewportStateCreateInfo::new(
                         &[circle_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
                         &[circle_atlas_rect.vk_rect()],
                     ),
-                    &RASTER_STATE_DEFAULT_FILL_NOCULL,
-                    &BLEND_STATE_SINGLE_NONE,
+                    RASTER_STATE_DEFAULT_FILL_NOCULL,
+                    BLEND_STATE_SINGLE_NONE,
                 )
-                .multisample_state(&MS_STATE_EMPTY),
+                .multisample_state(MS_STATE_EMPTY),
             ])
             .unwrap();
 
@@ -448,7 +434,7 @@ impl SpriteListToggleButtonView {
             .create_transient_graphics_command_pool()
             .unwrap();
         let [mut cb] = br::CommandBufferObject::alloc_array(
-            &init.subsystem,
+            init.subsystem,
             &br::CommandBufferFixedCountAllocateInfo::new(&mut cp, br::CommandBufferLevel::Primary),
         )
         .unwrap();
@@ -725,6 +711,7 @@ impl SpriteListCellView {
     const HEIGHT: f32 = 24.0;
     const LABEL_MARGIN_LEFT: f32 = 8.0;
 
+    #[tracing::instrument(name = "SpriteListCellView::new", skip(init))]
     pub fn new(init: &mut ViewInitContext, init_label: &str, init_top: f32) -> Self {
         let label_layout = TextLayout::build_simple(init_label, &mut init.fonts.ui_default);
         let label_atlas_rect = init
@@ -778,15 +765,6 @@ impl SpriteListCellView {
         )
         .unwrap();
 
-        let vsh = init
-            .subsystem
-            .load_shader("resources/filltri.vert")
-            .unwrap();
-        let fsh = init
-            .subsystem
-            .load_shader("resources/rounded_rect.frag")
-            .unwrap();
-
         let pipeline_layout = br::PipelineLayoutObject::new(
             &init.subsystem,
             &br::PipelineLayoutCreateInfo::new(&[], &[]),
@@ -798,8 +776,12 @@ impl SpriteListCellView {
                 &pipeline_layout,
                 render_pass.subpass(0),
                 &[
-                    br::PipelineShaderStage::new(br::ShaderStage::Vertex, &vsh, c"main"),
-                    br::PipelineShaderStage::new(br::ShaderStage::Fragment, &fsh, c"main"),
+                    init.subsystem
+                        .require_shader("resources/filltri.vert")
+                        .on_stage(br::ShaderStage::Vertex, c"main"),
+                    init.subsystem
+                        .require_shader("resources/rounded_rect.frag")
+                        .on_stage(br::ShaderStage::Fragment, c"main"),
                 ],
                 VI_STATE_EMPTY,
                 IA_STATE_TRILIST,
@@ -827,6 +809,15 @@ impl SpriteListCellView {
             cb.begin(&br::CommandBufferBeginInfo::new(), &init.subsystem)
                 .unwrap()
         }
+        .pipeline_barrier_2(&br::DependencyInfo::new(
+            &[],
+            &[],
+            &[br::ImageMemoryBarrier2::new(
+                init.atlas.resource().image(),
+                br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+            )
+            .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
+        ))
         .inject(|r| {
             let (b, o) = init.staging_scratch_buffer.of(&label_stg_image_pixels);
 
@@ -972,6 +963,7 @@ impl SpriteListPaneView {
     const INIT_WIDTH: f32 = 320.0;
     const RESIZE_AREA_WIDTH: f32 = 8.0;
 
+    #[tracing::instrument(name = "SpriteListPaneView::new", skip(init))]
     pub fn new(init: &mut ViewInitContext, header_height: f32) -> Self {
         let render_size_px = ((Self::CORNER_RADIUS * 2.0 + 1.0) * init.ui_scale_factor) as u32;
         let frame_image_atlas_rect = init.atlas.alloc(render_size_px, render_size_px);
@@ -1853,11 +1845,10 @@ impl AppMenuButtonView {
     const HPADDING: f32 = 16.0;
     const ICON_LABEL_GAP: f32 = 4.0;
 
-    const BG_COLOR_SHOWN: [f32; 4] = [1.0, 1.0, 1.0, 0.25];
-    const BG_COLOR_HIDDEN: [f32; 4] = [1.0, 1.0, 1.0, 0.0];
     const CONTENT_COLOR_SHOWN: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
     const CONTENT_COLOR_HIDDEN: [f32; 4] = [1.0, 1.0, 1.0, 0.0];
 
+    #[tracing::instrument(name = "AppMenuButtonView::new", skip(init), fields(icon_path = %icon_path.as_ref().display()))]
     pub fn new(
         init: &mut ViewInitContext,
         label: &str,
@@ -1984,8 +1975,7 @@ impl AppMenuButtonView {
         let req = ms_color_buffer.requirements();
         let memindex = init
             .subsystem
-            .adapter_memory_info
-            .find_device_local_index(req.memoryTypeBits)
+            .find_device_local_memory_index(req.memoryTypeBits)
             .unwrap();
         let ms_color_buffer_mem = br::DeviceMemoryObject::new(
             init.subsystem,
@@ -2097,38 +2087,20 @@ impl AppMenuButtonView {
         )
         .unwrap();
 
-        let round_rect_vsh = init
-            .subsystem
-            .load_shader("resources/filltri.vert")
-            .unwrap();
-        let round_rect_fsh = init
-            .subsystem
-            .load_shader("resources/rounded_rect.frag")
-            .unwrap();
+        let round_rect_vsh = init.subsystem.require_shader("resources/filltri.vert");
+        let round_rect_fsh = init.subsystem.require_shader("resources/rounded_rect.frag");
         let first_stencil_shape_vsh = init
             .subsystem
-            .load_shader("resources/normalized_01_2d.vert")
-            .unwrap();
-        let first_stencil_shape_fsh = init
-            .subsystem
-            .load_shader("resources/stencil_only.frag")
-            .unwrap();
+            .require_shader("resources/normalized_01_2d.vert");
+        let first_stencil_shape_fsh = init.subsystem.require_shader("resources/stencil_only.frag");
         let curve_stencil_shape_vsh = init
             .subsystem
-            .load_shader("resources/normalized_01_2d_with_uv.vert")
-            .unwrap();
+            .require_shader("resources/normalized_01_2d_with_uv.vert");
         let curve_stencil_shape_fsh = init
             .subsystem
-            .load_shader("resources/stencil_loop_blinn_curve.frag")
-            .unwrap();
-        let colorize_vsh = init
-            .subsystem
-            .load_shader("resources/filltri.vert")
-            .unwrap();
-        let colorize_fsh = init
-            .subsystem
-            .load_shader("resources/fillcolor_r.frag")
-            .unwrap();
+            .require_shader("resources/stencil_loop_blinn_curve.frag");
+        let colorize_vsh = init.subsystem.require_shader("resources/filltri.vert");
+        let colorize_fsh = init.subsystem.require_shader("resources/fillcolor_r.frag");
 
         let empty_pipeline_layout = br::PipelineLayoutObject::new(
             init.subsystem,
@@ -2689,16 +2661,23 @@ impl AppMenuButtonView {
                 .into_iter()
                 .fold(r, |r, vr| r.draw(vr.len() as _, 1, vr.start as _, 0))
         })
-        .bind_pipeline(
-            br::PipelineBindPoint::Graphics,
-            &curve_stencil_shape_pipeline,
-        )
-        .bind_vertex_buffer_array(
-            0,
-            &[vbuf.as_transparent_ref()],
-            &[curve_triangle_points_offset as _],
-        )
-        .draw(curve_triangle_points.len() as _, 1, 0, 0)
+        .inject(|r| {
+            if curve_triangle_points.is_empty() {
+                // no curves
+                return r;
+            }
+
+            r.bind_pipeline(
+                br::PipelineBindPoint::Graphics,
+                &curve_stencil_shape_pipeline,
+            )
+            .bind_vertex_buffer_array(
+                0,
+                &[vbuf.as_transparent_ref()],
+                &[curve_triangle_points_offset as _],
+            )
+            .draw(curve_triangle_points.len() as _, 1, 0, 0)
+        })
         .next_subpass2(
             &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
             &br::SubpassEndInfo::new(),
@@ -3017,6 +2996,7 @@ struct AppMenuBaseView {
     ht_root: HitTestTreeRef,
 }
 impl AppMenuBaseView {
+    #[tracing::instrument(name = "AppMenuBaseView::new", skip(init))]
     pub fn new(init: &mut ViewInitContext) -> Self {
         let ct_root = init.composite_tree.register(CompositeRect {
             relative_size_adjustment: [1.0, 1.0],
@@ -3419,15 +3399,6 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler {
     }
 }
 
-struct FrameCallback {
-    app_event_queue: *mut VecDeque<AppEvent>,
-}
-impl wl::CallbackEventListener for FrameCallback {
-    fn done(&mut self, _: &mut wl::Callback, _: u32) {
-        unsafe { &mut *self.app_event_queue }.push_back(AppEvent::ToplevelWindowFrameTiming);
-    }
-}
-
 enum PointerOnSurface {
     None,
     Main { serial: u32 },
@@ -3451,10 +3422,7 @@ impl wl::XdgToplevelEventListener for WaylandShellEventHandler {
             height: height as _,
         });
 
-        println!(
-            "configure: {width} {height} {states:?} th: {:?}",
-            std::thread::current().id()
-        );
+        tracing::trace!(width, height, ?states, "configure");
     }
 
     fn close(&mut self, _: &mut wl::XdgToplevel) {
@@ -3462,30 +3430,24 @@ impl wl::XdgToplevelEventListener for WaylandShellEventHandler {
     }
 
     fn configure_bounds(&mut self, _toplevel: &mut wl::XdgToplevel, width: i32, height: i32) {
-        println!(
-            "configure bounds: {width} {height} th: {:?}",
-            std::thread::current().id()
-        );
+        tracing::trace!(width, height, "configure bounds");
     }
 
     fn wm_capabilities(&mut self, _toplevel: &mut wl::XdgToplevel, capabilities: &[i32]) {
-        println!(
-            "wm capabilities: {capabilities:?} th: {:?}",
-            std::thread::current().id()
-        );
+        tracing::trace!(?capabilities, "wm capabilities");
     }
 }
 impl wl::SurfaceEventListener for WaylandShellEventHandler {
     fn enter(&mut self, _surface: &mut wl::Surface, _output: &mut wl::Output) {
-        println!("enter output");
+        tracing::trace!("enter output");
     }
 
     fn leave(&mut self, _surface: &mut wl::Surface, _output: &mut wl::Output) {
-        println!("leave output");
+        tracing::trace!("leave output");
     }
 
     fn preferred_buffer_scale(&mut self, surface: &mut wl::Surface, factor: i32) {
-        println!("preferred buffer scale: {factor}");
+        tracing::trace!(factor, "preferred buffer scale");
         self.ui_scale_factor.set(factor as _);
         // 同じ値を適用することでdpi-awareになるらしい
         surface.set_buffer_scale(factor).unwrap();
@@ -3493,7 +3455,7 @@ impl wl::SurfaceEventListener for WaylandShellEventHandler {
     }
 
     fn preferred_buffer_transform(&mut self, _surface: &mut wl::Surface, transform: u32) {
-        println!("preferred buffer transform: {transform}");
+        tracing::trace!(transform, "preferred buffer transform");
     }
 }
 impl wl::PointerEventListener for WaylandShellEventHandler {
@@ -3522,6 +3484,7 @@ impl wl::PointerEventListener for WaylandShellEventHandler {
             }
         }
     }
+
     fn leave(&mut self, _pointer: &mut wl::Pointer, _serial: u32, surface: &mut wl::Surface) {
         match self.pointer_on_surface {
             PointerOnSurface::None => (),
@@ -3552,6 +3515,7 @@ impl wl::PointerEventListener for WaylandShellEventHandler {
         }
     }
 
+    #[tracing::instrument(skip(self, _pointer), fields(state = state as u32))]
     fn button(
         &mut self,
         _pointer: &mut wl::Pointer,
@@ -3560,8 +3524,6 @@ impl wl::PointerEventListener for WaylandShellEventHandler {
         button: u32,
         state: wl::PointerButtonState,
     ) {
-        println!("button: {serial} {time} {button} {}", state as u32);
-
         match self.pointer_on_surface {
             PointerOnSurface::None => (),
             PointerOnSurface::Main { serial } => {
@@ -3583,7 +3545,7 @@ impl wl::PointerEventListener for WaylandShellEventHandler {
     }
 
     fn axis(&mut self, _pointer: &mut wl::Pointer, time: u32, axis: u32, value: wl::Fixed) {
-        println!("axis: {time} {axis} {}", value.to_f32());
+        tracing::trace!(time, axis, value = value.to_f32(), "axis");
     }
 
     fn frame(&mut self, _pointer: &mut wl::Pointer) {
@@ -3591,23 +3553,23 @@ impl wl::PointerEventListener for WaylandShellEventHandler {
     }
 
     fn axis_source(&mut self, _pointer: &mut wl::Pointer, axis_source: u32) {
-        println!("axis source: {axis_source}");
+        tracing::trace!(axis_source, "axis source");
     }
 
     fn axis_stop(&mut self, _pointer: &mut wl::Pointer, _time: u32, axis: u32) {
-        println!("axis stop: {axis}");
+        tracing::trace!(axis, "axis stop");
     }
 
     fn axis_discrete(&mut self, _pointer: &mut wl::Pointer, axis: u32, discrete: i32) {
-        println!("axis discrete: {axis} {discrete}");
+        tracing::trace!(axis, discrete, "axis discrete");
     }
 
     fn axis_value120(&mut self, _pointer: &mut wl::Pointer, axis: u32, value120: i32) {
-        println!("axis value120: {axis} {value120}");
+        tracing::trace!(axis, value120, "axis value120");
     }
 
     fn axis_relative_direction(&mut self, _pointer: &mut wl::Pointer, axis: u32, direction: u32) {
-        println!("axis relative direction: {axis} {direction}");
+        tracing::trace!(axis, direction, "axis relative direction");
     }
 }
 impl wl::CallbackEventListener for WaylandShellEventHandler {
@@ -3625,6 +3587,7 @@ struct AppShell {
     frame_callback: core::ptr::NonNull<wl::Callback>,
 }
 impl AppShell {
+    #[tracing::instrument(skip(events))]
     pub fn new(events: *mut VecDeque<AppEvent>) -> Self {
         let mut dp = wl::Display::connect().unwrap();
         let mut registry = dp.get_registry().unwrap();
@@ -3642,43 +3605,51 @@ impl AppShell {
                 interface: &core::ffi::CStr,
                 version: u32,
             ) {
-                println!("wl global: {name} {interface:?} {version}");
+                tracing::debug!(name, ?interface, version, "wl global");
 
                 if interface == c"wl_compositor" {
-                    self.compositor = Some(
-                        registry
-                            .bind(name, version)
-                            .expect("Failed to bind compositor interface"),
-                    );
+                    self.compositor = match registry.bind(name, version) {
+                        Ok(x) => Some(x),
+                        Err(e) => {
+                            tracing::warn!(?interface, reason = ?e, "Failed to bind");
+                            None
+                        }
+                    };
                 }
 
                 if interface == c"xdg_wm_base" {
-                    self.xdg_wm_base = Some(
-                        registry
-                            .bind(name, version)
-                            .expect("Failed to bind xdg wm base interface"),
-                    );
+                    self.xdg_wm_base = match registry.bind(name, version) {
+                        Ok(x) => Some(x),
+                        Err(e) => {
+                            tracing::warn!(?interface, reason = ?e, "Failed to bind");
+                            None
+                        }
+                    };
                 }
 
                 if interface == c"wl_seat" {
-                    self.seat = Some(
-                        registry
-                            .bind(name, version)
-                            .expect("Failed to bind seat interface"),
-                    );
+                    self.seat = match registry.bind(name, version) {
+                        Ok(x) => Some(x),
+                        Err(e) => {
+                            tracing::warn!(?interface, reason = ?e, "Failed to bind");
+                            None
+                        }
+                    };
                 }
 
                 if interface == c"wp_cursor_shape_manager_v1" {
-                    self.cursor_shape_manager = Some(
-                        registry
-                            .bind(name, version)
-                            .expect("Failed to bind wp_cursor_shape_manager_v1 interface"),
-                    );
+                    self.cursor_shape_manager = match registry.bind(name, version) {
+                        Ok(x) => Some(x),
+                        Err(e) => {
+                            tracing::warn!(?interface, reason = ?e, "Failed to bind");
+                            None
+                        }
+                    };
                 }
             }
 
             fn global_remove(&mut self, _registry: &mut wl::Registry, name: u32) {
-                unimplemented!("wl global remove: {name}");
+                tracing::warn!(name, "unimplemented: wl global remove");
             }
         }
         let mut rl = RegistryListener {
@@ -3687,60 +3658,135 @@ impl AppShell {
             seat: None,
             cursor_shape_manager: None,
         };
-        registry
-            .add_listener(&mut rl)
-            .expect("Failed to register listener");
-        dp.roundtrip().expect("Failed to roundtrip events");
+        if let Err(e) = registry.add_listener(&mut rl) {
+            tracing::warn!(target = "registry", reason = ?e, "Failed to set listener");
+        }
+        if let Err(e) = dp.roundtrip() {
+            tracing::warn!(reason = ?e, "Failed to roundtrip");
+        }
         drop(registry);
 
-        let mut compositor = rl.compositor.take().unwrap();
-        let mut xdg_wm_base = rl.xdg_wm_base.take().unwrap();
-        let mut seat = rl.seat.take().unwrap();
-        let mut cursor_shape_manager = rl.cursor_shape_manager.take().unwrap();
+        let (mut compositor, mut xdg_wm_base, mut seat, mut cursor_shape_manager);
+        match rl {
+            RegistryListener {
+                compositor: Some(compositor1),
+                xdg_wm_base: Some(xdg_wm_base1),
+                seat: Some(seat1),
+                cursor_shape_manager: Some(cursor_shape_manager1),
+            } => {
+                compositor = compositor1;
+                xdg_wm_base = xdg_wm_base1;
+                seat = seat1;
+                cursor_shape_manager = cursor_shape_manager1;
+            }
+            rl => {
+                if rl.compositor.is_none() {
+                    tracing::error!(
+                        interface = "wl_compositor",
+                        "Missing required wayland interface"
+                    );
+                }
+                if rl.xdg_wm_base.is_none() {
+                    tracing::error!(
+                        interface = "xdg_wm_base",
+                        "Missing required wayland interface"
+                    );
+                }
+                if rl.seat.is_none() {
+                    tracing::error!(interface = "wl_seat", "Missing required wayland interface");
+                }
+                if rl.cursor_shape_manager.is_none() {
+                    tracing::error!(
+                        interface = "wp_cursor_shape_manager_v1",
+                        "Missing required wayland interface"
+                    );
+                }
+
+                std::process::abort();
+            }
+        }
 
         struct SeatListener {
             pointer: Option<wl::Owned<wl::Pointer>>,
         }
         impl wl::SeatEventListener for SeatListener {
             fn capabilities(&mut self, seat: &mut wl::Seat, capabilities: u32) {
-                println!("seat cb: 0x{capabilities:04x}");
+                tracing::debug!(capabilities = format!("0x{capabilities:04x}"), "seat event");
 
                 if (capabilities & 0x01) != 0 {
                     // pointer
-                    self.pointer = Some(seat.get_pointer().expect("Failed to get pointer"));
+                    self.pointer = match seat.get_pointer() {
+                        Ok(x) => Some(x),
+                        Err(e) => {
+                            tracing::warn!(reason = ?e, "Failed to get pointer");
+                            None
+                        }
+                    };
                 }
             }
 
             fn name(&mut self, _seat: &mut wl::Seat, name: &core::ffi::CStr) {
-                println!("seat name: {name:?}");
+                tracing::debug!(?name, "seat event");
             }
         }
         let mut seat_listener = SeatListener { pointer: None };
-        seat.add_listener(&mut seat_listener).unwrap();
-        dp.roundtrip().expect("Failed to sync");
+        if let Err(e) = seat.add_listener(&mut seat_listener) {
+            tracing::warn!(target = "seat", reason = ?e, "Failed to set listener");
+        }
+        if let Err(e) = dp.roundtrip() {
+            tracing::warn!(reason = ?e, "Failed to roundtrip");
+        }
 
-        let mut pointer = seat_listener.pointer.take().expect("no pointer from seat");
-        let cursor_shape_device = cursor_shape_manager
-            .get_pointer(&mut pointer)
-            .expect("Failed to get cursor shape device");
+        let mut pointer = match seat_listener {
+            SeatListener { pointer: Some(p) } => p,
+            _ => {
+                tracing::error!("No pointer from seat");
+                std::process::abort();
+            }
+        };
+        let cursor_shape_device = match cursor_shape_manager.get_pointer(&mut pointer) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to get cursor shape device");
+                std::process::abort();
+            }
+        };
 
-        let mut wl_surface = compositor
-            .create_surface()
-            .expect("Failed to create wl_surface");
-        let mut xdg_surface = xdg_wm_base
-            .get_xdg_surface(&mut wl_surface)
-            .expect("Failed to get xdg surface");
-        let mut xdg_toplevel = xdg_surface
-            .get_toplevel()
-            .expect("Failed to get xdg toplevel");
-        xdg_toplevel
-            .set_app_id(c"io.ct2.peridot.tools.sprite_atlas")
-            .expect("Failed to set app id");
-        xdg_toplevel
-            .set_title(c"Peridot SpriteAtlas Visualizer/Editor")
-            .expect("Failed to set title");
+        let mut wl_surface = match compositor.create_surface() {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to create wl_surface");
+                std::process::abort();
+            }
+        };
+        let mut xdg_surface = match xdg_wm_base.get_xdg_surface(&mut wl_surface) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to get xdg surface");
+                std::process::abort();
+            }
+        };
+        let mut xdg_toplevel = match xdg_surface.get_toplevel() {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to get xdg toplevel");
+                std::process::abort();
+            }
+        };
+        if let Err(e) = xdg_toplevel.set_app_id(c"io.ct2.peridot.tools.sprite_atlas") {
+            tracing::warn!(reason = ?e, "Failed to set app id");
+        }
+        if let Err(e) = xdg_toplevel.set_title(c"Peridot SpriteAtlas Visualizer/Editor") {
+            tracing::warn!(reason = ?e, "Failed to set app title");
+        }
 
-        let mut frame = wl_surface.frame().expect("Failed to request next frame");
+        let mut frame = match wl_surface.frame() {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to request next frame");
+                std::process::abort();
+            }
+        };
 
         let mut shell_event_handler = Box::new(WaylandShellEventHandler {
             app_event_bus: events,
@@ -3749,19 +3795,25 @@ impl AppShell {
             main_surface_proxy_ptr: wl_surface.as_raw() as _,
         });
 
-        pointer.add_listener(&mut *shell_event_handler).unwrap();
-        xdg_surface
-            .add_listener(&mut *shell_event_handler)
-            .expect("Failed to register toplevel surface event");
-        xdg_toplevel
-            .add_listener(&mut *shell_event_handler)
-            .expect("Failed to register toplevel window event");
-        wl_surface.add_listener(&mut *shell_event_handler).unwrap();
-        frame
-            .add_listener(&mut *shell_event_handler)
-            .expect("Failed to set frame callback");
+        if let Err(e) = pointer.add_listener(&mut *shell_event_handler) {
+            tracing::warn!(target = "pointer", reason = ?e, "Failed to set listener");
+        }
+        if let Err(e) = xdg_surface.add_listener(&mut *shell_event_handler) {
+            tracing::warn!(target = "xdg_surface", reason = ?e, "Failed to set listener");
+        }
+        if let Err(e) = xdg_toplevel.add_listener(&mut *shell_event_handler) {
+            tracing::warn!(target = "xdg_toplevel", reason = ?e, "Failed to set listener");
+        }
+        if let Err(e) = wl_surface.add_listener(&mut *shell_event_handler) {
+            tracing::warn!(target = "wl_surface", reason = ?e, "Failed to set listener");
+        }
+        if let Err(e) = frame.add_listener(&mut *shell_event_handler) {
+            tracing::warn!(target = "frame", reason = ?e, "Failed to set listener");
+        }
 
-        wl_surface.commit().expect("Failed to commit surface");
+        if let Err(e) = wl_surface.commit() {
+            tracing::warn!(reason = ?e, "Failed to commit wl_surface");
+        }
 
         compositor.leak();
         xdg_wm_base.leak();
@@ -3793,49 +3845,76 @@ impl AppShell {
         }
     }
 
+    #[tracing::instrument(skip(self))]
     pub fn flush(&mut self) {
-        self.display.flush().unwrap();
+        if let Err(e) = self.display.flush() {
+            tracing::warn!(reason = ?e, "Failed to flush display events");
+        }
     }
 
+    #[tracing::instrument(skip(self))]
     pub fn process_pending_events(&mut self) {
-        self.display.dispatch().expect("Failed to dispatch");
+        if let Err(e) = self.display.dispatch() {
+            tracing::warn!(reason = ?e, "Failed to dispatch display events");
+        }
     }
 
+    #[tracing::instrument(skip(self))]
     pub fn request_next_frame(&mut self) {
-        self.frame_callback = unsafe { self.surface.as_mut() }
-            .frame()
-            .expect("Failed to request next frame")
-            .unwrap();
-        unsafe { self.frame_callback.as_mut() }
-            .add_listener(&mut *self.shell_event_handler)
-            .expect("Failed to set frame callback");
+        self.frame_callback = match unsafe { self.surface.as_mut() }.frame() {
+            Ok(cb) => cb.unwrap(),
+            Err(e) => {
+                tracing::warn!(reason = ?e, "Failed to request next frame");
+                return;
+            }
+        };
+        if let Err(e) =
+            unsafe { self.frame_callback.as_mut() }.add_listener(&mut *self.shell_event_handler)
+        {
+            tracing::warn!(target = "frame_callback", reason = ?e, "Failed to set listener");
+        }
     }
 
+    #[tracing::instrument(skip(self))]
     pub fn post_configure(&mut self, serial: u32) {
-        println!("ToplevelWindowSurfaceConfigure {serial}");
-        unsafe { self.xdg_surface.as_mut() }
-            .ack_configure(serial)
-            .expect("Failed to ack configure");
+        tracing::trace!("ToplevelWindowSurfaceConfigure");
+
+        if let Err(e) = unsafe { self.xdg_surface.as_mut() }.ack_configure(serial) {
+            tracing::warn!(reason = ?e, "Failed to ack configure");
+        }
     }
 
+    #[tracing::instrument(skip(self))]
     pub fn set_cursor_shape(&mut self, enter_serial: u32, shape: CursorShape) {
-        unsafe { self.cursor_shape_device.as_mut() }
-            .set_shape(
-                enter_serial,
-                match shape {
-                    CursorShape::Default => WpCursorShapeDeviceV1Shape::Default,
-                    CursorShape::ResizeHorizontal => WpCursorShapeDeviceV1Shape::EwResize,
-                },
-            )
-            .unwrap();
+        if let Err(e) = unsafe { self.cursor_shape_device.as_mut() }.set_shape(
+            enter_serial,
+            match shape {
+                CursorShape::Default => WpCursorShapeDeviceV1Shape::Default,
+                CursorShape::ResizeHorizontal => WpCursorShapeDeviceV1Shape::EwResize,
+            },
+        ) {
+            tracing::warn!(reason = ?e, "Failed to set cursor shape");
+        }
     }
 
+    #[inline]
     pub fn ui_scale_factor(&self) -> f32 {
         self.shell_event_handler.ui_scale_factor.get()
     }
 }
 
 fn main() {
+    tracing_subscriber::fmt()
+        .pretty()
+        .with_thread_names(true)
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!(%info, "application panic");
+    }));
+
+    tracing::info!("Initializing Peridot SpriteAtlas Visualizer/Editor");
+
     let mut events = VecDeque::new();
     let mut app_shell = AppShell::new(&mut events);
 
@@ -3843,12 +3922,11 @@ fn main() {
     crate::fontconfig::init();
     let mut ft = FreeType::new().expect("Failed to initialize FreeType");
     let hinting = unsafe { ft.get_property::<u32>(c"cff", c"hinting-engine").unwrap() };
-    println!("hinting engine: {hinting}");
     let no_stem_darkening = unsafe {
         ft.get_property::<freetype2::FT_Bool>(c"cff", c"no-stem-darkening")
             .unwrap()
     };
-    println!("no stem darkening: {no_stem_darkening}");
+    tracing::debug!(hinting, no_stem_darkening, "freetype cff properties");
     unsafe {
         ft.set_property(c"cff", c"no-stem-darkening", &(true as freetype2::FT_Bool))
             .unwrap();
@@ -3994,14 +4072,16 @@ fn main() {
         let file_path = f.get_file_path(0).unwrap();
         let index = f.get_face_index(0).unwrap();
 
-        println!("match font: {file_path:?} {index}");
+        tracing::debug!(?file_path, index, "match font");
 
         if primary_face_info.is_none() {
             primary_face_info = Some((file_path.to_owned(), index));
         }
     }
-
-    let (primary_face_path, primary_face_index) = primary_face_info.unwrap();
+    let Some((primary_face_path, primary_face_index)) = primary_face_info else {
+        tracing::error!("No UI face found");
+        std::process::abort();
+    };
 
     let mut ft_face = ft
         .new_face(&primary_face_path, primary_face_index as _)
@@ -4083,8 +4163,8 @@ fn main() {
     let composite_sampler =
         br::SamplerObject::new(&subsystem, &br::SamplerCreateInfo::new()).unwrap();
 
-    let composite_vsh = subsystem.load_shader("resources/composite.vert").unwrap();
-    let composite_fsh = subsystem.load_shader("resources/composite.frag").unwrap();
+    let composite_vsh = subsystem.require_shader("resources/composite.vert");
+    let composite_fsh = subsystem.require_shader("resources/composite.frag");
     let composite_shader_stages = [
         br::PipelineShaderStage::new(br::ShaderStage::Vertex, &composite_vsh, c"main"),
         br::PipelineShaderStage::new(br::ShaderStage::Fragment, &composite_fsh, c"main"),
@@ -4168,34 +4248,27 @@ fn main() {
         br::CullModeFlags::NONE,
         br::FrontFace::CounterClockwise,
     );
+    let composite_blend_state = br::PipelineColorBlendStateCreateInfo::new(&[
+        br::vk::VkPipelineColorBlendAttachmentState::PREMULTIPLIED,
+    ]);
 
     let [mut composite_pipeline] = subsystem
-        .new_graphics_pipeline_array(
-            &[br::GraphicsPipelineCreateInfo::new(
-                &composite_pipeline_layout,
-                main_rp.subpass(0),
-                &composite_shader_stages,
-                &composite_vinput,
-                &composite_ia_state,
-                &br::PipelineViewportStateCreateInfo::new(
-                    &[br::Viewport {
-                        x: 0.0,
-                        y: 0.0,
-                        width: sc_size.width as _,
-                        height: sc_size.height as _,
-                        minDepth: 0.0,
-                        maxDepth: 1.0,
-                    }],
-                    &[sc_size.into_rect(br::Offset2D::ZERO)],
-                ),
-                &composite_raster_state,
-                &br::PipelineColorBlendStateCreateInfo::new(&[
-                    br::vk::VkPipelineColorBlendAttachmentState::PREMULTIPLIED,
-                ]),
-            )
-            .multisample_state(&br::PipelineMultisampleStateCreateInfo::new())],
-            None::<&br::PipelineCacheObject<&br::DeviceObject<&br::InstanceObject>>>,
+        .create_graphics_pipelines_array(&[br::GraphicsPipelineCreateInfo::new(
+            &composite_pipeline_layout,
+            main_rp.subpass(0),
+            &composite_shader_stages,
+            &composite_vinput,
+            &composite_ia_state,
+            &br::PipelineViewportStateCreateInfo::new(
+                &[sc_size
+                    .into_rect(br::Offset2D::ZERO)
+                    .make_viewport(0.0..1.0)],
+                &[sc_size.into_rect(br::Offset2D::ZERO)],
+            ),
+            &composite_raster_state,
+            &composite_blend_state,
         )
+        .multisample_state(&br::PipelineMultisampleStateCreateInfo::new())])
         .unwrap();
 
     let editing_atlas_renderer = Rc::new(RefCell::new(EditingAtlasRenderer::new(
@@ -4261,9 +4334,9 @@ fn main() {
         .borrow_mut()
         .set_offset(0.0, app_header.height() * app_shell.ui_scale_factor());
 
-    println!(
-        "Reserved Staging Buffers during UI initialization: {}",
-        staging_scratch_buffer.total_reserved_amount()
+    tracing::debug!(
+        byte_size = staging_scratch_buffer.total_reserved_amount(),
+        "Reserved Staging Buffers during UI initialization",
     );
     ht_manager.dump(ht_root);
 
@@ -4278,10 +4351,7 @@ fn main() {
         composite_tree.sink_all(
             sc_size,
             0.0,
-            br::Extent2D {
-                width: composition_alphamask_surface_atlas.size(),
-                height: composition_alphamask_surface_atlas.size(),
-            },
+            composition_alphamask_surface_atlas.vk_extent(),
             &ptr,
         )
     };
@@ -4759,13 +4829,13 @@ fn main() {
                     app_shell.request_next_frame();
                 }
                 AppEvent::ToplevelWindowConfigure { width, height } => {
-                    println!("ToplevelWindowConfigure {width} {height}");
+                    tracing::trace!(width, height, "ToplevelWindowConfigure");
                     frame_resize_request = Some((width, height));
                 }
                 AppEvent::ToplevelWindowSurfaceConfigure { serial } => {
                     if let Some((w, h)) = frame_resize_request.take() {
                         if w != sc_size.width || h != sc_size.height {
-                            println!("frame resize: {w} {h}");
+                            tracing::trace!(w, h, "frame resize");
 
                             client_size.set((w as f32, h as f32));
                             sc_size.width = (w as f32 * app_shell.ui_scale_factor()) as _;
@@ -4831,25 +4901,26 @@ fn main() {
                                 .collect::<Vec<_>>();
 
                             let [composite_pipeline1] = subsystem
-                                .new_graphics_pipeline_array(
-                                    &[br::GraphicsPipelineCreateInfo::new(
+                                .create_graphics_pipelines_array(&[
+                                    br::GraphicsPipelineCreateInfo::new(
                                         &composite_pipeline_layout,
                                         main_rp.subpass(0),
                                         &composite_shader_stages,
                                         &composite_vinput,
                                         &composite_ia_state,
                                         &br::PipelineViewportStateCreateInfo::new(
-                                            &[sc_size.into_rect(br::Offset2D::ZERO).make_viewport(0.0..1.0)],
+                                            &[sc_size
+                                                .into_rect(br::Offset2D::ZERO)
+                                                .make_viewport(0.0..1.0)],
                                             &[sc_size.into_rect(br::Offset2D::ZERO)],
                                         ),
                                         &composite_raster_state,
-                                        &br::PipelineColorBlendStateCreateInfo::new(&[
-                                            br::vk::VkPipelineColorBlendAttachmentState::PREMULTIPLIED,
-                                        ]),
+                                        &composite_blend_state,
                                     )
-                                    .multisample_state(&br::PipelineMultisampleStateCreateInfo::new())],
-                                    None::<&br::PipelineCacheObject<&br::DeviceObject<&br::InstanceObject>>>,
-                                )
+                                    .multisample_state(
+                                        &br::PipelineMultisampleStateCreateInfo::new(),
+                                    ),
+                                ])
                                 .unwrap();
                             composite_pipeline = composite_pipeline1;
 

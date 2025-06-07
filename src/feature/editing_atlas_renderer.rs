@@ -33,66 +33,107 @@ pub struct EditingAtlasRenderer<'d> {
     pub ds_param: br::DescriptorSet,
 }
 impl<'d> EditingAtlasRenderer<'d> {
+    #[tracing::instrument(skip(subsystem, rendered_pass))]
     pub fn new(
         subsystem: &'d Subsystem,
         rendered_pass: br::SubpassRef<impl br::RenderPass>,
         main_buffer_size: br::Extent2D,
         init_atlas_size: SizePixels,
     ) -> Self {
-        let mut param_buffer = br::BufferObject::new(
+        let mut param_buffer = match br::BufferObject::new(
             subsystem,
             &br::BufferCreateInfo::new_for_type::<GridParams>(
                 br::BufferUsage::UNIFORM_BUFFER | br::BufferUsage::TRANSFER_DEST,
             ),
-        )
-        .unwrap();
+        ) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to create param buffer");
+                std::process::abort();
+            }
+        };
         let mreq = param_buffer.requirements();
-        let memindex = subsystem
-            .adapter_memory_info
-            .find_device_local_index(mreq.memoryTypeBits)
-            .expect("no suitable memory property");
-        let param_buffer_memory = br::DeviceMemoryObject::new(
+        let Some(memindex) = subsystem.find_device_local_memory_index(mreq.memoryTypeBits) else {
+            tracing::error!("No suitable memory for param buffer");
+            std::process::abort();
+        };
+        let param_buffer_memory = match br::DeviceMemoryObject::new(
             subsystem,
             &br::MemoryAllocateInfo::new(mreq.size, memindex),
-        )
-        .unwrap();
-        param_buffer.bind(&param_buffer_memory, 0).unwrap();
+        ) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to allocate param buffer memory");
+                std::process::abort();
+            }
+        };
+        if let Err(e) = param_buffer.bind(&param_buffer_memory, 0) {
+            tracing::warn!(reason = ?e, "Failed to bind param buffer memory");
+        }
 
-        let mut bg_vertex_buffer = br::BufferObject::new(
+        let mut bg_vertex_buffer = match br::BufferObject::new(
             subsystem,
             &br::BufferCreateInfo::new_for_type::<[[f32; 4]; 4]>(
                 br::BufferUsage::VERTEX_BUFFER | br::BufferUsage::TRANSFER_DEST,
             ),
-        )
-        .unwrap();
+        ) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to create bg vertex buffer");
+                std::process::abort();
+            }
+        };
         let mreq = bg_vertex_buffer.requirements();
-        let memindex = subsystem
-            .adapter_memory_info
-            .find_device_local_index(mreq.memoryTypeBits)
-            .expect("no suitable memory");
-        let bg_vertex_buffer_memory = br::DeviceMemoryObject::new(
+        let Some(memindex) = subsystem.find_device_local_memory_index(mreq.memoryTypeBits) else {
+            tracing::error!("No suitable memory for bg vertex buffer");
+            std::process::abort();
+        };
+        let bg_vertex_buffer_memory = match br::DeviceMemoryObject::new(
             subsystem,
             &br::MemoryAllocateInfo::new(mreq.size, memindex),
-        )
-        .unwrap();
-        bg_vertex_buffer.bind(&bg_vertex_buffer_memory, 0).unwrap();
+        ) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to allocate bg vertex buffer memory");
+                std::process::abort();
+            }
+        };
+        if let Err(e) = bg_vertex_buffer.bind(&bg_vertex_buffer_memory, 0) {
+            tracing::warn!(reason = ?e, "Failed to bind bg vertex buffer memory");
+        }
 
-        let dsl_param = br::DescriptorSetLayoutObject::new(
+        let dsl_param = match br::DescriptorSetLayoutObject::new(
             subsystem,
             &br::DescriptorSetLayoutCreateInfo::new(&[
                 br::DescriptorType::UniformBuffer.make_binding(0, 1)
             ]),
-        )
-        .unwrap();
-        let mut dp = br::DescriptorPoolObject::new(
+        ) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to create param descriptor set layout");
+                std::process::abort();
+            }
+        };
+        let mut dp = match br::DescriptorPoolObject::new(
             subsystem,
             &br::DescriptorPoolCreateInfo::new(
                 1,
                 &[br::DescriptorType::UniformBuffer.make_size(1)],
             ),
-        )
-        .unwrap();
-        let [ds_param] = dp.alloc_array(&[dsl_param.as_transparent_ref()]).unwrap();
+        ) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to create descriptor pool");
+                std::process::abort();
+            }
+        };
+        let [ds_param] = match dp.alloc_array(&[dsl_param.as_transparent_ref()]) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to allocate descriptor sets");
+                std::process::abort();
+            }
+        };
         subsystem.update_descriptor_sets(
             &[ds_param
                 .binding_at(0)
@@ -103,12 +144,12 @@ impl<'d> EditingAtlasRenderer<'d> {
             &[],
         );
 
-        let vsh = subsystem.load_shader("resources/filltri.vert").unwrap();
-        let fsh = subsystem.load_shader("resources/grid.frag").unwrap();
-        let bg_vsh = subsystem.load_shader("resources/atlas_bg.vert").unwrap();
-        let bg_fsh = subsystem.load_shader("resources/atlas_bg.frag").unwrap();
+        let vsh = subsystem.require_shader("resources/filltri.vert");
+        let fsh = subsystem.require_shader("resources/grid.frag");
+        let bg_vsh = subsystem.require_shader("resources/atlas_bg.vert");
+        let bg_fsh = subsystem.require_shader("resources/atlas_bg.frag");
 
-        let render_pipeline_layout = br::PipelineLayoutObject::new(
+        let render_pipeline_layout = match br::PipelineLayoutObject::new(
             subsystem,
             &br::PipelineLayoutCreateInfo::new(
                 &[dsl_param.as_transparent_ref()],
@@ -117,8 +158,13 @@ impl<'d> EditingAtlasRenderer<'d> {
                     0,
                 )],
             ),
-        )
-        .unwrap();
+        ) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to create pipeline layout");
+                std::process::abort();
+            }
+        };
         let [render_pipeline, bg_render_pipeline] = subsystem
             .create_graphics_pipelines_array(&[
                 br::GraphicsPipelineCreateInfo::new(

@@ -270,7 +270,7 @@ impl<'c, ActionContext> HitTestTreeManager<'c, ActionContext> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum CursorShape {
     Default,
     ResizeHorizontal,

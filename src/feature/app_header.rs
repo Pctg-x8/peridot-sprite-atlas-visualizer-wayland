@@ -46,6 +46,7 @@ impl MenuButtonView {
     const ICON_INDICES: &'static [u16] = &[0, 1, 2, 2, 3, 1, 4, 5, 6, 6, 7, 5, 8, 9, 10, 10, 11, 9];
     const ICON_SIZE: f32 = 10.0;
 
+    #[tracing::instrument(name = "MenuButtonView::new", skip(init))]
     pub fn new(init: &mut ViewInitContext, height: f32) -> Self {
         let icon_atlas_rect = init.atlas.alloc(
             (Self::ICON_SIZE * init.ui_scale_factor) as _,
@@ -139,15 +140,6 @@ impl MenuButtonView {
         )
         .unwrap();
 
-        let vsh = init
-            .subsystem
-            .load_shader("resources/notrans.vert")
-            .unwrap();
-        let fsh = init
-            .subsystem
-            .load_shader("resources/fillcolor_r.frag")
-            .unwrap();
-
         let pipeline_layout = br::PipelineLayoutObject::new(
             init.subsystem,
             &br::PipelineLayoutCreateInfo::new(&[], &[]),
@@ -159,8 +151,12 @@ impl MenuButtonView {
                 &pipeline_layout,
                 rp.subpass(0),
                 &[
-                    vsh.on_stage(br::ShaderStage::Vertex, c"main"),
-                    fsh.on_stage(br::ShaderStage::Fragment, c"main")
+                    init.subsystem
+                        .require_shader("resources/notrans.vert")
+                        .on_stage(br::ShaderStage::Vertex, c"main"),
+                    init.subsystem
+                        .require_shader("resources/fillcolor_r.frag")
+                        .on_stage(br::ShaderStage::Fragment, c"main")
                         .with_specialization_info(&br::SpecializationInfo::new(
                             &FillcolorRConstants { r: 1.0 },
                         )),
@@ -333,6 +329,7 @@ impl BaseView {
     const TITLE_SPACING: f32 = 16.0;
     const TITLE_LEFT_OFFSET: f32 = 48.0;
 
+    #[tracing::instrument(name = "BaseView::new", skip(ctx))]
     pub fn new(ctx: &mut ViewInitContext) -> Self {
         let title = "Peridot SpriteAtlas Visualizer/Editor";
         let text_layout = TextLayout::build_simple(title, &mut ctx.fonts.ui_default);

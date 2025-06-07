@@ -68,20 +68,6 @@ impl Proxy {
         if r == 0 { Ok(()) } else { Err(()) }
     }
 
-    #[inline(always)]
-    pub unsafe fn add_dispatcher(
-        &mut self,
-        dispatcher: ffi::DispatcherFunc,
-        dispatcher_data: *const core::ffi::c_void,
-        data: *mut core::ffi::c_void,
-    ) -> Result<(), ()> {
-        let r = unsafe {
-            ffi::wl_proxy_add_dispatcher(self as *mut _ as _, dispatcher, dispatcher_data, data)
-        };
-
-        if r == 0 { Ok(()) } else { Err(()) }
-    }
-
     #[inline]
     fn marshal_array_flags(
         &mut self,
@@ -151,7 +137,7 @@ pub unsafe trait Interface {
 pub struct Owned<T: Interface>(NonNull<T>);
 impl<T: Interface> Drop for Owned<T> {
     fn drop(&mut self) {
-        println!("drop wl owned: {:?}", core::any::type_name::<T>());
+        tracing::trace!(type_name = core::any::type_name::<T>(), "drop wl owned");
 
         unsafe {
             self.0.as_mut().destruct();

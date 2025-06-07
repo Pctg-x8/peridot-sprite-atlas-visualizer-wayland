@@ -1,10 +1,19 @@
 use std::{
+    cell::OnceCell,
     collections::{HashMap, HashSet},
     io::Read,
     path::Path,
 };
 
 use bedrock::{self as br, Device, Instance, MemoryBound, PhysicalDevice, VkHandle};
+
+#[derive(Debug, thiserror::Error)]
+pub enum LoadShaderError {
+    #[error(transparent)]
+    Vk(#[from] br::vk::VkResult),
+    #[error(transparent)]
+    IO(#[from] std::io::Error),
+}
 
 #[repr(transparent)]
 pub struct SubsystemInstanceAccess(Subsystem);
@@ -47,6 +56,7 @@ pub struct Subsystem {
     pub graphics_queue_family_index: u32,
     graphics_queue: br::vk::VkQueue,
     pipeline_cache: br::vk::VkPipelineCache,
+    empty_pipeline_layout: OnceCell<br::VkHandleRef<'static, br::vk::VkPipelineLayout>>,
 }
 impl Drop for Subsystem {
     fn drop(&mut self) {
@@ -79,6 +89,9 @@ impl Drop for Subsystem {
                 }
             }
 
+            if let Some(x) = self.empty_pipeline_layout.take() {
+                br::vkfn::destroy_pipeline_layout(self.device, x.native_ptr(), core::ptr::null());
+            }
             br::vkfn::destroy_pipeline_cache(self.device, self.pipeline_cache, core::ptr::null());
             br::vkfn::destroy_device(self.device, core::ptr::null());
             br::vkfn::destroy_instance(self.instance, core::ptr::null());
@@ -103,18 +116,15 @@ impl br::InstanceChild for Subsystem {
 }
 impl br::Device for Subsystem {}
 impl Subsystem {
+    #[tracing::instrument]
     pub fn init() -> Self {
         for x in br::instance_extension_properties(None).unwrap() {
-            println!(
-                "vkext {:?} version {}",
-                x.extensionName.as_cstr().unwrap(),
-                x.specVersion,
-            );
+            tracing::debug!(extension_name = ?x.extensionName.as_cstr(), version = x.specVersion, "vkext");
         }
 
-        let instance = br::InstanceObject::new(&br::InstanceCreateInfo::new(
+        let instance = match br::InstanceObject::new(&br::InstanceCreateInfo::new(
             &br::ApplicationInfo::new(
-                c"Peridot SpriteAtlas Visualizer",
+                c"Peridot SpriteAtlas Visualizer/Editor",
                 br::Version::new(0, 0, 1, 0),
                 c"",
                 br::Version::new(0, 0, 0, 0),
@@ -122,13 +132,26 @@ impl Subsystem {
             .api_version(br::Version::new(0, 1, 4, 0)),
             &[c"VK_LAYER_KHRONOS_validation".into()],
             &[c"VK_KHR_surface".into(), c"VK_KHR_wayland_surface".into()],
-        ))
-        .unwrap();
-        let adapter = instance
-            .iter_physical_devices()
-            .expect("Failed to iterate physical devices")
-            .next()
-            .expect("no physical devices");
+        )) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to create vk instance");
+                std::process::abort();
+            }
+        };
+        let adapter = match instance.iter_physical_devices() {
+            Ok(mut xs) => match xs.next() {
+                Some(x) => x,
+                None => {
+                    tracing::error!("No physical devices");
+                    std::process::abort();
+                }
+            },
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to enumerate physical devices");
+                std::process::abort();
+            }
+        };
         let adapter_queue_info = adapter.queue_family_properties_alloc();
         for (n, q) in adapter_queue_info.iter().enumerate() {
             let mut v = Vec::with_capacity(4);
@@ -145,7 +168,7 @@ impl Subsystem {
                 v.push("Sparse Binding");
             }
 
-            println!("Queue #{n}: x{} {}", q.queueCount, v.join(" / "));
+            tracing::debug!(index = n, count = q.queueCount, flags = ?v, "Queue");
         }
         let adapter_memory_info = adapter.memory_properties();
         for (n, p) in adapter_memory_info.types().iter().enumerate() {
@@ -191,18 +214,39 @@ impl Subsystem {
                 hv.push("Multi Instance");
             }
 
-            println!(
-                "Memory Type #{n}: {} heap #{} ({}) size {}",
-                v.join(" / "),
-                p.heapIndex,
-                hv.join(" / "),
-                fmt_bytesize(h.size as _)
+            tracing::debug!(
+                index = n,
+                flags = ?v,
+                heap.index = p.heapIndex,
+                heap.flags = ?hv,
+                heap.size = fmt_bytesize(h.size as _),
+                "Memory Type",
             );
         }
         let adapter_properties = adapter.properties();
-        println!(
-            "max texture2d size: {}",
-            adapter_properties.limits.maxImageDimension2D
+        let r8_image_format_properties = match adapter.image_format_properties(
+            br::vk::VK_FORMAT_R8_UNORM,
+            br::vk::VK_IMAGE_VIEW_TYPE_2D,
+            br::vk::VK_IMAGE_TILING_OPTIMAL,
+            br::ImageUsageFlags::COLOR_ATTACHMENT,
+            br::ImageFlags::EMPTY,
+        ) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::warn!(reason = ?e, "Failed to get image format properties for VK_FORMAT_R8_UNORM");
+                br::vk::VkImageFormatProperties {
+                    maxExtent: br::Extent3D::spread1(0),
+                    maxMipLevels: 0,
+                    maxArrayLayers: 0,
+                    sampleCounts: 0,
+                    maxResourceSize: 0,
+                }
+            }
+        };
+        tracing::debug!(
+            max_texture2d_size = adapter_properties.limits.maxImageDimension2D,
+            r8_image_format_sample_count = r8_image_format_properties.sampleCounts,
+            "adapter properties",
         );
         let adapter_sparse_image_format_props = adapter.sparse_image_format_properties_alloc(
             br::vk::VK_FORMAT_R8_UNORM,
@@ -212,9 +256,11 @@ impl Subsystem {
             br::vk::VK_IMAGE_TILING_OPTIMAL,
         );
         for x in adapter_sparse_image_format_props.iter() {
-            println!(
-                "sparse image format property: {:?} 0x{:04x} 0x{:04x}",
-                x.imageGranularity, x.aspectMask, x.flags
+            tracing::debug!(
+                image_granularity = ?x.imageGranularity,
+                aspect_mask = format!("0x{:04x}", x.aspectMask),
+                flags = format!("0x{:04x}", x.flags),
+                "sparse image format property",
             );
         }
         let graphics_queue_family_index = adapter_queue_info
@@ -251,17 +297,41 @@ impl Subsystem {
             // try load from persistent
             match std::fs::read(&pipeline_cache_path) {
                 Ok(blob) => {
-                    br::PipelineCacheObject::new(&device, &br::PipelineCacheCreateInfo::new(&blob))
-                        .unwrap()
+                    tracing::info!("Recovering previous pipeline cache from file");
+                    match br::PipelineCacheObject::new(
+                        &device,
+                        &br::PipelineCacheCreateInfo::new(&blob),
+                    ) {
+                        Ok(x) => x,
+                        Err(e) => {
+                            tracing::error!(reason = ?e, "Failed to create pipeline cachec object");
+                            std::process::abort();
+                        }
+                    }
                 }
                 Err(e) => {
-                    eprintln!("pipeline cache load err: {e:?}");
-                    br::PipelineCacheObject::new(&device, &br::PipelineCacheCreateInfo::new(&[]))
-                        .unwrap()
+                    tracing::warn!(reason = ?e, "Failed to load pipeline cache");
+                    match br::PipelineCacheObject::new(
+                        &device,
+                        &br::PipelineCacheCreateInfo::new(&[]),
+                    ) {
+                        Ok(x) => x,
+                        Err(e) => {
+                            tracing::error!(reason = ?e, "Failed to create pipeline cachec object");
+                            std::process::abort();
+                        }
+                    }
                 }
             }
         } else {
-            br::PipelineCacheObject::new(&device, &br::PipelineCacheCreateInfo::new(&[])).unwrap()
+            tracing::info!("No previous pipeline cache file found");
+            match br::PipelineCacheObject::new(&device, &br::PipelineCacheCreateInfo::new(&[])) {
+                Ok(x) => x,
+                Err(e) => {
+                    tracing::error!(reason = ?e, "Failed to create pipeline cachec object");
+                    std::process::abort();
+                }
+            }
         };
 
         let (pipeline_cache, _) = pipeline_cache.unmanage();
@@ -280,6 +350,7 @@ impl Subsystem {
             adapter_memory_info,
             adapter_properties,
             pipeline_cache,
+            empty_pipeline_layout: OnceCell::new(),
         }
     }
 
@@ -287,6 +358,17 @@ impl Subsystem {
         unsafe { core::mem::transmute::<_, &SubsystemAdapterAccess>(self) }
     }
 
+    #[tracing::instrument(skip(self), ret(level = tracing::Level::TRACE))]
+    pub fn find_device_local_memory_index(&self, mask: u32) -> Option<u32> {
+        self.adapter_memory_info.find_device_local_index(mask)
+    }
+
+    #[tracing::instrument(skip(self), ret(level = tracing::Level::TRACE))]
+    pub fn find_host_visible_memory_index(&self, mask: u32) -> Option<u32> {
+        self.adapter_memory_info.find_host_visible_index(mask)
+    }
+
+    #[tracing::instrument(skip(self), ret(level = tracing::Level::TRACE))]
     pub fn find_direct_memory_index(&self, mask: u32) -> Option<u32> {
         self.adapter_memory_info
             .types()
@@ -311,14 +393,45 @@ impl Subsystem {
     pub fn load_shader<'d>(
         &'d self,
         path: impl AsRef<Path>,
-    ) -> br::Result<br::ShaderModuleObject<&'d Self>> {
+    ) -> Result<br::ShaderModuleObject<&'d Self>, LoadShaderError> {
         br::ShaderModuleObject::new(
             self,
-            &br::ShaderModuleCreateInfo::new(&load_spv_file(path).unwrap()),
+            &br::ShaderModuleCreateInfo::new(&load_spv_file(path)?),
         )
+        .map_err(From::from)
     }
 
-    #[inline]
+    #[tracing::instrument(skip(self), fields(path = %path.as_ref().display()))]
+    pub fn require_shader<'d>(
+        &'d self,
+        path: impl AsRef<Path>,
+    ) -> br::ShaderModuleObject<&'d Self> {
+        match self.load_shader(path) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to load required shader blob");
+                std::process::abort();
+            }
+        }
+    }
+
+    #[tracing::instrument(skip(self))]
+    pub fn require_empty_pipeline_layout<'d>(
+        &'d self,
+    ) -> &'d impl br::VkHandle<Handle = br::vk::VkPipelineLayout> {
+        self.empty_pipeline_layout.get_or_init(|| {
+            match br::PipelineLayoutObject::new(self, &br::PipelineLayoutCreateInfo::new(&[], &[]))
+            {
+                Ok(x) => unsafe { br::VkHandleRef::dangling(x.unmanage().0) },
+                Err(e) => {
+                    tracing::error!(reason = ?e, "Failed to create required empty pipeline layout");
+                    std::process::abort();
+                }
+            }
+        })
+    }
+
+    #[tracing::instrument(skip(self, create_info_array), err(Display))]
     pub fn create_graphics_pipelines_array<const N: usize>(
         &self,
         create_info_array: &[br::GraphicsPipelineCreateInfo; N],
@@ -330,7 +443,7 @@ impl Subsystem {
         )
     }
 
-    #[inline]
+    #[tracing::instrument(skip(self), err(Display))]
     pub fn create_transient_graphics_command_pool(
         &self,
     ) -> br::Result<br::CommandPoolObject<&Self>> {
@@ -340,6 +453,7 @@ impl Subsystem {
         )
     }
 
+    #[tracing::instrument(skip(self, buffers), err(Display))]
     pub fn sync_execute_graphics_commands(
         &self,
         buffers: &[br::CommandBufferSubmitInfo],
@@ -356,6 +470,7 @@ impl Subsystem {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self, works, fence), err(Display))]
     pub fn submit_graphics_works(
         &self,
         works: &[br::SubmitInfo2],
@@ -370,10 +485,12 @@ impl Subsystem {
         }
     }
 
+    #[tracing::instrument(skip(self, present_info), err(Display))]
     pub fn queue_present(&self, present_info: &br::PresentInfo) -> br::Result<()> {
         unsafe { br::vkfn_wrapper::queue_present(self.graphics_queue, present_info).map(drop) }
     }
 
+    #[tracing::instrument(skip(self, infos, fence), err(Display))]
     pub unsafe fn bind_sparse_raw(
         &self,
         infos: &[br::vk::VkBindSparseInfo],
@@ -422,16 +539,15 @@ pub struct MappedStagingScratchBuffer<'r, 'g> {
 impl Drop for MappedStagingScratchBuffer<'_, '_> {
     fn drop(&mut self) {
         if self.explicit_flush {
-            let r = unsafe {
+            if let Err(e) = unsafe {
                 self.gfx_device_ref
                     .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(
                         self.memory,
                         self.range.start,
                         self.range.end - self.range.start,
                     )])
-            };
-            if let Err(e) = r {
-                eprintln!("Failed to flush mapped memory ranges: {e:?}");
+            } {
+                tracing::warn!(reason = ?e, "Failed to flush mapped memory ranges");
             }
         }
 
@@ -472,24 +588,38 @@ impl br::VkHandle for StagingScratchBuffer<'_> {
     }
 }
 impl<'g> StagingScratchBuffer<'g> {
+    #[tracing::instrument(name = "StagingScratchBuffer::new", skip(gfx_device))]
     pub fn new(gfx_device: &'g Subsystem, size: br::DeviceSize) -> Self {
-        let mut buf = br::BufferObject::new(
+        let mut buf = match br::BufferObject::new(
             gfx_device,
             &br::BufferCreateInfo::new(size as _, br::BufferUsage::TRANSFER_SRC),
-        )
-        .expect("Failed to create StagingScratchBuffer");
+        ) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to create buffer object");
+                std::process::abort();
+            }
+        };
         let mreq = buf.requirements();
-        let memindex = gfx_device
-            .adapter_memory_info
-            .find_host_visible_index(mreq.memoryTypeBits)
-            .expect("no suitable memory for StagingScratchBuffer");
-        let is_coherent = gfx_device.adapter_memory_info.is_coherent(memindex);
-        let mem = br::DeviceMemoryObject::new(
+        let Some(memindex) = gfx_device.find_host_visible_memory_index(mreq.memoryTypeBits) else {
+            tracing::error!("No suitable memory");
+            std::process::abort();
+        };
+        let is_coherent = gfx_device.is_coherent_memory_type(memindex);
+        let mem = match br::DeviceMemoryObject::new(
             gfx_device,
             &br::MemoryAllocateInfo::new(mreq.size, memindex),
-        )
-        .expect("Failed to allocate StagingScratchBuffer memory");
-        buf.bind(&mem, 0).expect("Failed to bind buffer memory");
+        ) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to allocate memory");
+                std::process::abort();
+            }
+        };
+        if let Err(e) = buf.bind(&mem, 0) {
+            tracing::error!(reason = ?e, "Failed to bind memory to buffer");
+            std::process::abort();
+        }
 
         Self {
             next_suitable_index: None,
@@ -528,16 +658,15 @@ impl<'g> StagingScratchBuffer<'g> {
             )?
         };
         if mode.is_read() && self.requires_explicit_flush {
-            let r = unsafe {
+            if let Err(e) = unsafe {
                 self.gfx_device_ref
                     .invalidate_memory_range(&[br::MappedMemoryRange::new_raw(
                         self.memory,
                         range.start,
                         range.end - range.start,
                     )])
-            };
-            if let Err(e) = r {
-                eprintln!("Failed to invalidate mapped memory range: {e:?}");
+            } {
+                tracing::warn!(reason = ?e, "Failed to invalidate mapped memory range");
             }
         }
 
@@ -577,6 +706,7 @@ impl<'g> StagingScratchBufferManager<'g> {
         .trailing_ones() as usize
         + 2;
 
+    #[tracing::instrument(name = "StagingScratchBufferManager::new", skip(gfx_device))]
     pub fn new(gfx_device: &'g Subsystem) -> Self {
         let mut this = Self {
             buffer_blocks: vec![StagingScratchBuffer::new(gfx_device, Self::BLOCK_SIZE)],
@@ -588,7 +718,6 @@ impl<'g> StagingScratchBufferManager<'g> {
         };
 
         let (f, s) = Self::level_indices(Self::BLOCK_SIZE);
-        println!("f {f} s {s} size {}", Self::BLOCK_SIZE);
         this.chain_free_block(f, s, 0);
         this
     }
@@ -718,12 +847,11 @@ impl<'g> StagingScratchBufferManager<'g> {
     pub fn reserve(&mut self, size: br::DeviceSize) -> StagingScratchBufferReservation {
         // roundup
         let size = (size + (Self::MIN_ALLOC_GRANULARITY - 1)) & !(Self::MIN_ALLOC_GRANULARITY - 1);
-
         let (mut fli, mut sli) = Self::level_indices(size);
 
-        let block_index = self
-            .find_fit_free_block_index(&mut fli, &mut sli)
-            .expect("out of memory");
+        let Some(block_index) = self.find_fit_free_block_index(&mut fli, &mut sli) else {
+            todo!("out of memory. allocate new one");
+        };
         self.unchain_free_block(fli, sli, block_index);
 
         let offset = self.buffer_blocks[block_index].reserve(size);

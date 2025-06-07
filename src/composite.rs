@@ -778,96 +778,124 @@ impl<'d> CompositionSurfaceAtlas<'d> {
     // 1024なら大抵は問題ないとは思うが...
     const GRANULARITY: u32 = 1024;
 
+    #[tracing::instrument(skip(subsystem))]
     pub fn new(subsystem: &'d Subsystem, size: u32, pixel_format: br::vk::VkFormat) -> Self {
         let bpp = match pixel_format {
             br::vk::VK_FORMAT_R8_UNORM => 1,
             _ => unimplemented!("bpp"),
         };
 
-        let image = br::ImageObject::new(
+        let image = match br::ImageObject::new(
             subsystem,
-            &br::ImageCreateInfo::new(
-                br::vk::VkExtent2D {
-                    width: size,
-                    height: size,
-                },
-                pixel_format,
-            )
-            .as_color_attachment()
-            .sampled()
-            .transfer_dest()
-            .flags(br::ImageFlags::SPARSE_BINDING | br::ImageFlags::SPARSE_RESIDENCY),
-        )
-        .unwrap();
-        let resource = br::ImageViewBuilder::new(
+            &br::ImageCreateInfo::new(br::Extent2D::spread1(size), pixel_format)
+                .as_color_attachment()
+                .sampled()
+                .transfer_dest()
+                .flags(br::ImageFlags::SPARSE_BINDING | br::ImageFlags::SPARSE_RESIDENCY),
+        ) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to create image");
+                std::process::abort();
+            }
+        };
+        let resource = match br::ImageViewBuilder::new(
             image,
             br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
         )
         .create()
-        .unwrap();
+        {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to create image view");
+                std::process::abort();
+            }
+        };
+
         assert!(size % Self::GRANULARITY == 0);
         let bitmap_div = size / Self::GRANULARITY;
         let mut residency_bitmap = vec![0; (bitmap_div * bitmap_div) as usize];
-        println!(
-            "ComositionSurfaceAtlas: managing {size}x{size} atlas dividing with {} pixels ({} blocks)",
-            Self::GRANULARITY,
-            bitmap_div * bitmap_div
+        tracing::debug!(
+            size,
+            granularity = Self::GRANULARITY,
+            block_count = bitmap_div * bitmap_div,
+            "ComositionSurfaceAtlas management parameters",
         );
 
         let image_memory_requirements = resource.image().sparse_requirements_alloc();
         for x in image_memory_requirements.iter() {
-            println!("image memory requirements: {x:?}");
+            tracing::debug!(?x, "image memory requirements");
         }
 
         let image_memory_requirements = resource.image().requirements();
-        println!("image memory requirements: {image_memory_requirements:?}");
+        tracing::debug!(?image_memory_requirements, "image memory requirements");
 
-        let memory_index = subsystem
+        let memory_index = match subsystem
             .adapter_memory_info
             .find_device_local_index(image_memory_requirements.memoryTypeBits)
-            .expect("no suitable memory for surface atlas");
-        let memory = br::DeviceMemoryObject::new(
+        {
+            Some(x) => x,
+            None => {
+                tracing::error!(
+                    memory_type_mask =
+                        format!("0x{:08x}", image_memory_requirements.memoryTypeBits),
+                    "No suitable memory for surface atlas"
+                );
+                std::process::abort();
+            }
+        };
+        let memory = match br::DeviceMemoryObject::new(
             subsystem,
             &br::MemoryAllocateInfo::new(
                 (Self::GRANULARITY * Self::GRANULARITY * bpp) as _,
                 memory_index,
             ),
-        )
-        .expect("Failed to allocate first memory block");
+        ) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(
+                    size = Self::GRANULARITY * Self::GRANULARITY * bpp,
+                    memory_index,
+                    reason = ?e,
+                    "Failed to allocate first memory block"
+                );
+                std::process::abort();
+            }
+        };
 
-        unsafe {
-            subsystem
-                .bind_sparse_raw(
-                    &[br::vk::VkBindSparseInfo {
-                        sType: br::vk::VkBindSparseInfo::TYPE,
-                        pNext: core::ptr::null(),
-                        waitSemaphoreCount: 0,
-                        pWaitSemaphores: core::ptr::null(),
-                        signalSemaphoreCount: 0,
-                        pSignalSemaphores: core::ptr::null(),
-                        bufferBindCount: 0,
-                        pBufferBinds: core::ptr::null(),
-                        imageBindCount: 1,
-                        pImageBinds: [br::vk::VkSparseImageMemoryBindInfo {
-                            image: resource.image().native_ptr(),
-                            bindCount: 1,
-                            pBinds: [br::vk::VkSparseImageMemoryBind {
-                                subresource: br::ImageSubresource::new(br::AspectMask::COLOR, 0, 0),
-                                offset: br::Offset3D::ZERO,
-                                extent: br::Extent2D::spread1(Self::GRANULARITY).with_depth(1),
-                                memory: memory.native_ptr(),
-                                memoryOffset: 0,
-                                flags: 0,
-                            }]
-                            .as_ptr(),
+        if let Err(e) = unsafe {
+            subsystem.bind_sparse_raw(
+                &[br::vk::VkBindSparseInfo {
+                    sType: br::vk::VkBindSparseInfo::TYPE,
+                    pNext: core::ptr::null(),
+                    waitSemaphoreCount: 0,
+                    pWaitSemaphores: core::ptr::null(),
+                    signalSemaphoreCount: 0,
+                    pSignalSemaphores: core::ptr::null(),
+                    bufferBindCount: 0,
+                    pBufferBinds: core::ptr::null(),
+                    imageBindCount: 1,
+                    pImageBinds: [br::vk::VkSparseImageMemoryBindInfo {
+                        image: resource.image().native_ptr(),
+                        bindCount: 1,
+                        pBinds: [br::vk::VkSparseImageMemoryBind {
+                            subresource: br::ImageSubresource::new(br::AspectMask::COLOR, 0, 0),
+                            offset: br::Offset3D::ZERO,
+                            extent: br::Extent2D::spread1(Self::GRANULARITY).with_depth(1),
+                            memory: memory.native_ptr(),
+                            memoryOffset: 0,
+                            flags: 0,
                         }]
                         .as_ptr(),
-                        imageOpaqueBindCount: 0,
-                        pImageOpaqueBinds: core::ptr::null(),
-                    }],
-                    None,
-                )
-                .expect("Failed to bind first memory block");
+                    }]
+                    .as_ptr(),
+                    imageOpaqueBindCount: 0,
+                    pImageOpaqueBinds: core::ptr::null(),
+                }],
+                None,
+            )
+        } {
+            tracing::warn!(reason = ?e, "Failed to bind initial block");
         }
         residency_bitmap[0] = 0x01;
 
@@ -890,12 +918,22 @@ impl<'d> CompositionSurfaceAtlas<'d> {
         self.size
     }
 
+    pub const fn vk_extent(&self) -> br::Extent2D {
+        br::Extent2D::spread1(self.size)
+    }
+
     pub const fn uv_from_pixels(&self, pixels: f32) -> f32 {
         pixels / self.size as f32
     }
 
+    #[tracing::instrument(skip(self), ret(level = tracing::Level::TRACE))]
     pub fn alloc(&mut self, required_width: u32, required_height: u32) -> AtlasRect {
         if self.used_left + required_width > Self::GRANULARITY {
+            tracing::trace!(
+                left = Self::GRANULARITY - self.used_left,
+                "wrapping occured"
+            );
+
             // 横が越える
             // TODO: 本当はこのあたりでタイルを拡張しないといけない
             self.used_left = 0;

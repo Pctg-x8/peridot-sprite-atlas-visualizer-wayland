@@ -2,8 +2,8 @@ use bedrock::{self as br, DescriptorPoolMut, Device, MemoryBound, ShaderModule, 
 
 use crate::{
     BLEND_STATE_SINGLE_NONE, IA_STATE_TRILIST, IA_STATE_TRISTRIP, MS_STATE_EMPTY,
-    RASTER_STATE_DEFAULT_FILL_NOCULL, VI_STATE_EMPTY, VI_STATE_POSITION4_ONLY,
-    coordinate::SizePixels, subsystem::Subsystem,
+    RASTER_STATE_DEFAULT_FILL_NOCULL, VI_STATE_EMPTY, VI_STATE_FLOAT4_ONLY, coordinate::SizePixels,
+    subsystem::Subsystem,
 };
 
 #[repr(C)]
@@ -148,7 +148,7 @@ impl<'d> EditingAtlasRenderer<'d> {
                             bg_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
                             bg_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
                         ],
-                        VI_STATE_POSITION4_ONLY,
+                        VI_STATE_FLOAT4_ONLY,
                         IA_STATE_TRISTRIP,
                         &br::PipelineViewportStateCreateInfo::new(
                             &[main_buffer_size
@@ -288,7 +288,7 @@ impl<'d> EditingAtlasRenderer<'d> {
                             self.bg_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
                             self.bg_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
                         ],
-                        VI_STATE_POSITION4_ONLY,
+                        VI_STATE_FLOAT4_ONLY,
                         IA_STATE_TRISTRIP,
                         &br::PipelineViewportStateCreateInfo::new(
                             &[main_buffer_size

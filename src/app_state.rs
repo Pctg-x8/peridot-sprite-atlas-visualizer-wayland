@@ -62,12 +62,8 @@ pub struct AppState<'a> {
     visible_menu: bool,
     visible_menu_view_feedbacks: Vec<
         Box<
-            dyn FnMut(
-                    &mut ViewFeedbackContext,
-                    &mut HitTestTreeManager<AppUpdateContext<'a>>,
-                    bool,
-                    bool,
-                ) + 'a,
+            dyn FnMut(&mut ViewFeedbackContext, &mut HitTestTreeManager<AppUpdateContext<'a>>, bool)
+                + 'a,
         >,
     >,
     current_open_path: Option<PathBuf>,
@@ -176,7 +172,7 @@ impl<'a> AppState<'a> {
         self.visible_menu = !self.visible_menu;
 
         for cb in self.visible_menu_view_feedbacks.iter_mut() {
-            cb(vf_context, ht, self.visible_menu, false);
+            cb(vf_context, ht, self.visible_menu);
         }
     }
 
@@ -260,6 +256,28 @@ impl<'a> AppState<'a> {
         Ok(())
     }
 
+    pub fn synchronize_view(
+        &mut self,
+        ctx: &mut ViewFeedbackContext,
+        ht: &mut HitTestTreeManager<AppUpdateContext<'a>>,
+    ) {
+        for cb in self.atlas_size_view_feedbacks.iter_mut() {
+            cb(&self.atlas_size);
+        }
+
+        for cb in self.sprites_view_feedbacks.iter_mut() {
+            cb(&self.sprites);
+        }
+
+        for cb in self.current_open_path_view_feedbacks.iter_mut() {
+            cb(&self.current_open_path);
+        }
+
+        for cb in self.visible_menu_view_feedbacks.iter_mut() {
+            cb(ctx, ht, self.visible_menu);
+        }
+    }
+
     // TODO: unregister
     pub fn register_sprites_view_feedback(&mut self, mut fb: impl FnMut(&[SpriteInfo]) + 'a) {
         fb(&self.sprites);
@@ -275,12 +293,8 @@ impl<'a> AppState<'a> {
     // TODO: unregister
     pub fn register_visible_menu_view_feedback(
         &mut self,
-        fb: impl FnMut(
-            &mut ViewFeedbackContext,
-            &mut HitTestTreeManager<AppUpdateContext<'a>>,
-            bool,
-            bool,
-        ) + 'a,
+        fb: impl FnMut(&mut ViewFeedbackContext, &mut HitTestTreeManager<AppUpdateContext<'a>>, bool)
+        + 'a,
     ) {
         self.visible_menu_view_feedbacks.push(Box::new(fb));
     }

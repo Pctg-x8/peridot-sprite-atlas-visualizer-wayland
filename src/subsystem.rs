@@ -237,6 +237,26 @@ impl Subsystem {
         unsafe { core::mem::transmute::<_, &SubsystemAdapterAccess>(self) }
     }
 
+    pub fn find_direct_memory_index(&self, mask: u32) -> Option<u32> {
+        self.adapter_memory_info
+            .types()
+            .iter()
+            .enumerate()
+            .find_map(|(n, p)| {
+                ((mask & (1 << n)) != 0
+                    && p.property_flags().has_all(
+                        br::MemoryPropertyFlags::DEVICE_LOCAL
+                            | br::MemoryPropertyFlags::HOST_VISIBLE,
+                    ))
+                .then_some(n as _)
+            })
+    }
+
+    #[inline]
+    pub fn is_coherent_memory_type(&self, index: u32) -> bool {
+        self.adapter_memory_info.is_coherent(index)
+    }
+
     #[inline]
     pub fn load_shader<'d>(
         &'d self,
@@ -245,6 +265,16 @@ impl Subsystem {
         br::ShaderModuleObject::new(
             self,
             &br::ShaderModuleCreateInfo::new(&load_spv_file(path).unwrap()),
+        )
+    }
+
+    #[inline]
+    pub fn create_transient_graphics_command_pool(
+        &self,
+    ) -> br::Result<br::CommandPoolObject<&Self>> {
+        br::CommandPoolObject::new(
+            self,
+            &br::CommandPoolCreateInfo::new(self.graphics_queue_family_index).transient(),
         )
     }
 

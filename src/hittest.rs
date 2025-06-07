@@ -130,9 +130,16 @@ impl<'c, ActionContext> HitTestTreeManager<'c, ActionContext> {
     }
 
     pub fn dump(&self, root: HitTestTreeRef) {
-        fn rec<ActionContext>(this: &HitTestTreeManager<ActionContext>, r: usize, indent: usize) {
+        fn rec<ActionContext>(
+            sink: &mut String,
+            this: &HitTestTreeManager<ActionContext>,
+            r: usize,
+            indent: usize,
+        ) {
+            use std::fmt::Write;
+
             for _ in 0..indent {
-                print!("  ");
+                sink.push_str("  ");
             }
 
             let HitTestTreeData {
@@ -146,16 +153,19 @@ impl<'c, ActionContext> HitTestTreeManager<'c, ActionContext> {
                 height_adjustment_factor,
                 ..
             } = this.data[r];
-            println!(
+            let _ = writeln!(
+                sink,
                 "#{r}: (x{left_adjustment_factor}+{left}, x{top_adjustment_factor}+{top}) size (x{width_adjustment_factor}+{width}, x{height_adjustment_factor}+{height})"
             );
 
             for &c in &this.relations[r].children {
-                rec(this, c, indent + 1);
+                rec(sink, this, c, indent + 1);
             }
         }
 
-        rec(self, root.0, 0);
+        let mut buf = String::from("\n");
+        rec(&mut buf, self, root.0, 0);
+        tracing::debug!(hit_test_tree = %buf);
     }
 
     pub fn translate_client_to_tree_local(

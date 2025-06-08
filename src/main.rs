@@ -4,6 +4,7 @@ mod coordinate;
 mod feature;
 mod hittest;
 mod input;
+mod mathext;
 mod peridot;
 mod platform;
 mod shell;
@@ -18,7 +19,6 @@ use std::{
     collections::{HashMap, VecDeque},
     path::Path,
     rc::Rc,
-    time::Duration,
 };
 
 use app_state::AppState;
@@ -3621,6 +3621,26 @@ impl PopupCommonFrameView {
             curve_p1: (0.25, 0.5),
             curve_p2: (0.5, 0.9),
         });
+        ct.get_mut(self.ct_root).scale_x = AnimatableFloat::Animated(
+            0.9,
+            AnimationData {
+                to_value: 1.0,
+                start_sec: current_sec,
+                end_sec: current_sec + 0.25,
+                curve_p1: (0.25, 0.5),
+                curve_p2: (0.5, 0.9),
+            },
+        );
+        ct.get_mut(self.ct_root).scale_y = AnimatableFloat::Animated(
+            0.9,
+            AnimationData {
+                to_value: 1.0,
+                start_sec: current_sec,
+                end_sec: current_sec + 0.25,
+                curve_p1: (0.25, 0.5),
+                curve_p2: (0.5, 0.9),
+            },
+        );
 
         ct.mark_dirty(self.ct_root);
     }
@@ -6087,7 +6107,7 @@ fn main() {
         }
     }
 
-    unsafe {
-        subsystem.wait().unwrap();
+    if let Err(e) = unsafe { subsystem.wait() } {
+        tracing::warn!(reason = ?e, "Error in waiting pending works before shutdown");
     }
 }

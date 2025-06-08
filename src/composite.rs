@@ -4,13 +4,14 @@ use std::collections::BTreeSet;
 
 use bedrock::{self as br, Image, ImageChild, MemoryBound, TypedVulkanStructure, VkHandle};
 
-use crate::subsystem::Subsystem;
+use crate::{mathext::Matrix4, subsystem::Subsystem};
 
 #[repr(C)]
 pub struct CompositeInstanceData {
     /// scale_x(width), scale_y(height), translate_x(left), translate_y(top)
     pub pos_st: [f32; 4],
     pub uv_st: [f32; 4],
+    pub position_modifier_matrix: [f32; 4 * 4],
     /// left, top, right, bottom (pixels from edge)
     pub slice_borders: [f32; 4],
     /// tex_size_w_px, tex_size_h_px, composite_mode, opacity
@@ -277,6 +278,9 @@ pub struct CompositeRect {
     pub slice_borders: [f32; 4],
     pub composite_mode: CompositeMode,
     pub opacity: AnimatableFloat,
+    pub pivot: [f32; 2],
+    pub scale_x: AnimatableFloat,
+    pub scale_y: AnimatableFloat,
     pub animation_data_left: Option<AnimationData<f32>>,
     pub animation_data_top: Option<AnimationData<f32>>,
     pub animation_data_width: Option<AnimationData<f32>>,
@@ -303,6 +307,9 @@ impl Default for CompositeRect {
             dirty: false,
             composite_mode: CompositeMode::DirectSourceOver,
             opacity: AnimatableFloat::Value(1.0),
+            pivot: [0.5; 2],
+            scale_x: AnimatableFloat::Value(1.0),
+            scale_y: AnimatableFloat::Value(1.0),
             animation_data_left: None,
             animation_data_top: None,
             animation_data_width: None,
@@ -637,7 +644,17 @@ impl CompositeTree {
         self.parameter_store.evaluate_all(current_sec);
 
         let mut instance_slot_index = 0;
-        let mut processes = vec![(0, (0.0, 0.0, size.width as f32, size.height as f32, 1.0))];
+        let mut processes = vec![(
+            0,
+            (
+                0.0,
+                0.0,
+                size.width as f32,
+                size.height as f32,
+                1.0,
+                Matrix4::IDENTITY,
+            ),
+        )];
         while let Some((
             r,
             (
@@ -646,6 +663,7 @@ impl CompositeTree {
                 effective_width,
                 effective_height,
                 parent_opacity,
+                parent_matrix,
             ),
         )) = processes.pop()
         {
@@ -681,6 +699,17 @@ impl CompositeTree {
             let w = effective_width * r.relative_size_adjustment[0] + local_width;
             let h = effective_height * r.relative_size_adjustment[1] + local_height;
             let opacity = parent_opacity * r.opacity.evaluate(current_sec);
+            let matrix = parent_matrix.mul_mat4(
+                Matrix4::translate(
+                    left - effective_base_left + r.pivot[0] * w,
+                    top - effective_base_top + r.pivot[1] * h,
+                )
+                .mul_mat4(Matrix4::scale(
+                    r.scale_x.evaluate(current_sec),
+                    r.scale_y.evaluate(current_sec),
+                ))
+                .mul_mat4(Matrix4::translate(-r.pivot[0] * w, -r.pivot[1] * h)),
+            );
 
             if let Some(_) = r.instance_slot_index {
                 unsafe {
@@ -689,7 +718,7 @@ impl CompositeTree {
                             core::mem::size_of::<CompositeInstanceData>() * instance_slot_index,
                         ),
                         CompositeInstanceData {
-                            pos_st: [w, h, left, top],
+                            pos_st: [w, h, 0.0, 0.0],
                             uv_st: [
                                 ((r.texatlas_rect.right as f32 - r.texatlas_rect.left as f32)
                                     - 1.0)
@@ -700,6 +729,7 @@ impl CompositeTree {
                                 (r.texatlas_rect.left as f32 + 0.5) / tex_size.width as f32,
                                 (r.texatlas_rect.top as f32 + 0.5) / tex_size.height as f32,
                             ],
+                            position_modifier_matrix: matrix.clone().transpose().0,
                             slice_borders: r.slice_borders,
                             tex_size_pixels_composite_mode_opacity: [
                                 tex_size.width as _,
@@ -735,7 +765,7 @@ impl CompositeTree {
                 r.children
                     .iter()
                     .rev()
-                    .map(|&x| (x, (left, top, w, h, opacity))),
+                    .map(|&x| (x, (left, top, w, h, opacity, matrix.clone()))),
             );
         }
 

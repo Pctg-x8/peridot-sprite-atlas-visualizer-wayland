@@ -8,6 +8,7 @@ struct CompositeInstanceData {
     /// scale_x(width), scale_y(height), translate_x(left), translate_y(top)
     vec4 pos_st;
     vec4 uv_st;
+    mat4 position_modifier_matrix;
     /// left, top, right, bottom (pixels from edge)
     vec4 slice_borders;
     /// tex_size_w_px, tex_size_h_px, composite_mode, opacity
@@ -204,8 +205,9 @@ void main() {
     );
 
     relativePixelCoord_renderSizePixels = vec4(p * pos_st.xy, pos_st.xy);
+    vec4 pos4 = instanceDataArray[gl_InstanceIndex].position_modifier_matrix * vec4(relativePixelCoord_renderSizePixels.xy, 0.0, 1.0) + vec4(pos_st.zw, 0.0, 0.0);
     gl_Position = vec4(
-        (relativePixelCoord_renderSizePixels.xy + pos_st.zw) * 2.0 / screenSize - 1.0,
+        pos4.xy * 2.0 / screenSize - 1.0,
         0.0,
         1.0
     );

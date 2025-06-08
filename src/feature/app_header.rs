@@ -282,6 +282,7 @@ impl MenuButtonView {
                     end_sec: current_sec + 0.1,
                     curve_p1: (0.5, 0.0),
                     curve_p2: (0.5, 1.0),
+                    event_on_complete: None,
                 },
             ));
         composite_tree.mark_dirty(self.ct_bg);

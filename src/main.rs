@@ -72,6 +72,9 @@ pub enum AppEvent {
     UIMessageDialogRequest {
         content: String,
     },
+    UIPopupUnmount {
+        id: uuid::Uuid,
+    },
 }
 
 const MS_STATE_EMPTY: &'static br::PipelineMultisampleStateCreateInfo =
@@ -615,6 +618,7 @@ impl SpriteListToggleButtonView {
             end_sec: current_sec + 0.25,
             curve_p1: (0.25, 0.8),
             curve_p2: (0.5, 1.0),
+            event_on_complete: None,
         });
         ct.mark_dirty(self.ct_root);
         ht.get_data_mut(self.ht_root).left = -Self::SIZE - 8.0;
@@ -635,6 +639,7 @@ impl SpriteListToggleButtonView {
             end_sec: current_sec + 0.25,
             curve_p1: (0.25, 0.8),
             curve_p2: (0.5, 1.0),
+            event_on_complete: None,
         });
         ct.mark_dirty(self.ct_root);
         ht.get_data_mut(self.ht_root).left = 8.0;
@@ -675,6 +680,7 @@ impl SpriteListToggleButtonView {
                     end_sec: current_sec + 0.1,
                     curve_p1: (0.5, 0.0),
                     curve_p2: (0.5, 1.0),
+                    event_on_complete: None,
                 },
             ));
         composite_tree.mark_dirty(self.ct_root);
@@ -1515,6 +1521,7 @@ impl SpriteListPaneView {
             end_sec: current_sec + 0.25,
             curve_p1: (0.4, 1.25),
             curve_p2: (0.5, 1.0),
+            event_on_complete: None,
         });
         ct.mark_dirty(self.ct_root);
         ht.get_data_mut(self.ht_frame).left = Self::FLOATING_MARGIN;
@@ -1533,6 +1540,7 @@ impl SpriteListPaneView {
             end_sec: current_sec + 0.25,
             curve_p1: (0.4, 1.25),
             curve_p2: (0.5, 1.0),
+            event_on_complete: None,
         });
         ct.mark_dirty(self.ct_root);
         ht.get_data_mut(self.ht_frame).left = -self.width.get();
@@ -2834,6 +2842,7 @@ impl AppMenuButtonView {
                     end_sec: current_sec + 0.25,
                     curve_p1: (0.5, 0.5),
                     curve_p2: (0.5, 0.5),
+                    event_on_complete: None,
                 },
             ),
         );
@@ -2846,6 +2855,7 @@ impl AppMenuButtonView {
                     to_value: Self::CONTENT_COLOR_SHOWN,
                     curve_p1: (0.5, 0.5),
                     curve_p2: (0.5, 0.5),
+                    event_on_complete: None,
                 },
             ));
         ct.get_mut(self.ct_label).composite_mode =
@@ -2857,6 +2867,7 @@ impl AppMenuButtonView {
                     to_value: Self::CONTENT_COLOR_SHOWN,
                     curve_p1: (0.5, 0.5),
                     curve_p2: (0.5, 0.5),
+                    event_on_complete: None,
                 },
             ));
         // TODO: ここでui_scale_factor適用するとui_scale_factorがかわったときにアニメーションが破綻するので別のところにおいたほうがよさそう(CompositeTreeで位置計算するときに適用する)
@@ -2867,6 +2878,7 @@ impl AppMenuButtonView {
             to_value: self.left * self.ui_scale_factor,
             curve_p1: (0.5, 0.5),
             curve_p2: (0.5, 1.0),
+            event_on_complete: None,
         });
 
         ct.mark_dirty(self.ct_root);
@@ -2885,6 +2897,7 @@ impl AppMenuButtonView {
                     end_sec: current_sec + 0.25,
                     curve_p1: (0.5, 0.5),
                     curve_p2: (0.5, 0.5),
+                    event_on_complete: None,
                 },
             ),
         );
@@ -2897,6 +2910,7 @@ impl AppMenuButtonView {
                     to_value: Self::CONTENT_COLOR_HIDDEN,
                     curve_p1: (0.5, 0.5),
                     curve_p2: (0.5, 0.5),
+                    event_on_complete: None,
                 },
             ));
         ct.get_mut(self.ct_label).composite_mode =
@@ -2908,6 +2922,7 @@ impl AppMenuButtonView {
                     to_value: Self::CONTENT_COLOR_HIDDEN,
                     curve_p1: (0.5, 0.5),
                     curve_p2: (0.5, 0.5),
+                    event_on_complete: None,
                 },
             ));
 
@@ -2935,6 +2950,7 @@ impl AppMenuButtonView {
                     end_sec: current_sec + 0.1,
                     curve_p1: (0.5, 0.5),
                     curve_p2: (0.5, 0.5),
+                    event_on_complete: None,
                 },
             ),
         );
@@ -3007,6 +3023,7 @@ impl AppMenuBaseView {
                     to_value: [0.0, 0.0, 0.0, 0.25],
                     curve_p1: (0.5, 0.5),
                     curve_p2: (0.5, 0.5),
+                    event_on_complete: None,
                 },
             ));
         ct.mark_dirty(self.ct_root);
@@ -3022,6 +3039,7 @@ impl AppMenuBaseView {
                     to_value: [0.0, 0.0, 0.0, 0.0],
                     curve_p1: (0.5, 0.5),
                     curve_p2: (0.5, 0.5),
+                    event_on_complete: None,
                 },
             ));
         ct.mark_dirty(self.ct_root);
@@ -3319,6 +3337,8 @@ impl AppMenuPresenter {
     }
 }
 
+const POPUP_ANIMATION_DURATION: f32 = 0.2;
+
 struct PopupMaskView {
     ct_root: CompositeTreeRef,
     ht_root: HitTestTreeRef,
@@ -3352,13 +3372,12 @@ impl PopupMaskView {
         ht.add_child(ht_parent, self.ht_root);
     }
 
-    pub fn unmount(
-        &self,
-        ct: &mut CompositeTree,
-        ht: &mut HitTestTreeManager<AppUpdateContext<'_>>,
-    ) {
-        ct.remove_child(self.ct_root);
+    pub fn unmount_ht(&self, ht: &mut HitTestTreeManager<AppUpdateContext<'_>>) {
         ht.remove_child(self.ht_root);
+    }
+
+    pub fn unmount_visual(&self, ct: &mut CompositeTree) {
+        ct.remove_child(self.ct_root);
     }
 
     pub fn show(&self, ct: &mut CompositeTree, current_sec: f32) {
@@ -3368,9 +3387,27 @@ impl PopupMaskView {
                 AnimationData {
                     to_value: [0.0, 0.0, 0.0, 0.5],
                     start_sec: current_sec,
-                    end_sec: current_sec + 0.25,
+                    end_sec: current_sec + POPUP_ANIMATION_DURATION,
                     curve_p1: (0.5, 0.5),
                     curve_p2: (0.5, 0.5),
+                    event_on_complete: None,
+                },
+            ));
+
+        ct.mark_dirty(self.ct_root);
+    }
+
+    pub fn hide(&self, ct: &mut CompositeTree, current_sec: f32, event_on_complete: AppEvent) {
+        ct.get_mut(self.ct_root).composite_mode =
+            CompositeMode::FillColor(AnimatableColor::Animated(
+                [0.0, 0.0, 0.0, 0.5],
+                AnimationData {
+                    to_value: [0.0, 0.0, 0.0, 0.0],
+                    start_sec: current_sec,
+                    end_sec: current_sec + POPUP_ANIMATION_DURATION,
+                    curve_p1: (0.5, 0.5),
+                    curve_p2: (0.5, 0.5),
+                    event_on_complete: Some(event_on_complete),
                 },
             ));
 
@@ -3593,42 +3630,36 @@ impl PopupCommonFrameView {
         ht.add_child(ht_parent, self.ht_root);
     }
 
-    pub fn unmount(
-        &self,
-        ct: &mut CompositeTree,
-        ht: &mut HitTestTreeManager<AppUpdateContext<'_>>,
-    ) {
-        ct.remove_child(self.ct_root);
-        ht.remove_child(self.ht_root);
-    }
-
     pub fn show(&self, ct: &mut CompositeTree, current_sec: f32) {
         ct.get_mut(self.ct_root).opacity = AnimatableFloat::Animated(
             0.0,
             AnimationData {
                 to_value: 1.0,
                 start_sec: current_sec,
-                end_sec: current_sec + 0.25,
+                end_sec: current_sec + POPUP_ANIMATION_DURATION,
                 curve_p1: (0.5, 0.5),
                 curve_p2: (0.5, 0.5),
+                event_on_complete: None,
             },
         );
         ct.get_mut(self.ct_root).offset[1] = (-0.5 * self.height + 8.0) * self.ui_scale_factor;
         ct.get_mut(self.ct_root).animation_data_top = Some(AnimationData {
             to_value: (-0.5 * self.height) * self.ui_scale_factor,
             start_sec: current_sec,
-            end_sec: current_sec + 0.25,
+            end_sec: current_sec + POPUP_ANIMATION_DURATION,
             curve_p1: (0.25, 0.5),
             curve_p2: (0.5, 0.9),
+            event_on_complete: None,
         });
         ct.get_mut(self.ct_root).scale_x = AnimatableFloat::Animated(
             0.9,
             AnimationData {
                 to_value: 1.0,
                 start_sec: current_sec,
-                end_sec: current_sec + 0.25,
+                end_sec: current_sec + POPUP_ANIMATION_DURATION,
                 curve_p1: (0.25, 0.5),
                 curve_p2: (0.5, 0.9),
+                event_on_complete: None,
             },
         );
         ct.get_mut(self.ct_root).scale_y = AnimatableFloat::Animated(
@@ -3636,9 +3667,57 @@ impl PopupCommonFrameView {
             AnimationData {
                 to_value: 1.0,
                 start_sec: current_sec,
-                end_sec: current_sec + 0.25,
+                end_sec: current_sec + POPUP_ANIMATION_DURATION,
                 curve_p1: (0.25, 0.5),
                 curve_p2: (0.5, 0.9),
+                event_on_complete: None,
+            },
+        );
+
+        ct.mark_dirty(self.ct_root);
+    }
+
+    pub fn hide(&self, ct: &mut CompositeTree, current_sec: f32) {
+        ct.get_mut(self.ct_root).opacity = AnimatableFloat::Animated(
+            1.0,
+            AnimationData {
+                to_value: 0.0,
+                start_sec: current_sec,
+                end_sec: current_sec + POPUP_ANIMATION_DURATION,
+                curve_p1: (0.5, 0.5),
+                curve_p2: (0.5, 0.5),
+                event_on_complete: None,
+            },
+        );
+        ct.get_mut(self.ct_root).offset[1] = (-0.5 * self.height) * self.ui_scale_factor;
+        ct.get_mut(self.ct_root).animation_data_top = Some(AnimationData {
+            to_value: (-0.5 * self.height + 8.0) * self.ui_scale_factor,
+            start_sec: current_sec,
+            end_sec: current_sec + POPUP_ANIMATION_DURATION,
+            curve_p1: (0.25, 0.5),
+            curve_p2: (0.5, 0.9),
+            event_on_complete: None,
+        });
+        ct.get_mut(self.ct_root).scale_x = AnimatableFloat::Animated(
+            1.0,
+            AnimationData {
+                to_value: 0.9,
+                start_sec: current_sec,
+                end_sec: current_sec + POPUP_ANIMATION_DURATION,
+                curve_p1: (0.25, 0.5),
+                curve_p2: (0.5, 0.9),
+                event_on_complete: None,
+            },
+        );
+        ct.get_mut(self.ct_root).scale_y = AnimatableFloat::Animated(
+            1.0,
+            AnimationData {
+                to_value: 0.9,
+                start_sec: current_sec,
+                end_sec: current_sec + POPUP_ANIMATION_DURATION,
+                curve_p1: (0.25, 0.5),
+                curve_p2: (0.5, 0.9),
+                event_on_complete: None,
             },
         );
 
@@ -3923,6 +4002,7 @@ impl CommonButtonView {
                     end_sec: current_sec + 0.1,
                     curve_p1: (0.5, 0.0),
                     curve_p2: (0.5, 1.0),
+                    event_on_complete: None,
                 },
             ));
         composite_tree.mark_dirty(self.ct_root);
@@ -4293,9 +4373,25 @@ impl MessageDialogPresenter {
         self.action_handler.frame_view.show(ct, current_sec);
     }
 
-    pub fn hide(&self, ct: &mut CompositeTree, ht: &mut HitTestTreeManager<AppUpdateContext<'_>>) {
-        // TODO: ほんとうはアニメーションさせたい 遅延呼び出しみたいなのをどうするか......
-        self.action_handler.mask_view.unmount(ct, ht);
+    pub fn hide(
+        &self,
+        ct: &mut CompositeTree,
+        ht: &mut HitTestTreeManager<AppUpdateContext<'_>>,
+        current_sec: f32,
+    ) {
+        self.action_handler.mask_view.unmount_ht(ht);
+        self.action_handler.mask_view.hide(
+            ct,
+            current_sec,
+            AppEvent::UIPopupUnmount {
+                id: self.action_handler.popup_id,
+            },
+        );
+        self.action_handler.frame_view.hide(ct, current_sec);
+    }
+
+    pub fn unmount(&self, ct: &mut CompositeTree) {
+        self.action_handler.mask_view.unmount_visual(ct);
     }
 }
 
@@ -5570,15 +5666,13 @@ fn main() {
                             .map(r.clone())
                             .unwrap();
                         composite_instance_count = unsafe {
-                            app_update_context
-                                .for_view_feedback
-                                .composite_tree
-                                .sink_all(
-                                    sc_size,
-                                    current_t.as_secs_f32(),
-                                    composition_alphamask_surface_atlas.vk_extent(),
-                                    &ptr,
-                                )
+                            app_update_context.for_view_feedback.composite_tree.update(
+                                sc_size,
+                                current_t.as_secs_f32(),
+                                composition_alphamask_surface_atlas.vk_extent(),
+                                &ptr,
+                                &mut events,
+                            )
                         };
                         if flush_required {
                             unsafe {
@@ -6096,11 +6190,17 @@ fn main() {
                     popups.insert(id, p);
                 }
                 AppEvent::UIPopupClose { id } => {
-                    if let Some(inst) = popups.remove(&id) {
+                    if let Some(inst) = popups.get(&id) {
                         inst.hide(
                             &mut app_update_context.for_view_feedback.composite_tree,
                             &mut ht_manager,
+                            t.elapsed().as_secs_f32(),
                         );
+                    }
+                }
+                AppEvent::UIPopupUnmount { id } => {
+                    if let Some(inst) = popups.remove(&id) {
+                        inst.unmount(&mut app_update_context.for_view_feedback.composite_tree);
                     }
                 }
             }

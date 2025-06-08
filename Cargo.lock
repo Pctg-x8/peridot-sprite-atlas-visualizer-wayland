@@ -230,6 +230,7 @@ dependencies = [
  "bitflags",
  "fontconfig",
  "freetype2",
+ "libc",
  "lyon_geom",
  "quick-xml",
  "thiserror",

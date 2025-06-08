@@ -1,10 +1,10 @@
 //! UI Rect Compositioning
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 
 use bedrock::{self as br, Image, ImageChild, MemoryBound, TypedVulkanStructure, VkHandle};
 
-use crate::{mathext::Matrix4, subsystem::Subsystem};
+use crate::{AppEvent, mathext::Matrix4, subsystem::Subsystem};
 
 #[repr(C)]
 pub struct CompositeInstanceData {
@@ -78,6 +78,17 @@ impl AnimatableFloat {
             }
         }
     }
+
+    fn process_on_complete(&mut self, current_sec: f32, q: &mut VecDeque<AppEvent>) {
+        match self {
+            &mut Self::Animated(_, ref mut a) if a.end_sec <= current_sec => {
+                if let Some(e) = a.event_on_complete.take() {
+                    q.push_back(e);
+                }
+            }
+            _ => (),
+        }
+    }
 }
 
 pub enum AnimatableColor {
@@ -99,6 +110,17 @@ impl AnimatableColor {
             }
         }
     }
+
+    fn process_on_complete(&mut self, current_sec: f32, q: &mut VecDeque<AppEvent>) {
+        match self {
+            &mut Self::Animated(_, ref mut a) if a.end_sec <= current_sec => {
+                if let Some(e) = a.event_on_complete.take() {
+                    q.push_back(e);
+                }
+            }
+            _ => (),
+        }
+    }
 }
 
 pub struct AnimationData<T> {
@@ -107,6 +129,7 @@ pub struct AnimationData<T> {
     pub to_value: T,
     pub curve_p1: (f32, f32),
     pub curve_p2: (f32, f32),
+    pub event_on_complete: Option<AppEvent>,
 }
 impl<T> AnimationData<T> {
     fn interpolate(&self, current_sec: f32) -> f32 {
@@ -634,12 +657,13 @@ impl CompositeTree {
     }
 
     /// return: bitmap count
-    pub unsafe fn sink_all(
+    pub unsafe fn update(
         &mut self,
         size: br::Extent2D,
         current_sec: f32,
         tex_size: br::Extent2D,
         mapped_ptr: &br::MappedMemory<'_, impl br::DeviceMemoryMut + ?Sized>,
+        event_queue: &mut VecDeque<AppEvent>,
     ) -> usize {
         self.parameter_store.evaluate_all(current_sec);
 
@@ -671,23 +695,55 @@ impl CompositeTree {
             r.dirty = false;
             let local_left = match r.animation_data_left {
                 None => r.offset[0],
-                Some(ref x) => {
-                    r.offset[0] + (x.to_value - r.offset[0]) * x.interpolate(current_sec)
+                Some(ref mut x) => {
+                    let rate = x.interpolate(current_sec);
+                    if rate >= 1.0 {
+                        if let Some(e) = x.event_on_complete.take() {
+                            event_queue.push_back(e);
+                        }
+                    }
+
+                    r.offset[0] + (x.to_value - r.offset[0]) * rate
                 }
             };
             let local_top = match r.animation_data_top {
                 None => r.offset[1],
-                Some(ref x) => {
-                    r.offset[1] + (x.to_value - r.offset[1]) * x.interpolate(current_sec)
+                Some(ref mut x) => {
+                    let rate = x.interpolate(current_sec);
+                    if rate >= 1.0 {
+                        if let Some(e) = x.event_on_complete.take() {
+                            event_queue.push_back(e);
+                        }
+                    }
+
+                    r.offset[1] + (x.to_value - r.offset[1]) * rate
                 }
             };
             let local_width = match r.animation_data_width {
                 None => r.size[0],
-                Some(ref x) => r.size[0] + (x.to_value - r.size[0]) * x.interpolate(current_sec),
+                Some(ref mut x) => {
+                    let rate = x.interpolate(current_sec);
+                    if rate >= 1.0 {
+                        if let Some(e) = x.event_on_complete.take() {
+                            event_queue.push_back(e);
+                        }
+                    }
+
+                    r.size[0] + (x.to_value - r.size[0]) * rate
+                }
             };
             let local_height = match r.animation_data_height {
                 None => r.size[1],
-                Some(ref x) => r.size[1] + (x.to_value - r.size[1]) * x.interpolate(current_sec),
+                Some(ref mut x) => {
+                    let rate = x.interpolate(current_sec);
+                    if rate >= 1.0 {
+                        if let Some(e) = x.event_on_complete.take() {
+                            event_queue.push_back(e);
+                        }
+                    }
+
+                    r.size[1] + (x.to_value - r.size[1]) * rate
+                }
             };
 
             let left = effective_base_left
@@ -710,6 +766,19 @@ impl CompositeTree {
                 ))
                 .mul_mat4(Matrix4::translate(-r.pivot[0] * w, -r.pivot[1] * h)),
             );
+
+            r.opacity.process_on_complete(current_sec, event_queue);
+            r.scale_x.process_on_complete(current_sec, event_queue);
+            r.scale_y.process_on_complete(current_sec, event_queue);
+            match r.composite_mode {
+                CompositeMode::DirectSourceOver => (),
+                CompositeMode::ColorTint(ref mut t) => {
+                    t.process_on_complete(current_sec, event_queue)
+                }
+                CompositeMode::FillColor(ref mut t) => {
+                    t.process_on_complete(current_sec, event_queue)
+                }
+            }
 
             if let Some(_) = r.instance_slot_index {
                 unsafe {

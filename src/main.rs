@@ -3539,7 +3539,8 @@ impl PopupCommonFrameView {
             instance_slot_index: Some(init.composite_instance_manager.alloc()),
             texatlas_rect: frame_image_atlas_rect,
             slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
-            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.0, 0.0, 0.0, 0.0])),
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.0, 0.0, 0.0, 1.0])),
+            opacity: AnimatableFloat::Value(0.0),
             ..Default::default()
         });
         let ct_border = init.composite_tree.register(CompositeRect {
@@ -3552,7 +3553,9 @@ impl PopupCommonFrameView {
             instance_slot_index: Some(init.composite_instance_manager.alloc()),
             texatlas_rect: frame_border_image_atlas_rect,
             slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
-            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.5, 0.5, 0.5, 0.0])),
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([
+                0.25, 0.25, 0.25, 1.0,
+            ])),
             ..Default::default()
         });
 
@@ -3596,31 +3599,18 @@ impl PopupCommonFrameView {
     }
 
     pub fn show(&self, ct: &mut CompositeTree, current_sec: f32) {
-        ct.get_mut(self.ct_root).composite_mode =
-            CompositeMode::ColorTint(AnimatableColor::Animated(
-                [0.0, 0.0, 0.0, 0.0],
-                AnimationData {
-                    to_value: [0.0, 0.0, 0.0, 1.0],
-                    start_sec: current_sec,
-                    end_sec: current_sec + 0.25,
-                    curve_p1: (0.5, 0.5),
-                    curve_p2: (0.5, 0.5),
-                },
-            ));
-        ct.get_mut(self.ct_border).composite_mode =
-            CompositeMode::ColorTint(AnimatableColor::Animated(
-                [0.5, 0.5, 0.5, 0.0],
-                AnimationData {
-                    to_value: [0.25, 0.25, 0.25, 1.0],
-                    start_sec: current_sec,
-                    end_sec: current_sec + 0.25,
-                    curve_p1: (0.5, 0.5),
-                    curve_p2: (0.5, 0.5),
-                },
-            ));
+        ct.get_mut(self.ct_root).opacity = AnimatableFloat::Animated(
+            0.0,
+            AnimationData {
+                to_value: 1.0,
+                start_sec: current_sec,
+                end_sec: current_sec + 0.25,
+                curve_p1: (0.5, 0.5),
+                curve_p2: (0.5, 0.5),
+            },
+        );
 
         ct.mark_dirty(self.ct_root);
-        ct.mark_dirty(self.ct_border);
     }
 }
 
@@ -3720,7 +3710,7 @@ impl MessageDialogContentView {
             relative_offset_adjustment: [0.5, 0.0],
             instance_slot_index: Some(init.composite_instance_manager.alloc()),
             texatlas_rect: text_atlas_rect,
-            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 1.0])),
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
             ..Default::default()
         });
 
@@ -3735,22 +3725,6 @@ impl MessageDialogContentView {
 
     pub fn mount(&self, ct_parent: CompositeTreeRef, ct: &mut CompositeTree) {
         ct.add_child(ct_parent, self.ct_root);
-    }
-
-    pub fn show(&self, ct: &mut CompositeTree, current_sec: f32) {
-        ct.get_mut(self.ct_root).composite_mode =
-            CompositeMode::ColorTint(AnimatableColor::Animated(
-                [1.0, 1.0, 1.0, 0.0],
-                AnimationData {
-                    to_value: [1.0, 1.0, 1.0, 1.0],
-                    start_sec: current_sec,
-                    end_sec: current_sec + 0.25,
-                    curve_p1: (0.5, 0.5),
-                    curve_p2: (0.5, 0.5),
-                },
-            ));
-
-        ct.mark_dirty(self.ct_root);
     }
 }
 
@@ -3802,7 +3776,6 @@ impl<'c> HitTestTreeActionHandler<'c> for MessageDialogActionHandler {
 }
 
 pub struct MessageDialogPresenter {
-    content_view: MessageDialogContentView,
     action_handler: Rc<MessageDialogActionHandler>,
 }
 impl MessageDialogPresenter {
@@ -3835,10 +3808,7 @@ impl MessageDialogPresenter {
             .ht
             .set_action_handler(action_handler.frame_view.ht_root, &action_handler);
 
-        Self {
-            content_view,
-            action_handler,
-        }
+        Self { action_handler }
     }
 
     pub fn show(
@@ -3854,7 +3824,6 @@ impl MessageDialogPresenter {
             .mount(ct_parent, ct, ht_parent, ht);
         self.action_handler.mask_view.show(ct, current_sec);
         self.action_handler.frame_view.show(ct, current_sec);
-        self.content_view.show(ct, current_sec);
     }
 
     pub fn hide(&self, ct: &mut CompositeTree, ht: &mut HitTestTreeManager<AppUpdateContext<'_>>) {

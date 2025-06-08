@@ -10,8 +10,8 @@ struct CompositeInstanceData {
     vec4 uv_st;
     /// left, top, right, bottom (pixels from edge)
     vec4 slice_borders;
-    /// tex_size_w_px, tex_size_h_px, composite_mode, <unused>
-    vec4 tex_size_pixels_composite_mode;
+    /// tex_size_w_px, tex_size_h_px, composite_mode, opacity
+    vec4 tex_size_pixels_composite_mode_opacity;
     vec4 color_tint;
     /// start_sec, end_sec, to_value(fromはpos_stに設定されている値), reserved
     vec4 pos_x_animation_data;
@@ -38,7 +38,7 @@ layout(set = 0, binding = 1, std140) uniform StreamingData {
     float current_sec;
 };
 
-layout(location = 0) out vec4 uv_compositeMode;
+layout(location = 0) out vec4 uv_compositeMode_opacity;
 layout(location = 1) out vec4 uvOffset_texSizePixels;
 layout(location = 2) out vec4 relativePixelCoord_renderSizePixels;
 layout(location = 3) out vec4 sliceBordersLTRB;
@@ -211,12 +211,11 @@ void main() {
     );
     uvOffset_texSizePixels = vec4(
         instanceDataArray[gl_InstanceIndex].uv_st.zw,
-        instanceDataArray[gl_InstanceIndex].tex_size_pixels_composite_mode.xy
+        instanceDataArray[gl_InstanceIndex].tex_size_pixels_composite_mode_opacity.xy
     );
-    uv_compositeMode = vec4(
+    uv_compositeMode_opacity = vec4(
         p * instanceDataArray[gl_InstanceIndex].uv_st.xy + uvOffset_texSizePixels.xy,
-        instanceDataArray[gl_InstanceIndex].tex_size_pixels_composite_mode.z,
-        0.0
+        instanceDataArray[gl_InstanceIndex].tex_size_pixels_composite_mode_opacity.zw
     );
     sliceBordersLTRB = instanceDataArray[gl_InstanceIndex].slice_borders;
     colorTintOut = instanceDataArray[gl_InstanceIndex].color_tint;

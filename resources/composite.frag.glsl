@@ -1,6 +1,6 @@
 #version 450
 
-layout(location = 0) in vec4 uv_compositeMode;
+layout(location = 0) in vec4 uv_compositeMode_opacity;
 layout(location = 1) in vec4 uvOffset_texSizePixels;
 layout(location = 2) in vec4 relativePixelCoord_renderSizePixels;
 layout(location = 3) in vec4 sliceBordersLTRB;
@@ -43,21 +43,21 @@ vec4 tex_9s(in vec2 relativePixelCoord, in vec2 renderSizePixels, in vec2 uvOffs
 }
 
 void main() {
-    if (uv_compositeMode.z == 2.0) {
+    if (uv_compositeMode_opacity.z == 2.0) {
         // no texture mapping
         col_out = colorTint;
     } else if (sliceBordersLTRB == vec4(0.0f)) {
         // no 9slices
-        col_out = texture(tex, uv_compositeMode.xy);
+        col_out = texture(tex, uv_compositeMode_opacity.xy);
     } else {
         col_out = tex_9s(relativePixelCoord_renderSizePixels.xy, relativePixelCoord_renderSizePixels.zw, uvOffset_texSizePixels.xy, uvOffset_texSizePixels.zw, sliceBordersLTRB, texSlicedSizePixels.xy);
     }
 
-    if (uv_compositeMode.z == 1.0) {
+    if (uv_compositeMode_opacity.z == 1.0) {
         // input is r8 format
         col_out = colorTint * vec4(1.0, 1.0, 1.0, col_out.r);
     }
 
-    // premultiply
-    col_out.rgb *= col_out.a;
+    // apply opacity and premultiply
+    col_out.rgb *= col_out.a * uv_compositeMode_opacity.w;
 }

@@ -13,8 +13,8 @@ pub struct CompositeInstanceData {
     pub uv_st: [f32; 4],
     /// left, top, right, bottom (pixels from edge)
     pub slice_borders: [f32; 4],
-    /// tex_size_w_px, tex_size_h_px, composite_mode, <unused>
-    pub tex_size_pixels_composite_mode: [f32; 4],
+    /// tex_size_w_px, tex_size_h_px, composite_mode, opacity
+    pub tex_size_pixels_composite_mode_opacity: [f32; 4],
     pub color_tint: [f32; 4],
     /// start_sec, end_sec, to_value(fromはpos_stに設定されている値), reserved
     pub pos_x_animation_data: [f32; 4],
@@ -276,6 +276,7 @@ pub struct CompositeRect {
     pub texatlas_rect: AtlasRect,
     pub slice_borders: [f32; 4],
     pub composite_mode: CompositeMode,
+    pub opacity: AnimatableFloat,
     pub animation_data_left: Option<AnimationData<f32>>,
     pub animation_data_top: Option<AnimationData<f32>>,
     pub animation_data_width: Option<AnimationData<f32>>,
@@ -301,6 +302,7 @@ impl Default for CompositeRect {
             slice_borders: [0.0, 0.0, 0.0, 0.0],
             dirty: false,
             composite_mode: CompositeMode::DirectSourceOver,
+            opacity: AnimatableFloat::Value(1.0),
             animation_data_left: None,
             animation_data_top: None,
             animation_data_width: None,
@@ -635,10 +637,16 @@ impl CompositeTree {
         self.parameter_store.evaluate_all(current_sec);
 
         let mut instance_slot_index = 0;
-        let mut processes = vec![(0, (0.0, 0.0, size.width as f32, size.height as f32))];
+        let mut processes = vec![(0, (0.0, 0.0, size.width as f32, size.height as f32, 1.0))];
         while let Some((
             r,
-            (effective_base_left, effective_base_top, effective_width, effective_height),
+            (
+                effective_base_left,
+                effective_base_top,
+                effective_width,
+                effective_height,
+                parent_opacity,
+            ),
         )) = processes.pop()
         {
             let r = &mut self.rects[r];
@@ -672,6 +680,7 @@ impl CompositeTree {
                 + local_top;
             let w = effective_width * r.relative_size_adjustment[0] + local_width;
             let h = effective_height * r.relative_size_adjustment[1] + local_height;
+            let opacity = parent_opacity * r.opacity.evaluate(current_sec);
 
             if let Some(_) = r.instance_slot_index {
                 unsafe {
@@ -692,11 +701,11 @@ impl CompositeTree {
                                 (r.texatlas_rect.top as f32 + 0.5) / tex_size.height as f32,
                             ],
                             slice_borders: r.slice_borders,
-                            tex_size_pixels_composite_mode: [
+                            tex_size_pixels_composite_mode_opacity: [
                                 tex_size.width as _,
                                 tex_size.height as _,
                                 r.composite_mode.shader_mode_value(),
-                                0.0,
+                                opacity,
                             ],
                             color_tint: match r.composite_mode {
                                 CompositeMode::DirectSourceOver => [0.0; 4],
@@ -722,7 +731,12 @@ impl CompositeTree {
                 instance_slot_index += 1;
             }
 
-            processes.extend(r.children.iter().rev().map(|&x| (x, (left, top, w, h))));
+            processes.extend(
+                r.children
+                    .iter()
+                    .rev()
+                    .map(|&x| (x, (left, top, w, h, opacity))),
+            );
         }
 
         instance_slot_index

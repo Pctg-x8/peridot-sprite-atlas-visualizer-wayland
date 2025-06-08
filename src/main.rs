@@ -3382,6 +3382,8 @@ struct PopupCommonFrameView {
     ct_root: CompositeTreeRef,
     ct_border: CompositeTreeRef,
     ht_root: HitTestTreeRef,
+    height: f32,
+    ui_scale_factor: f32,
 }
 impl PopupCommonFrameView {
     const CORNER_RADIUS: f32 = 16.0;
@@ -3575,6 +3577,8 @@ impl PopupCommonFrameView {
             ct_root,
             ct_border,
             ht_root,
+            height,
+            ui_scale_factor: init.ui_scale_factor,
         }
     }
 
@@ -3609,6 +3613,14 @@ impl PopupCommonFrameView {
                 curve_p2: (0.5, 0.5),
             },
         );
+        ct.get_mut(self.ct_root).offset[1] = (-0.5 * self.height + 8.0) * self.ui_scale_factor;
+        ct.get_mut(self.ct_root).animation_data_top = Some(AnimationData {
+            to_value: (-0.5 * self.height) * self.ui_scale_factor,
+            start_sec: current_sec,
+            end_sec: current_sec + 0.25,
+            curve_p1: (0.25, 0.5),
+            curve_p2: (0.5, 0.9),
+        });
 
         ct.mark_dirty(self.ct_root);
     }
@@ -6051,6 +6063,9 @@ fn main() {
                         &mut ht_manager,
                         t.elapsed().as_secs_f32(),
                     );
+
+                    // TODO: ここでRECOMPUTE_POINTER_ENTER相当の処理をしないといけない(ポインタを動かさないかぎりEnter状態が続くのでマスクを貫通できる)
+                    // クローズしたときも同じ
 
                     tracing::debug!(
                         byte_size = staging_scratch_buffer.total_reserved_amount(),

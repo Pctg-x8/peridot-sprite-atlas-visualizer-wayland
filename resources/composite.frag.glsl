@@ -59,5 +59,6 @@ void main() {
     }
 
     // apply opacity and premultiply
-    col_out.rgb *= col_out.a * uv_compositeMode_opacity.w;
+    col_out.a *= uv_compositeMode_opacity.w;
+    col_out.rgb *= col_out.a;
 }

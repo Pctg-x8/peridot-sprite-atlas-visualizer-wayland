@@ -764,7 +764,8 @@ impl<'g> StagingScratchBufferManager<'g> {
         self.chain_free_block(f, s, 0);
     }
 
-    const fn level_indices(size: br::DeviceSize) -> (u8, u8) {
+    #[tracing::instrument(ret(level = tracing::Level::DEBUG))]
+    fn level_indices(size: br::DeviceSize) -> (u8, u8) {
         const fn const_min_u32(a: u32, b: u32) -> u32 {
             if a < b { a } else { b }
         }
@@ -773,7 +774,7 @@ impl<'g> StagingScratchBufferManager<'g> {
             - const_min_u32(size.leading_zeros(), Self::FIRST_LEVEL_BIT_COUNT);
         let s = if f == 0 {
             // minimum sizes
-            size >> (Self::LOWER_BIT_COUNT - 1)
+            size >> Self::LOWER_BIT_COUNT
         } else {
             (size >> (Self::LOWER_BIT_COUNT + f - 1)) - (1 << Self::SECOND_LEVEL_BIT_COUNT)
         };

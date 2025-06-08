@@ -256,6 +256,7 @@ impl<'a> AppState<'a> {
         Ok(())
     }
 
+    /// synchronizes views with the state: notifies current state to all view feedback receivers
     pub fn synchronize_view(
         &mut self,
         ctx: &mut ViewFeedbackContext,

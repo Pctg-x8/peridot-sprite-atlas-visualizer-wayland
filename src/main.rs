@@ -13,8 +13,9 @@ mod text;
 mod thirdparty;
 
 use std::{
+    borrow::Cow,
     cell::{Cell, RefCell},
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     path::Path,
     rc::Rc,
     time::Duration,
@@ -64,6 +65,12 @@ pub enum AppEvent {
     },
     MainWindowPointerLeftUp {
         enter_serial: u32,
+    },
+    UIPopupClose {
+        id: uuid::Uuid,
+    },
+    UIMessageDialogRequest {
+        content: String,
     },
 }
 
@@ -153,6 +160,7 @@ pub struct AppUpdateContext<'d> {
     pub for_view_feedback: ViewFeedbackContext,
     pub state: AppState<'d>,
     pub editing_atlas_renderer: Rc<RefCell<EditingAtlasRenderer<'d>>>,
+    pub event_queue: *mut VecDeque<AppEvent>,
 }
 
 pub struct SpriteListToggleButtonView {
@@ -1793,6 +1801,12 @@ impl SpriteListPanePresenter {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum AppMenuCommandIdentifier {
+    AddSprite,
+    Save,
+}
+
 struct AppMenuButtonView {
     ct_root: CompositeTreeRef,
     ct_icon: CompositeTreeRef,
@@ -1805,6 +1819,7 @@ struct AppMenuButtonView {
     ui_scale_factor: f32,
     hovering: Cell<bool>,
     pressing: Cell<bool>,
+    command_id: AppMenuCommandIdentifier,
 }
 impl AppMenuButtonView {
     const ICON_SIZE: f32 = 24.0;
@@ -1822,6 +1837,7 @@ impl AppMenuButtonView {
         icon_path: impl AsRef<Path>,
         left: f32,
         top: f32,
+        command_id: AppMenuCommandIdentifier,
     ) -> Self {
         let label_layout = TextLayout::build_simple(label, &mut init.fonts.ui_default);
 
@@ -2792,6 +2808,7 @@ impl AppMenuButtonView {
             ui_scale_factor: init.ui_scale_factor,
             hovering: Cell::new(false),
             pressing: Cell::new(false),
+            command_id,
         }
     }
 
@@ -3141,13 +3158,30 @@ impl<'c> HitTestTreeActionHandler<'c> for AppMenuActionHandler {
     fn on_click(
         &self,
         sender: HitTestTreeRef,
-        _context: &mut Self::Context,
+        context: &mut Self::Context,
         _ht: &mut HitTestTreeManager<Self::Context>,
         _args: hittest::PointerActionArgs,
     ) -> EventContinueControl {
         for v in self.item_views.iter() {
             if sender == v.ht_root {
                 // TODO: click action
+                match v.command_id {
+                    AppMenuCommandIdentifier::AddSprite => {
+                        println!("Add Sprite");
+
+                        unsafe { &mut *context.event_queue }.push_back(
+                            AppEvent::UIMessageDialogRequest {
+                                content: String::from(
+                                    "org.freedesktop.portal.FileChooser not found",
+                                ),
+                            },
+                        );
+                    }
+                    AppMenuCommandIdentifier::Save => {
+                        println!("Save");
+                    }
+                }
+
                 return EventContinueControl::STOP_PROPAGATION;
             }
         }
@@ -3173,6 +3207,7 @@ impl AppMenuPresenter {
             "resources/icons/add.svg",
             64.0,
             header_height + 32.0,
+            AppMenuCommandIdentifier::AddSprite,
         ));
         let save_button = Rc::new(AppMenuButtonView::new(
             &mut init.for_view,
@@ -3180,6 +3215,7 @@ impl AppMenuPresenter {
             "resources/icons/save.svg",
             64.0,
             header_height + 32.0 + AppMenuButtonView::BUTTON_HEIGHT + 16.0,
+            AppMenuCommandIdentifier::Save,
         ));
 
         add_button.mount(
@@ -3283,6 +3319,550 @@ impl AppMenuPresenter {
     }
 }
 
+struct PopupMaskView {
+    ct_root: CompositeTreeRef,
+    ht_root: HitTestTreeRef,
+}
+impl PopupMaskView {
+    pub fn new(init: &mut ViewInitContext) -> Self {
+        let ct_root = init.composite_tree.register(CompositeRect {
+            relative_size_adjustment: [1.0, 1.0],
+            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            composite_mode: CompositeMode::FillColor(AnimatableColor::Value([0.0, 0.0, 0.0, 0.0])),
+            ..Default::default()
+        });
+
+        let ht_root = init.ht.create(HitTestTreeData {
+            width_adjustment_factor: 1.0,
+            height_adjustment_factor: 1.0,
+            ..Default::default()
+        });
+
+        Self { ct_root, ht_root }
+    }
+
+    pub fn mount(
+        &self,
+        ct_parent: CompositeTreeRef,
+        ct: &mut CompositeTree,
+        ht_parent: HitTestTreeRef,
+        ht: &mut HitTestTreeManager<AppUpdateContext<'_>>,
+    ) {
+        ct.add_child(ct_parent, self.ct_root);
+        ht.add_child(ht_parent, self.ht_root);
+    }
+
+    pub fn unmount(
+        &self,
+        ct: &mut CompositeTree,
+        ht: &mut HitTestTreeManager<AppUpdateContext<'_>>,
+    ) {
+        ct.remove_child(self.ct_root);
+        ht.remove_child(self.ht_root);
+    }
+
+    pub fn show(&self, ct: &mut CompositeTree, current_sec: f32) {
+        ct.get_mut(self.ct_root).composite_mode =
+            CompositeMode::FillColor(AnimatableColor::Animated(
+                [0.0, 0.0, 0.0, 0.0],
+                AnimationData {
+                    to_value: [0.0, 0.0, 0.0, 0.5],
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.25,
+                    curve_p1: (0.5, 0.5),
+                    curve_p2: (0.5, 0.5),
+                },
+            ));
+
+        ct.mark_dirty(self.ct_root);
+    }
+}
+
+struct PopupCommonFrameView {
+    ct_root: CompositeTreeRef,
+    ct_border: CompositeTreeRef,
+    ht_root: HitTestTreeRef,
+}
+impl PopupCommonFrameView {
+    const CORNER_RADIUS: f32 = 16.0;
+
+    pub fn new(init: &mut ViewInitContext, width: f32, height: f32) -> Self {
+        let render_size_px = ((Self::CORNER_RADIUS * 2.0 + 1.0) * init.ui_scale_factor) as u32;
+        let frame_image_atlas_rect = init.atlas.alloc(render_size_px, render_size_px);
+        let frame_border_image_atlas_rect = init.atlas.alloc(render_size_px, render_size_px);
+
+        let render_pass = br::RenderPassObject::new(
+            init.subsystem,
+            &br::RenderPassCreateInfo2::new(
+                &[br::AttachmentDescription2::new(init.atlas.format())
+                    .with_layout_to(br::ImageLayout::ShaderReadOnlyOpt.from_undefined())
+                    .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store)],
+                &[br::SubpassDescription2::new()
+                    .colors(&[br::AttachmentReference2::color_attachment_opt(0)])],
+                &[br::SubpassDependency2::new(
+                    br::SubpassIndex::Internal(0),
+                    br::SubpassIndex::External,
+                )
+                .of_memory(
+                    br::AccessFlags::COLOR_ATTACHMENT.write,
+                    br::AccessFlags::SHADER.read,
+                )
+                .of_execution(
+                    br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    br::PipelineStageFlags::FRAGMENT_SHADER,
+                )],
+            ),
+        )
+        .unwrap();
+        let framebuffer = br::FramebufferObject::new(
+            &init.subsystem,
+            &br::FramebufferCreateInfo::new(
+                &render_pass,
+                &[init.atlas.resource().as_transparent_ref()],
+                init.atlas.size(),
+                init.atlas.size(),
+            ),
+        )
+        .unwrap();
+
+        let [pipeline, pipeline_border] = init
+            .subsystem
+            .create_graphics_pipelines_array(&[
+                br::GraphicsPipelineCreateInfo::new(
+                    init.subsystem.require_empty_pipeline_layout(),
+                    render_pass.subpass(0),
+                    &[
+                        init.subsystem
+                            .require_shader("resources/filltri.vert")
+                            .on_stage(br::ShaderStage::Vertex, c"main"),
+                        init.subsystem
+                            .require_shader("resources/rounded_rect.frag")
+                            .on_stage(br::ShaderStage::Fragment, c"main")
+                            .with_specialization_info(&br::SpecializationInfo::new(
+                                &RoundedRectConstants {
+                                    corner_radius: Self::CORNER_RADIUS,
+                                },
+                            )),
+                    ],
+                    VI_STATE_EMPTY,
+                    IA_STATE_TRILIST,
+                    &br::PipelineViewportStateCreateInfo::new(
+                        &[frame_image_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
+                        &[frame_image_atlas_rect.vk_rect()],
+                    ),
+                    RASTER_STATE_DEFAULT_FILL_NOCULL,
+                    BLEND_STATE_SINGLE_NONE,
+                )
+                .multisample_state(MS_STATE_EMPTY),
+                br::GraphicsPipelineCreateInfo::new(
+                    init.subsystem.require_empty_pipeline_layout(),
+                    render_pass.subpass(0),
+                    &[
+                        init.subsystem
+                            .require_shader("resources/filltri.vert")
+                            .on_stage(br::ShaderStage::Vertex, c"main"),
+                        init.subsystem
+                            .require_shader("resources/rounded_rect_border.frag")
+                            .on_stage(br::ShaderStage::Fragment, c"main")
+                            .with_specialization_info(&br::SpecializationInfo::new(
+                                &RoundedRectConstants {
+                                    corner_radius: Self::CORNER_RADIUS,
+                                },
+                            )),
+                    ],
+                    VI_STATE_EMPTY,
+                    IA_STATE_TRILIST,
+                    &br::PipelineViewportStateCreateInfo::new(
+                        &[frame_border_image_atlas_rect
+                            .vk_rect()
+                            .make_viewport(0.0..1.0)],
+                        &[frame_border_image_atlas_rect.vk_rect()],
+                    ),
+                    RASTER_STATE_DEFAULT_FILL_NOCULL,
+                    BLEND_STATE_SINGLE_NONE,
+                )
+                .multisample_state(MS_STATE_EMPTY),
+            ])
+            .unwrap();
+
+        let mut cp = init
+            .subsystem
+            .create_transient_graphics_command_pool()
+            .unwrap();
+        let [mut cb] = br::CommandBufferObject::alloc_array(
+            &init.subsystem,
+            &br::CommandBufferFixedCountAllocateInfo::new(&mut cp, br::CommandBufferLevel::Primary),
+        )
+        .unwrap();
+        unsafe {
+            cb.begin(&br::CommandBufferBeginInfo::new(), &init.subsystem)
+                .unwrap()
+        }
+        .begin_render_pass2(
+            &br::RenderPassBeginInfo::new(
+                &render_pass,
+                &framebuffer,
+                frame_image_atlas_rect.vk_rect(),
+                &[br::ClearValue::color_f32([0.0; 4])],
+            ),
+            &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+        )
+        .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline)
+        .draw(3, 1, 0, 0)
+        .end_render_pass2(&br::SubpassEndInfo::new())
+        .begin_render_pass2(
+            &br::RenderPassBeginInfo::new(
+                &render_pass,
+                &framebuffer,
+                frame_border_image_atlas_rect.vk_rect(),
+                &[br::ClearValue::color_f32([0.0; 4])],
+            ),
+            &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+        )
+        .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline_border)
+        .draw(3, 1, 0, 0)
+        .end_render_pass2(&br::SubpassEndInfo::new())
+        .end()
+        .unwrap();
+
+        init.subsystem
+            .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&cb)])
+            .unwrap();
+
+        let ct_root = init.composite_tree.register(CompositeRect {
+            offset: [
+                -width * 0.5 * init.ui_scale_factor,
+                -height * 0.5 * init.ui_scale_factor,
+            ],
+            relative_offset_adjustment: [0.5, 0.5],
+            size: [width * init.ui_scale_factor, height * init.ui_scale_factor],
+            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            texatlas_rect: frame_image_atlas_rect,
+            slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.0, 0.0, 0.0, 0.0])),
+            ..Default::default()
+        });
+        let ct_border = init.composite_tree.register(CompositeRect {
+            offset: [
+                -width * 0.5 * init.ui_scale_factor,
+                -height * 0.5 * init.ui_scale_factor,
+            ],
+            relative_offset_adjustment: [0.5, 0.5],
+            size: [width * init.ui_scale_factor, height * init.ui_scale_factor],
+            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            texatlas_rect: frame_border_image_atlas_rect,
+            slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.5, 0.5, 0.5, 0.0])),
+            ..Default::default()
+        });
+
+        init.composite_tree.add_child(ct_root, ct_border);
+
+        let ht_root = init.ht.create(HitTestTreeData {
+            left: -width * 0.5,
+            top: -height * 0.5,
+            left_adjustment_factor: 0.5,
+            top_adjustment_factor: 0.5,
+            width,
+            height,
+            ..Default::default()
+        });
+
+        Self {
+            ct_root,
+            ct_border,
+            ht_root,
+        }
+    }
+
+    pub fn mount(
+        &self,
+        ct_parent: CompositeTreeRef,
+        ct: &mut CompositeTree,
+        ht_parent: HitTestTreeRef,
+        ht: &mut HitTestTreeManager<AppUpdateContext<'_>>,
+    ) {
+        ct.add_child(ct_parent, self.ct_root);
+        ht.add_child(ht_parent, self.ht_root);
+    }
+
+    pub fn unmount(
+        &self,
+        ct: &mut CompositeTree,
+        ht: &mut HitTestTreeManager<AppUpdateContext<'_>>,
+    ) {
+        ct.remove_child(self.ct_root);
+        ht.remove_child(self.ht_root);
+    }
+
+    pub fn show(&self, ct: &mut CompositeTree, current_sec: f32) {
+        ct.get_mut(self.ct_root).composite_mode =
+            CompositeMode::ColorTint(AnimatableColor::Animated(
+                [0.0, 0.0, 0.0, 0.0],
+                AnimationData {
+                    to_value: [0.0, 0.0, 0.0, 1.0],
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.25,
+                    curve_p1: (0.5, 0.5),
+                    curve_p2: (0.5, 0.5),
+                },
+            ));
+        ct.get_mut(self.ct_border).composite_mode =
+            CompositeMode::ColorTint(AnimatableColor::Animated(
+                [0.5, 0.5, 0.5, 0.0],
+                AnimationData {
+                    to_value: [0.25, 0.25, 0.25, 1.0],
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.25,
+                    curve_p1: (0.5, 0.5),
+                    curve_p2: (0.5, 0.5),
+                },
+            ));
+
+        ct.mark_dirty(self.ct_root);
+        ct.mark_dirty(self.ct_border);
+    }
+}
+
+struct MessageDialogContentView {
+    ct_root: CompositeTreeRef,
+    preferred_width: f32,
+    preferred_height: f32,
+}
+impl MessageDialogContentView {
+    const FRAME_PADDING_H: f32 = 32.0;
+    const FRAME_PADDING_V: f32 = 16.0;
+
+    #[tracing::instrument(name = "MessageDialogContentView::new", skip(init))]
+    pub fn new(init: &mut ViewInitContext, content: &str) -> Self {
+        let text_layout = TextLayout::build_simple(content, &mut init.fonts.ui_default);
+        let text_atlas_rect = init
+            .atlas
+            .alloc(text_layout.width_px(), text_layout.height_px());
+        let text_image_pixels =
+            text_layout.build_stg_image_pixel_buffer(&mut init.staging_scratch_buffer);
+
+        let mut cp = init
+            .subsystem
+            .create_transient_graphics_command_pool()
+            .unwrap();
+        let [mut cb] = br::CommandBufferObject::alloc_array(
+            init.subsystem,
+            &br::CommandBufferFixedCountAllocateInfo::new(&mut cp, br::CommandBufferLevel::Primary),
+        )
+        .unwrap();
+        unsafe {
+            cb.begin(
+                &br::CommandBufferBeginInfo::new().onetime_submit(),
+                init.subsystem,
+            )
+            .unwrap()
+        }
+        .pipeline_barrier_2(&br::DependencyInfo::new(
+            &[],
+            &[],
+            &[br::ImageMemoryBarrier2::new(
+                init.atlas.resource().image(),
+                br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+            )
+            .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
+        ))
+        .inject(|r| {
+            let (b, o) = init.staging_scratch_buffer.of(&text_image_pixels);
+
+            r.copy_buffer_to_image(
+                b,
+                init.atlas.resource().image(),
+                br::ImageLayout::TransferDestOpt,
+                &[br::vk::VkBufferImageCopy {
+                    bufferOffset: o,
+                    bufferRowLength: text_layout.width_px(),
+                    bufferImageHeight: text_layout.height_px(),
+                    imageSubresource: br::ImageSubresourceLayers::new(
+                        br::AspectMask::COLOR,
+                        0,
+                        0..1,
+                    ),
+                    imageOffset: text_atlas_rect.lt_offset().with_z(0),
+                    imageExtent: text_atlas_rect.extent().with_depth(1),
+                }],
+            )
+        })
+        .pipeline_barrier_2(&br::DependencyInfo::new(
+            &[],
+            &[],
+            &[br::ImageMemoryBarrier2::new(
+                init.atlas.resource().image(),
+                br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+            )
+            .transit_from(br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt))
+            .from(
+                br::PipelineStageFlags2::COPY,
+                br::AccessFlags2::TRANSFER.write,
+            )
+            .to(
+                br::PipelineStageFlags2::FRAGMENT_SHADER,
+                br::AccessFlags2::SHADER.read,
+            )],
+        ))
+        .end()
+        .unwrap();
+        init.subsystem
+            .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&cb)])
+            .unwrap();
+
+        let ct_root = init.composite_tree.register(CompositeRect {
+            size: [text_layout.width(), text_layout.height()],
+            offset: [
+                -text_layout.width() * 0.5,
+                Self::FRAME_PADDING_V * init.ui_scale_factor,
+            ],
+            relative_offset_adjustment: [0.5, 0.0],
+            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            texatlas_rect: text_atlas_rect,
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 1.0])),
+            ..Default::default()
+        });
+
+        Self {
+            ct_root,
+            preferred_width: Self::FRAME_PADDING_H * 2.0
+                + text_layout.width() / init.ui_scale_factor,
+            preferred_height: Self::FRAME_PADDING_V * 2.0
+                + text_layout.height() / init.ui_scale_factor,
+        }
+    }
+
+    pub fn mount(&self, ct_parent: CompositeTreeRef, ct: &mut CompositeTree) {
+        ct.add_child(ct_parent, self.ct_root);
+    }
+
+    pub fn show(&self, ct: &mut CompositeTree, current_sec: f32) {
+        ct.get_mut(self.ct_root).composite_mode =
+            CompositeMode::ColorTint(AnimatableColor::Animated(
+                [1.0, 1.0, 1.0, 0.0],
+                AnimationData {
+                    to_value: [1.0, 1.0, 1.0, 1.0],
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.25,
+                    curve_p1: (0.5, 0.5),
+                    curve_p2: (0.5, 0.5),
+                },
+            ));
+
+        ct.mark_dirty(self.ct_root);
+    }
+}
+
+struct MessageDialogActionHandler {
+    mask_view: PopupMaskView,
+    frame_view: PopupCommonFrameView,
+    popup_id: uuid::Uuid,
+}
+impl<'c> HitTestTreeActionHandler<'c> for MessageDialogActionHandler {
+    type Context = AppUpdateContext<'c>;
+
+    fn on_pointer_down(
+        &self,
+        sender: HitTestTreeRef,
+        context: &mut Self::Context,
+        ht: &mut HitTestTreeManager<Self::Context>,
+        args: hittest::PointerActionArgs,
+    ) -> EventContinueControl {
+        if sender == self.frame_view.ht_root {
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        if sender == self.mask_view.ht_root {
+            unsafe { &mut *context.event_queue }
+                .push_back(AppEvent::UIPopupClose { id: self.popup_id });
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_pointer_up(
+        &self,
+        sender: HitTestTreeRef,
+        context: &mut Self::Context,
+        ht: &mut HitTestTreeManager<Self::Context>,
+        args: hittest::PointerActionArgs,
+    ) -> EventContinueControl {
+        if sender == self.frame_view.ht_root {
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        if sender == self.mask_view.ht_root {
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        EventContinueControl::empty()
+    }
+}
+
+pub struct MessageDialogPresenter {
+    content_view: MessageDialogContentView,
+    action_handler: Rc<MessageDialogActionHandler>,
+}
+impl MessageDialogPresenter {
+    pub fn new(init: &mut PresenterInitContext, popup_id: uuid::Uuid, content: &str) -> Self {
+        let content_view = MessageDialogContentView::new(&mut init.for_view, content);
+        let frame_view = PopupCommonFrameView::new(
+            &mut init.for_view,
+            content_view.preferred_width,
+            content_view.preferred_height,
+        );
+        let mask_view = PopupMaskView::new(&mut init.for_view);
+
+        frame_view.mount(
+            mask_view.ct_root,
+            init.for_view.composite_tree,
+            mask_view.ht_root,
+            init.for_view.ht,
+        );
+        content_view.mount(frame_view.ct_root, init.for_view.composite_tree);
+
+        let action_handler = Rc::new(MessageDialogActionHandler {
+            mask_view,
+            frame_view,
+            popup_id,
+        });
+        init.for_view
+            .ht
+            .set_action_handler(action_handler.mask_view.ht_root, &action_handler);
+        init.for_view
+            .ht
+            .set_action_handler(action_handler.frame_view.ht_root, &action_handler);
+
+        Self {
+            content_view,
+            action_handler,
+        }
+    }
+
+    pub fn show(
+        &self,
+        ct_parent: CompositeTreeRef,
+        ct: &mut CompositeTree,
+        ht_parent: HitTestTreeRef,
+        ht: &mut HitTestTreeManager<AppUpdateContext<'_>>,
+        current_sec: f32,
+    ) {
+        self.action_handler
+            .mask_view
+            .mount(ct_parent, ct, ht_parent, ht);
+        self.action_handler.mask_view.show(ct, current_sec);
+        self.action_handler.frame_view.show(ct, current_sec);
+        self.content_view.show(ct, current_sec);
+    }
+
+    pub fn hide(&self, ct: &mut CompositeTree, ht: &mut HitTestTreeManager<AppUpdateContext<'_>>) {
+        // TODO: ほんとうはアニメーションさせたい 遅延呼び出しみたいなのをどうするか......
+        self.action_handler.mask_view.unmount(ct, ht);
+    }
+}
+
 struct HitTestRootTreeActionHandler {
     editing_atlas_dragging: Cell<bool>,
     editing_atlas_drag_start_x: Cell<f32>,
@@ -3354,6 +3934,97 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler {
     }
 }
 
+#[repr(C)]
+struct DBusConnection {
+    _data: [u8; 0],
+    _marker: core::marker::PhantomData<(core::marker::PhantomPinned, *mut u8)>,
+}
+
+#[repr(C)]
+struct DBusMessage {
+    _data: [u8; 0],
+    _marker: core::marker::PhantomData<(core::marker::PhantomPinned, *mut u8)>,
+}
+
+#[repr(C)]
+struct DBusMessageIter {
+    // Note: ちゃんとサイズ確保してあげる必要がある(使い方参照)
+    dummy1: *mut core::ffi::c_void,
+    dummy2: *mut core::ffi::c_void,
+    dummy3: u32,
+    dummy4: core::ffi::c_int,
+    dummy5: core::ffi::c_int,
+    dummy6: core::ffi::c_int,
+    dummy7: core::ffi::c_int,
+    dummy8: core::ffi::c_int,
+    dummy9: core::ffi::c_int,
+    dummy10: core::ffi::c_int,
+    dummy11: core::ffi::c_int,
+    pad1: core::ffi::c_int,
+    pad2: *mut core::ffi::c_void,
+    pad3: *mut core::ffi::c_void,
+    _marker: core::marker::PhantomData<(core::marker::PhantomPinned, *mut u8)>,
+}
+
+#[repr(C)]
+struct DBusPendingCall {
+    _data: [u8; 0],
+    _marker: core::marker::PhantomData<(core::marker::PhantomPinned, *mut u8)>,
+}
+
+#[repr(C)]
+struct DBusError {
+    pub name: *const core::ffi::c_char,
+    pub message: *const core::ffi::c_char,
+    pub dummy: core::ffi::c_uint,
+    pub padding1: *mut core::ffi::c_void,
+}
+
+#[repr(C)]
+pub enum DBusBusType {
+    Session,
+}
+
+#[link(name = "dbus-1")]
+unsafe extern "C" {
+    unsafe fn dbus_connection_open(
+        address: *const core::ffi::c_char,
+        error: *mut DBusError,
+    ) -> *mut DBusConnection;
+    unsafe fn dbus_connection_unref(connection: *mut DBusConnection);
+    unsafe fn dbus_connection_send_with_reply(
+        connection: *mut DBusConnection,
+        message: *mut DBusMessage,
+        pending_return: *mut *mut DBusPendingCall,
+        timeout_milliseconds: core::ffi::c_int,
+    ) -> u32;
+
+    unsafe fn dbus_bus_get(r#type: DBusBusType, error: *mut DBusError) -> *mut DBusConnection;
+
+    unsafe fn dbus_message_new_method_call(
+        destination: *const core::ffi::c_char,
+        path: *const core::ffi::c_char,
+        iface: *const core::ffi::c_char,
+        method: *const core::ffi::c_char,
+    ) -> *mut DBusMessage;
+    unsafe fn dbus_message_unref(message: *mut DBusMessage);
+    unsafe fn dbus_message_get_type(message: *mut DBusMessage) -> core::ffi::c_int;
+    unsafe fn dbus_message_iter_init(message: *mut DBusMessage, iter: *mut DBusMessageIter) -> u32;
+    unsafe fn dbus_message_iter_has_next(iter: *mut DBusMessageIter) -> u32;
+    unsafe fn dbus_message_iter_get_arg_type(iter: *mut DBusMessageIter) -> core::ffi::c_int;
+    unsafe fn dbus_message_iter_get_basic(
+        iter: *mut DBusMessageIter,
+        value: *mut core::ffi::c_void,
+    );
+
+    unsafe fn dbus_pending_call_unref(pending: *mut DBusPendingCall);
+    unsafe fn dbus_pending_call_block(pending: *mut DBusPendingCall);
+    unsafe fn dbus_pending_call_steal_reply(pending: *mut DBusPendingCall) -> *mut DBusMessage;
+
+    unsafe fn dbus_error_init(error: *mut DBusError);
+    unsafe fn dbus_error_free(error: *mut DBusError);
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .pretty()
@@ -3367,8 +4038,582 @@ fn main() {
     tracing::info!("Initializing Peridot SpriteAtlas Visualizer/Editor");
     let setup_timer = std::time::Instant::now();
 
-    let mut events = VecDeque::new();
-    let mut app_shell = shell::wayland::AppShell::new(&mut events);
+    // ローカルのdbus sessionアドレスはここにはいってるらしい: https://dbus.freedesktop.org/doc/dbus-run-session.1.html
+    let dbus_addr = std::env::var("DBUS_SESSION_BUS_ADDRESS")
+        .expect("DBUS_SESSION_BUS_ADDRESS not set or invalid");
+    println!("dbus connect to {dbus_addr:?}");
+    let dbus_addr_c = std::ffi::CString::new(dbus_addr).unwrap();
+    let mut error = core::mem::MaybeUninit::uninit();
+    unsafe {
+        dbus_error_init(error.as_mut_ptr());
+    }
+    // let dbus = unsafe { dbus_connection_open(dbus_addr_c.as_ptr(), error.as_mut_ptr()) };
+    let dbus = unsafe { dbus_bus_get(DBusBusType::Session, error.as_mut_ptr()) };
+    println!("dbus: {dbus:p}");
+    unsafe {
+        dbus_error_free(error.as_mut_ptr());
+    }
+
+    const PORTAL_BUS_NAME: &'static core::ffi::CStr = c"org.freedesktop.portal.Desktop";
+    const PORTAL_OBJECT_PATH: &'static core::ffi::CStr = c"/org/freedesktop/portal/desktop";
+    const INTROSPECTION_INTERFACE_NAME: &'static core::ffi::CStr =
+        c"org.freedesktop.DBus.Introspectable";
+    const INTROSPECT_METHOD_NAME: &'static core::ffi::CStr = c"Introspect";
+    let msg = unsafe {
+        dbus_message_new_method_call(
+            PORTAL_BUS_NAME.as_ptr(),
+            PORTAL_OBJECT_PATH.as_ptr(),
+            INTROSPECTION_INTERFACE_NAME.as_ptr(),
+            INTROSPECT_METHOD_NAME.as_ptr(),
+        )
+    };
+    let mut dbus_pending_call = core::mem::MaybeUninit::uninit();
+    let dbus_pending_call = unsafe {
+        let r = dbus_connection_send_with_reply(dbus, msg, dbus_pending_call.as_mut_ptr(), -1);
+        println!("send message: {r}");
+        dbus_pending_call.assume_init()
+    };
+    let reply = unsafe {
+        dbus_pending_call_block(dbus_pending_call);
+        dbus_pending_call_steal_reply(dbus_pending_call)
+    };
+    println!("reply type: {}", unsafe { dbus_message_get_type(reply) });
+
+    let mut reply_iter = core::mem::MaybeUninit::uninit();
+    unsafe {
+        let r = dbus_message_iter_init(reply, reply_iter.as_mut_ptr());
+        println!("iter init: {r}");
+        let r = dbus_message_iter_get_arg_type(reply_iter.assume_init_mut());
+        println!("iter has next type: {r}");
+        assert_eq!(r, b's' as _);
+    }
+
+    let mut strptr = core::mem::MaybeUninit::<*const core::ffi::c_char>::uninit();
+    unsafe {
+        dbus_message_iter_get_basic(reply_iter.assume_init_mut(), strptr.as_mut_ptr() as _);
+        let resp = core::ffi::CStr::from_ptr(strptr.assume_init())
+            .to_str()
+            .unwrap();
+        println!("introspect return: {resp}");
+
+        enum IntrospectionDocumentToplevel<'a> {
+            Node { name: Option<Cow<'a, [u8]>> },
+        }
+        enum IntrospectionDocumentNodeElement<'a> {
+            Node { name: Option<Cow<'a, [u8]>> },
+            Interface { name: Cow<'a, [u8]> },
+        }
+        enum IntrospectionDocumentInterfaceElement<'a> {
+            Method {
+                name: Cow<'a, [u8]>,
+                empty: bool,
+            },
+            Signal {
+                name: Cow<'a, [u8]>,
+                empty: bool,
+            },
+            Property {
+                name: Cow<'a, [u8]>,
+                r#type: Cow<'a, [u8]>,
+                access: Cow<'a, [u8]>,
+            },
+        }
+        enum IntrospectionDocumentMethodSignalElement<'a> {
+            Arg {
+                name: Cow<'a, [u8]>,
+                r#type: Cow<'a, [u8]>,
+                direction: Option<Cow<'a, [u8]>>,
+            },
+            Annotation {
+                name: Cow<'a, [u8]>,
+                value: Option<Cow<'a, [u8]>>,
+            },
+        }
+
+        fn read_introspection_doc_toplevel<'a>(
+            reader: &mut quick_xml::Reader<&'a [u8]>,
+            mut callback: impl for<'b> FnMut(
+                IntrospectionDocumentToplevel<'b>,
+                &mut quick_xml::Reader<&'a [u8]>,
+            ),
+        ) {
+            loop {
+                match reader.read_event().unwrap() {
+                    quick_xml::events::Event::Start(x) if x.name().0 == b"node" => {
+                        let mut name = None;
+                        for a in x.attributes() {
+                            let a = a.unwrap();
+
+                            if a.key.0 == b"name" {
+                                name = Some(a.value);
+                            }
+                        }
+
+                        callback(IntrospectionDocumentToplevel::Node { name }, reader);
+                    }
+                    quick_xml::events::Event::Text(x) if x.trim_ascii().is_empty() => (),
+                    quick_xml::events::Event::CData(x) => println!("? xml cdata: {x:?}"),
+                    quick_xml::events::Event::Comment(x) => println!("? xml comment: {x:?}"),
+                    quick_xml::events::Event::Decl(x) => println!("? xml decl: {x:?}"),
+                    quick_xml::events::Event::PI(x) => println!("? xml pi: {x:?}"),
+                    quick_xml::events::Event::DocType(x) => println!("? xml doctype: {x:?}"),
+                    quick_xml::events::Event::Eof => break,
+                    e => {
+                        unreachable!("unexpected toplevel element: {e:?}");
+                    }
+                }
+            }
+        }
+
+        fn read_introspection_doc_node<'a>(
+            reader: &mut quick_xml::Reader<&'a [u8]>,
+            mut callback: impl for<'b> FnMut(
+                IntrospectionDocumentNodeElement<'b>,
+                &mut quick_xml::Reader<&'a [u8]>,
+            ),
+        ) {
+            loop {
+                match reader.read_event().unwrap() {
+                    quick_xml::events::Event::Start(x) if x.name().0 == b"interface" => {
+                        let mut name = None;
+                        for a in x.attributes() {
+                            let a = a.unwrap();
+
+                            if a.key.0 == b"name" {
+                                name = Some(a.value);
+                            }
+                        }
+
+                        callback(
+                            IntrospectionDocumentNodeElement::Interface {
+                                name: name.expect("no name attr in interface tag"),
+                            },
+                            reader,
+                        );
+                    }
+                    quick_xml::events::Event::Start(x) if x.name().0 == b"node" => {
+                        let mut name = None;
+                        for a in x.attributes() {
+                            let a = a.unwrap();
+
+                            if a.key.0 == b"name" {
+                                name = Some(a.value);
+                            }
+                        }
+
+                        callback(IntrospectionDocumentNodeElement::Node { name }, reader);
+                    }
+                    quick_xml::events::Event::End(x) => {
+                        if x.name().0 == b"node" {
+                            break;
+                        }
+
+                        panic!("invalid closing pair: {:?}", x.name());
+                    }
+                    quick_xml::events::Event::Text(x) if x.trim_ascii().is_empty() => (),
+                    e => unreachable!("unexpected element in node: {e:?}"),
+                }
+            }
+        }
+
+        fn read_introspection_doc_interface<'a>(
+            reader: &mut quick_xml::Reader<&'a [u8]>,
+            mut callback: impl for<'b> FnMut(
+                IntrospectionDocumentInterfaceElement<'b>,
+                &mut quick_xml::Reader<&'a [u8]>,
+            ),
+        ) {
+            loop {
+                match reader.read_event().unwrap() {
+                    quick_xml::events::Event::Start(x) if x.name().0 == b"method" => {
+                        let mut name = None;
+                        for a in x.attributes() {
+                            let a = a.unwrap();
+
+                            if a.key.0 == b"name" {
+                                name = Some(a.value);
+                            }
+                        }
+
+                        callback(
+                            IntrospectionDocumentInterfaceElement::Method {
+                                name: name.expect("no name attr in method tag"),
+                                empty: false,
+                            },
+                            reader,
+                        );
+                    }
+                    quick_xml::events::Event::Start(x) if x.name().0 == b"signal" => {
+                        let mut name = None;
+                        for a in x.attributes() {
+                            let a = a.unwrap();
+
+                            if a.key.0 == b"name" {
+                                name = Some(a.value);
+                            }
+                        }
+
+                        callback(
+                            IntrospectionDocumentInterfaceElement::Signal {
+                                name: name.expect("no name attr in signal tag"),
+                                empty: false,
+                            },
+                            reader,
+                        );
+                    }
+                    quick_xml::events::Event::Empty(x) if x.name().0 == b"method" => {
+                        let mut name = None;
+                        for a in x.attributes() {
+                            let a = a.unwrap();
+
+                            if a.key.0 == b"name" {
+                                name = Some(a.value);
+                            }
+                        }
+
+                        callback(
+                            IntrospectionDocumentInterfaceElement::Method {
+                                name: name.expect("no name attr in method tag"),
+                                empty: true,
+                            },
+                            reader,
+                        );
+                    }
+                    quick_xml::events::Event::Empty(x) if x.name().0 == b"signal" => {
+                        let mut name = None;
+                        for a in x.attributes() {
+                            let a = a.unwrap();
+
+                            if a.key.0 == b"name" {
+                                name = Some(a.value);
+                            }
+                        }
+
+                        callback(
+                            IntrospectionDocumentInterfaceElement::Signal {
+                                name: name.expect("no name attr in signal tag"),
+                                empty: true,
+                            },
+                            reader,
+                        );
+                    }
+                    quick_xml::events::Event::Empty(x) if x.name().0 == b"property" => {
+                        let mut name = None;
+                        let mut r#type = None;
+                        let mut access = None;
+                        for a in x.attributes() {
+                            let a = a.unwrap();
+
+                            if a.key.0 == b"name" {
+                                name = Some(a.value);
+                            } else if a.key.0 == b"type" {
+                                r#type = Some(a.value);
+                            } else if a.key.0 == b"access" {
+                                access = Some(a.value);
+                            }
+                        }
+
+                        callback(
+                            IntrospectionDocumentInterfaceElement::Property {
+                                name: name.expect("no name attr in property tag"),
+                                r#type: r#type.expect("no type attr in property tag"),
+                                access: access.expect("no access attr in property tag"),
+                            },
+                            reader,
+                        );
+                    }
+                    quick_xml::events::Event::End(x) => {
+                        if x.name().0 == b"interface" {
+                            break;
+                        }
+
+                        panic!("invalid closing pair: {:?}", x.name());
+                    }
+                    quick_xml::events::Event::Text(x) if x.trim_ascii().is_empty() => (),
+                    e => unreachable!("unexpected element in node: {e:?}"),
+                }
+            }
+        }
+
+        fn read_introspection_doc_method<'a>(
+            reader: &mut quick_xml::Reader<&'a [u8]>,
+            mut callback: impl for<'b> FnMut(
+                IntrospectionDocumentMethodSignalElement<'b>,
+                &mut quick_xml::Reader<&'a [u8]>,
+            ),
+        ) {
+            loop {
+                match reader.read_event().unwrap() {
+                    quick_xml::events::Event::Empty(x) if x.name().0 == b"arg" => {
+                        let mut name = None;
+                        let mut r#type = None;
+                        let mut direction = None;
+                        for a in x.attributes() {
+                            let a = a.unwrap();
+
+                            if a.key.0 == b"name" {
+                                name = Some(a.value);
+                            } else if a.key.0 == b"type" {
+                                r#type = Some(a.value);
+                            } else if a.key.0 == b"direction" {
+                                direction = Some(a.value);
+                            }
+                        }
+
+                        callback(
+                            IntrospectionDocumentMethodSignalElement::Arg {
+                                name: name.expect("no name attr in arg tag"),
+                                r#type: r#type.expect("no type attr in arg tag"),
+                                direction,
+                            },
+                            reader,
+                        );
+                    }
+                    quick_xml::events::Event::Empty(x) if x.name().0 == b"annotation" => {
+                        let mut name = None;
+                        let mut r#value = None;
+                        for a in x.attributes() {
+                            let a = a.unwrap();
+
+                            if a.key.0 == b"name" {
+                                name = Some(a.value);
+                            } else if a.key.0 == b"valueype" {
+                                value = Some(a.value);
+                            }
+                        }
+
+                        callback(
+                            IntrospectionDocumentMethodSignalElement::Annotation {
+                                name: name.expect("no name attr in annotation tag"),
+                                value,
+                            },
+                            reader,
+                        );
+                    }
+                    quick_xml::events::Event::End(x) => {
+                        if x.name().0 == b"method" {
+                            break;
+                        }
+
+                        panic!("invalid closing pair: {:?}", x.name());
+                    }
+                    quick_xml::events::Event::Text(x) if x.trim_ascii().is_empty() => (),
+                    e => unreachable!("unexpected element in node: {e:?}"),
+                }
+            }
+        }
+
+        fn read_introspection_doc_signal<'a>(
+            reader: &mut quick_xml::Reader<&'a [u8]>,
+            mut callback: impl for<'b> FnMut(
+                IntrospectionDocumentMethodSignalElement<'b>,
+                &mut quick_xml::Reader<&'a [u8]>,
+            ),
+        ) {
+            loop {
+                match reader.read_event().unwrap() {
+                    quick_xml::events::Event::Empty(x) if x.name().0 == b"arg" => {
+                        let mut name = None;
+                        let mut r#type = None;
+                        let mut direction = None;
+                        for a in x.attributes() {
+                            let a = a.unwrap();
+
+                            if a.key.0 == b"name" {
+                                name = Some(a.value);
+                            } else if a.key.0 == b"type" {
+                                r#type = Some(a.value);
+                            } else if a.key.0 == b"direction" {
+                                direction = Some(a.value);
+                            }
+                        }
+
+                        callback(
+                            IntrospectionDocumentMethodSignalElement::Arg {
+                                name: name.expect("no name attr in arg tag"),
+                                r#type: r#type.expect("no type attr in arg tag"),
+                                direction,
+                            },
+                            reader,
+                        );
+                    }
+                    quick_xml::events::Event::Empty(x) if x.name().0 == b"annotation" => {
+                        let mut name = None;
+                        let mut r#value = None;
+                        for a in x.attributes() {
+                            let a = a.unwrap();
+
+                            if a.key.0 == b"name" {
+                                name = Some(a.value);
+                            } else if a.key.0 == b"valueype" {
+                                value = Some(a.value);
+                            }
+                        }
+
+                        callback(
+                            IntrospectionDocumentMethodSignalElement::Annotation {
+                                name: name.expect("no name attr in annotation tag"),
+                                value,
+                            },
+                            reader,
+                        );
+                    }
+                    quick_xml::events::Event::End(x) => {
+                        if x.name().0 == b"signal" {
+                            break;
+                        }
+
+                        panic!("invalid closing pair: {:?}", x.name());
+                    }
+                    quick_xml::events::Event::Text(x) if x.trim_ascii().is_empty() => (),
+                    e => unreachable!("unexpected element in node: {e:?}"),
+                }
+            }
+        }
+
+        let mut introspect_doc = quick_xml::Reader::from_str(resp);
+        read_introspection_doc_toplevel(&mut introspect_doc, |e, r| match e {
+            IntrospectionDocumentToplevel::Node { name } => {
+                println!("node: {name:?}");
+                read_introspection_doc_node(r, |e, r| match e {
+                    IntrospectionDocumentNodeElement::Interface { name } => {
+                        let name = quick_xml::escape::unescape(unsafe {
+                            core::str::from_utf8_unchecked(&name)
+                        });
+                        println!("  interface: {name:?}");
+
+                        read_introspection_doc_interface(r, |e, r| match e {
+                            IntrospectionDocumentInterfaceElement::Method { name, empty } => {
+                                let name = quick_xml::escape::unescape(unsafe {
+                                    core::str::from_utf8_unchecked(&name)
+                                });
+                                println!("    method: {name:?}");
+
+                                if !empty {
+                                    read_introspection_doc_method(r, |e, _| match e {
+                                        IntrospectionDocumentMethodSignalElement::Arg {
+                                            name,
+                                            r#type,
+                                            direction,
+                                        } => {
+                                            let name = quick_xml::escape::unescape(unsafe {
+                                                core::str::from_utf8_unchecked(&name)
+                                            });
+                                            let r#type = quick_xml::escape::unescape(unsafe {
+                                                core::str::from_utf8_unchecked(&r#type)
+                                            });
+                                            let direction = direction.as_ref().map(|x| {
+                                                quick_xml::escape::unescape(unsafe {
+                                                    core::str::from_utf8_unchecked(x)
+                                                })
+                                            });
+                                            println!(
+                                                "      arg: {type:?} {name:?} ({direction:?})"
+                                            );
+                                        }
+                                        IntrospectionDocumentMethodSignalElement::Annotation {
+                                            name,
+                                            value,
+                                        } => {
+                                            let name = quick_xml::escape::unescape(unsafe {
+                                                core::str::from_utf8_unchecked(&name)
+                                            });
+                                            let value = value.as_deref().map(|x| {
+                                                quick_xml::escape::unescape(unsafe {
+                                                    core::str::from_utf8_unchecked(x)
+                                                })
+                                            });
+                                            println!("      annotation: {name:?} = {value:?}");
+                                        }
+                                    });
+                                }
+                            }
+                            IntrospectionDocumentInterfaceElement::Signal { name, empty } => {
+                                let name = quick_xml::escape::unescape(unsafe {
+                                    core::str::from_utf8_unchecked(&name)
+                                });
+                                println!("    signal: {name:?}");
+
+                                if !empty {
+                                    read_introspection_doc_signal(r, |e, _| match e {
+                                        IntrospectionDocumentMethodSignalElement::Arg {
+                                            name,
+                                            r#type,
+                                            direction,
+                                        } => {
+                                            let name = quick_xml::escape::unescape(unsafe {
+                                                core::str::from_utf8_unchecked(&name)
+                                            });
+                                            let r#type = quick_xml::escape::unescape(unsafe {
+                                                core::str::from_utf8_unchecked(&r#type)
+                                            });
+                                            let direction = direction.as_deref().map(|x| {
+                                                quick_xml::escape::unescape(unsafe {
+                                                    core::str::from_utf8_unchecked(x)
+                                                })
+                                            });
+                                            println!(
+                                                "      arg: {type:?} {name:?} ({direction:?})"
+                                            );
+                                        }
+                                        IntrospectionDocumentMethodSignalElement::Annotation {
+                                            name,
+                                            value,
+                                        } => {
+                                            let name = quick_xml::escape::unescape(unsafe {
+                                                core::str::from_utf8_unchecked(&name)
+                                            });
+                                            let value = value.as_deref().map(|x| {
+                                                quick_xml::escape::unescape(unsafe {
+                                                    core::str::from_utf8_unchecked(x)
+                                                })
+                                            });
+                                            println!("      annotation: {name:?} = {value:?}");
+                                        }
+                                    });
+                                }
+                            }
+                            IntrospectionDocumentInterfaceElement::Property {
+                                name,
+                                r#type,
+                                access,
+                            } => {
+                                let name = quick_xml::escape::unescape(unsafe {
+                                    core::str::from_utf8_unchecked(&name)
+                                });
+                                let r#type = quick_xml::escape::unescape(unsafe {
+                                    core::str::from_utf8_unchecked(&r#type)
+                                });
+                                let access = quick_xml::escape::unescape(unsafe {
+                                    core::str::from_utf8_unchecked(&access)
+                                });
+                                println!("    property: {type:?} {name:?} ({access:?})");
+                            }
+                        })
+                    }
+                    IntrospectionDocumentNodeElement::Node { name } => {
+                        println!("child node: {name:?}");
+                    }
+                })
+            }
+        });
+
+        let r = dbus_message_iter_has_next(reply_iter.assume_init_mut());
+        println!("has next: {r}");
+    }
+
+    unsafe {
+        dbus_message_unref(reply);
+        dbus_message_unref(msg);
+    }
+
+    unsafe {
+        dbus_pending_call_unref(dbus_pending_call);
+    }
+
+    unsafe {
+        dbus_connection_unref(dbus);
+    }
 
     // initialize font systems
     fontconfig::init();
@@ -3392,8 +4637,11 @@ fn main() {
         br::vk::VK_FORMAT_R8_UNORM,
     );
 
-    let client_size = Cell::new((640.0f32, 480.0));
     let mut app_state = AppState::new();
+
+    let mut events = VecDeque::new();
+    let mut app_shell = shell::wayland::AppShell::new(&mut events);
+    let client_size = Cell::new((640.0f32, 480.0));
     let mut pointer_input_manager = PointerInputManager::new();
     let mut ht_manager = HitTestTreeManager::new();
     let ht_root_fallback_action_handler = Rc::new(HitTestRootTreeActionHandler {
@@ -3482,7 +4730,7 @@ fn main() {
         })
         .unwrap()
         .clone();
-    let mut sc_size = br::vk::VkExtent2D {
+    let mut sc_size = br::Extent2D {
         width: if surface_caps.currentExtent.width == 0xffff_ffff {
             640
         } else {
@@ -3535,17 +4783,21 @@ fn main() {
         std::process::abort();
     };
 
-    let mut ft_face = ft
-        .new_face(&primary_face_path, primary_face_index as _)
-        .expect("Failed to create ft face");
-    ft_face
-        .set_char_size(
-            (10.0 * 64.0) as _,
-            0,
-            (96.0 * app_shell.ui_scale_factor()) as _,
-            0,
-        )
-        .expect("Failed to set char size");
+    let mut ft_face = match ft.new_face(&primary_face_path, primary_face_index as _) {
+        Ok(x) => x,
+        Err(e) => {
+            tracing::error!(reason = ?e, "Failed to create ft face");
+            std::process::abort();
+        }
+    };
+    if let Err(e) = ft_face.set_char_size(
+        (10.0 * 64.0) as _,
+        0,
+        (96.0 * app_shell.ui_scale_factor()) as _,
+        0,
+    ) {
+        tracing::warn!(reason = ?e, "Failed to set char size");
+    }
 
     let mut font_set = FontSet {
         ui_default: ft_face,
@@ -3558,14 +4810,10 @@ fn main() {
         &subsystem,
         &br::RenderPassCreateInfo2::new(
             &[br::AttachmentDescription2::new(sc_format.format)
-                .layout_transition(br::ImageLayout::Undefined, br::ImageLayout::PresentSrc)
+                .with_layout_to(br::ImageLayout::PresentSrc.from_undefined())
                 .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store)],
-            &[
-                br::SubpassDescription2::new().colors(&[br::AttachmentReference2::color(
-                    0,
-                    br::ImageLayout::ColorAttachmentOpt,
-                )]),
-            ],
+            &[br::SubpassDescription2::new()
+                .colors(&[br::AttachmentReference2::color_attachment_opt(0)])],
             &[br::SubpassDependency2::new(
                 br::SubpassIndex::Internal(0),
                 br::SubpassIndex::External,
@@ -3618,8 +4866,8 @@ fn main() {
     let composite_vsh = subsystem.require_shader("resources/composite.vert");
     let composite_fsh = subsystem.require_shader("resources/composite.frag");
     let composite_shader_stages = [
-        br::PipelineShaderStage::new(br::ShaderStage::Vertex, &composite_vsh, c"main"),
-        br::PipelineShaderStage::new(br::ShaderStage::Fragment, &composite_fsh, c"main"),
+        composite_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+        composite_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
     ];
 
     let composite_descriptor_layout = br::DescriptorSetLayoutObject::new(
@@ -3723,28 +4971,6 @@ fn main() {
         .multisample_state(&br::PipelineMultisampleStateCreateInfo::new())])
         .unwrap();
 
-    let editing_atlas_renderer = Rc::new(RefCell::new(EditingAtlasRenderer::new(
-        &subsystem,
-        main_rp.subpass(0),
-        sc_size,
-        SizePixels {
-            width: 32,
-            height: 32,
-        },
-    )));
-    app_state.register_atlas_size_view_feedback({
-        let editing_atlas_renderer = Rc::downgrade(&editing_atlas_renderer);
-
-        move |size| {
-            let Some(editing_atlas_renderer) = editing_atlas_renderer.upgrade() else {
-                // app teardown-ed
-                return;
-            };
-
-            editing_atlas_renderer.borrow_mut().set_atlas_size(*size);
-        }
-    });
-
     let mut init_context = PresenterInitContext {
         for_view: ViewInitContext {
             subsystem: &subsystem,
@@ -3758,6 +4984,28 @@ fn main() {
         },
         app_state: &mut app_state,
     };
+
+    let editing_atlas_renderer = Rc::new(RefCell::new(EditingAtlasRenderer::new(
+        &init_context.for_view.subsystem,
+        main_rp.subpass(0),
+        sc_size,
+        SizePixels {
+            width: 32,
+            height: 32,
+        },
+    )));
+    init_context.app_state.register_atlas_size_view_feedback({
+        let editing_atlas_renderer = Rc::downgrade(&editing_atlas_renderer);
+
+        move |size| {
+            let Some(editing_atlas_renderer) = editing_atlas_renderer.upgrade() else {
+                // app teardown-ed
+                return;
+            };
+
+            editing_atlas_renderer.borrow_mut().set_atlas_size(*size);
+        }
+    });
 
     let app_header = feature::app_header::Presenter::new(&mut init_context);
     let sprite_list_pane = SpriteListPanePresenter::new(&mut init_context, app_header.height());
@@ -3792,32 +5040,6 @@ fn main() {
     );
     ht_manager.dump(ht_root);
 
-    let n = composite_instance_buffer.memory_stg().native_ptr();
-    let r = composite_instance_buffer.range_all();
-    let flush_required = composite_instance_buffer.memory_stg_requires_explicit_flush();
-    let ptr = composite_instance_buffer
-        .memory_stg_exc()
-        .map(r.clone())
-        .unwrap();
-    let mut composite_instance_count = unsafe {
-        composite_tree.sink_all(
-            sc_size,
-            0.0,
-            composition_alphamask_surface_atlas.vk_extent(),
-            &ptr,
-        )
-    };
-    if flush_required {
-        unsafe {
-            subsystem
-                .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(n, 0, r.end as _)])
-                .unwrap();
-        }
-    }
-    ptr.end();
-    let mut composite_instance_buffer_dirty = true;
-    composite_tree.take_dirty(); // mark processed
-
     let mut main_cp = br::CommandPoolObject::new(
         &subsystem,
         &br::CommandPoolCreateInfo::new(subsystem.graphics_queue_family_index),
@@ -3832,71 +5054,6 @@ fn main() {
         ),
     )
     .unwrap();
-
-    for (cb, fb) in main_cbs.iter_mut().zip(main_fbs.iter()) {
-        unsafe {
-            cb.begin(&br::CommandBufferBeginInfo::new(), &subsystem)
-                .unwrap()
-        }
-        .begin_render_pass2(
-            &br::RenderPassBeginInfo::new(
-                &main_rp,
-                fb,
-                sc_size.into_rect(br::Offset2D::ZERO),
-                &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 1.0])],
-            ),
-            &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-        )
-        .bind_pipeline(
-            br::PipelineBindPoint::Graphics,
-            &editing_atlas_renderer.borrow().render_pipeline,
-        )
-        .push_constant(
-            &editing_atlas_renderer.borrow().render_pipeline_layout,
-            br::vk::VK_SHADER_STAGE_FRAGMENT_BIT | br::vk::VK_SHADER_STAGE_VERTEX_BIT,
-            0,
-            &[sc_size.width as f32, sc_size.height as f32],
-        )
-        .bind_descriptor_sets(
-            br::PipelineBindPoint::Graphics,
-            &editing_atlas_renderer.borrow().render_pipeline_layout,
-            0,
-            &[editing_atlas_renderer.borrow().ds_param],
-            &[],
-        )
-        .draw(3, 1, 0, 0)
-        .bind_pipeline(
-            br::PipelineBindPoint::Graphics,
-            &editing_atlas_renderer.borrow().bg_render_pipeline,
-        )
-        .bind_vertex_buffer_array(
-            0,
-            &[editing_atlas_renderer
-                .borrow()
-                .bg_vertex_buffer
-                .as_transparent_ref()],
-            &[0],
-        )
-        .draw(4, 1, 0, 0)
-        .bind_pipeline(br::PipelineBindPoint::Graphics, &composite_pipeline)
-        .push_constant(
-            &composite_pipeline_layout,
-            br::vk::VK_SHADER_STAGE_VERTEX_BIT,
-            0,
-            &[sc_size.width as f32, sc_size.height as f32],
-        )
-        .bind_descriptor_sets(
-            br::PipelineBindPoint::Graphics,
-            &composite_pipeline_layout,
-            0,
-            &[composite_alphamask_group_descriptor],
-            &[],
-        )
-        .draw(4, composite_instance_count as _, 0, 0)
-        .end_render_pass2(&br::SubpassEndInfo::new())
-        .end()
-        .unwrap();
-    }
 
     let mut update_cp = br::CommandPoolObject::new(
         &subsystem,
@@ -3930,6 +5087,7 @@ fn main() {
         },
         state: app_state,
         editing_atlas_renderer,
+        event_queue: &mut events,
     };
     app_update_context
         .state
@@ -3945,13 +5103,14 @@ fn main() {
 
     let t = std::time::Instant::now();
     let mut frame_resize_request = None;
-    let mut last_render_scale = app_shell.ui_scale_factor();
-    let mut last_render_size = sc_size;
     let mut last_pointer_pos = (0.0f32, 0.0f32);
-    let mut last_composite_instance_count = composite_instance_count;
+    let mut composite_instance_count = 0;
+    let mut last_composite_instance_count = 0;
+    let mut composite_instance_buffer_dirty = false;
+    let mut popups = HashMap::<uuid::Uuid, MessageDialogPresenter>::new();
     'app: loop {
         app_shell.process_pending_events();
-        for e in events.drain(..) {
+        while let Some(e) = events.pop_front() {
             match e {
                 AppEvent::ToplevelWindowClose => break 'app,
                 AppEvent::ToplevelWindowFrameTiming => {
@@ -3963,14 +5122,8 @@ fn main() {
                         last_rendering = false;
                     }
 
-                    if app_update_context
-                        .for_view_feedback
-                        .composite_tree
-                        .take_dirty()
-                        || last_render_scale != app_shell.ui_scale_factor()
-                        || last_render_size != sc_size
-                        || true
                     {
+                        // もろもろの判定がめんどいのでいったん毎回updateする
                         let n = composite_instance_buffer.memory_stg().native_ptr();
                         let r = composite_instance_buffer.range_all();
                         let flush_required =
@@ -4000,10 +5153,8 @@ fn main() {
                             }
                         }
                         ptr.end();
-                        composite_instance_buffer_dirty = true;
 
-                        last_render_scale = app_shell.ui_scale_factor();
-                        last_render_size = sc_size;
+                        composite_instance_buffer_dirty = true;
                     }
 
                     let composite_instance_buffer_dirty =
@@ -4464,6 +5615,47 @@ fn main() {
                         pointer_input_manager
                             .cursor_shape(&mut ht_manager, &mut app_update_context),
                     );
+                }
+                AppEvent::UIMessageDialogRequest { content } => {
+                    println!("msgdlg: {content}");
+
+                    let id = uuid::Uuid::new_v4();
+                    let p = MessageDialogPresenter::new(
+                        &mut PresenterInitContext {
+                            for_view: ViewInitContext {
+                                subsystem: &subsystem,
+                                staging_scratch_buffer: &mut staging_scratch_buffer,
+                                atlas: &mut composition_alphamask_surface_atlas,
+                                ui_scale_factor: app_shell.ui_scale_factor(),
+                                fonts: &mut font_set,
+                                composite_tree: &mut app_update_context
+                                    .for_view_feedback
+                                    .composite_tree,
+                                composite_instance_manager: &mut composite_instance_buffer,
+                                ht: &mut ht_manager,
+                            },
+                            app_state: &mut app_update_context.state,
+                        },
+                        id,
+                        &content,
+                    );
+                    p.show(
+                        CompositeTree::ROOT,
+                        &mut app_update_context.for_view_feedback.composite_tree,
+                        ht_root,
+                        &mut ht_manager,
+                        t.elapsed().as_secs_f32(),
+                    );
+
+                    popups.insert(id, p);
+                }
+                AppEvent::UIPopupClose { id } => {
+                    if let Some(inst) = popups.remove(&id) {
+                        inst.hide(
+                            &mut app_update_context.for_view_feedback.composite_tree,
+                            &mut ht_manager,
+                        );
+                    }
                 }
             }
         }

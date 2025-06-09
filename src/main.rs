@@ -5587,6 +5587,7 @@ fn main() {
         ),
     )
     .unwrap();
+    let mut main_cb_invalid = true;
 
     let mut update_cp = br::CommandPoolObject::new(
         &subsystem,
@@ -5685,6 +5686,19 @@ fn main() {
                         }
                         ptr.end();
 
+                        if last_composite_instance_count != composite_instance_count {
+                            // needs update render commands
+                            if !main_cb_invalid {
+                                unsafe {
+                                    main_cp.reset(br::CommandPoolResetFlags::EMPTY).unwrap();
+                                }
+
+                                main_cb_invalid = true;
+                            }
+
+                            last_composite_instance_count = composite_instance_count;
+                        }
+
                         composite_instance_buffer_dirty = true;
                     }
 
@@ -5781,12 +5795,7 @@ fn main() {
                         last_updating = true;
                     }
 
-                    if last_composite_instance_count != composite_instance_count {
-                        // needs update render commands
-                        unsafe {
-                            main_cp.reset(br::CommandPoolResetFlags::EMPTY).unwrap();
-                        }
-
+                    if main_cb_invalid {
                         for (cb, fb) in main_cbs.iter_mut().zip(main_fbs.iter()) {
                             unsafe {
                                 cb.begin(&br::CommandBufferBeginInfo::new(), &subsystem)
@@ -5801,51 +5810,12 @@ fn main() {
                                 ),
                                 &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
                             )
-                            .bind_pipeline(
-                                br::PipelineBindPoint::Graphics,
-                                &app_update_context
+                            .inject(|r| {
+                                app_update_context
                                     .editing_atlas_renderer
                                     .borrow()
-                                    .render_pipeline,
-                            )
-                            .push_constant(
-                                &app_update_context
-                                    .editing_atlas_renderer
-                                    .borrow()
-                                    .render_pipeline_layout,
-                                br::vk::VK_SHADER_STAGE_FRAGMENT_BIT
-                                    | br::vk::VK_SHADER_STAGE_VERTEX_BIT,
-                                0,
-                                &[sc_size.width as f32, sc_size.height as f32],
-                            )
-                            .bind_descriptor_sets(
-                                br::PipelineBindPoint::Graphics,
-                                &app_update_context
-                                    .editing_atlas_renderer
-                                    .borrow()
-                                    .render_pipeline_layout,
-                                0,
-                                &[app_update_context.editing_atlas_renderer.borrow().ds_param],
-                                &[],
-                            )
-                            .draw(3, 1, 0, 0)
-                            .bind_pipeline(
-                                br::PipelineBindPoint::Graphics,
-                                &app_update_context
-                                    .editing_atlas_renderer
-                                    .borrow()
-                                    .bg_render_pipeline,
-                            )
-                            .bind_vertex_buffer_array(
-                                0,
-                                &[app_update_context
-                                    .editing_atlas_renderer
-                                    .borrow()
-                                    .bg_vertex_buffer
-                                    .as_transparent_ref()],
-                                &[0],
-                            )
-                            .draw(4, 1, 0, 0)
+                                    .render_commands(sc_size, r)
+                            })
                             .bind_pipeline(br::PipelineBindPoint::Graphics, &composite_pipeline)
                             .push_constant(
                                 &composite_pipeline_layout,
@@ -5866,7 +5836,7 @@ fn main() {
                             .unwrap();
                         }
 
-                        last_composite_instance_count = composite_instance_count;
+                        main_cb_invalid = false;
                     }
 
                     let next = sc
@@ -5923,6 +5893,8 @@ fn main() {
                             unsafe {
                                 main_cp.reset(br::CommandPoolResetFlags::EMPTY).unwrap();
                             }
+                            main_cb_invalid = true;
+
                             drop(main_fbs);
                             drop(backbuffer_views);
                             drop(sc);
@@ -6001,85 +5973,6 @@ fn main() {
                                 .editing_atlas_renderer
                                 .borrow_mut()
                                 .recreate(&subsystem, main_rp.subpass(0), sc_size);
-
-                            for (cb, fb) in main_cbs.iter_mut().zip(main_fbs.iter()) {
-                                unsafe {
-                                    cb.begin(&br::CommandBufferBeginInfo::new(), &subsystem)
-                                        .unwrap()
-                                }
-                                .begin_render_pass2(
-                                    &br::RenderPassBeginInfo::new(
-                                        &main_rp,
-                                        fb,
-                                        sc_size.into_rect(br::Offset2D::ZERO),
-                                        &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 1.0])],
-                                    ),
-                                    &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-                                )
-                                .bind_pipeline(
-                                    br::PipelineBindPoint::Graphics,
-                                    &app_update_context
-                                        .editing_atlas_renderer
-                                        .borrow()
-                                        .render_pipeline,
-                                )
-                                .push_constant(
-                                    &app_update_context
-                                        .editing_atlas_renderer
-                                        .borrow()
-                                        .render_pipeline_layout,
-                                    br::vk::VK_SHADER_STAGE_FRAGMENT_BIT
-                                        | br::vk::VK_SHADER_STAGE_VERTEX_BIT,
-                                    0,
-                                    &[sc_size.width as f32, sc_size.height as f32],
-                                )
-                                .bind_descriptor_sets(
-                                    br::PipelineBindPoint::Graphics,
-                                    &app_update_context
-                                        .editing_atlas_renderer
-                                        .borrow()
-                                        .render_pipeline_layout,
-                                    0,
-                                    &[app_update_context.editing_atlas_renderer.borrow().ds_param],
-                                    &[],
-                                )
-                                .draw(3, 1, 0, 0)
-                                .bind_pipeline(
-                                    br::PipelineBindPoint::Graphics,
-                                    &app_update_context
-                                        .editing_atlas_renderer
-                                        .borrow()
-                                        .bg_render_pipeline,
-                                )
-                                .bind_vertex_buffer_array(
-                                    0,
-                                    &[app_update_context
-                                        .editing_atlas_renderer
-                                        .borrow()
-                                        .bg_vertex_buffer
-                                        .as_transparent_ref()],
-                                    &[0],
-                                )
-                                .draw(4, 1, 0, 0)
-                                .bind_pipeline(br::PipelineBindPoint::Graphics, &composite_pipeline)
-                                .push_constant(
-                                    &composite_pipeline_layout,
-                                    br::vk::VK_SHADER_STAGE_VERTEX_BIT,
-                                    0,
-                                    &[sc_size.width as f32, sc_size.height as f32],
-                                )
-                                .bind_descriptor_sets(
-                                    br::PipelineBindPoint::Graphics,
-                                    &composite_pipeline_layout,
-                                    0,
-                                    &[composite_alphamask_group_descriptor],
-                                    &[],
-                                )
-                                .draw(4, composite_instance_count as _, 0, 0)
-                                .end_render_pass2(&br::SubpassEndInfo::new())
-                                .end()
-                                .unwrap();
-                            }
                         }
                     }
 

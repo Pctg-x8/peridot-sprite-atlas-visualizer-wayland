@@ -349,4 +349,29 @@ impl<'d> EditingAtlasRenderer<'d> {
         self.render_pipeline = render_pipeline;
         self.bg_render_pipeline = bg_render_pipeline;
     }
+
+    pub fn render_commands<'cb, E>(
+        &self,
+        sc_size: br::Extent2D,
+        rec: br::CmdRecord<'cb, E>,
+    ) -> br::CmdRecord<'cb, E> {
+        rec.bind_pipeline(br::PipelineBindPoint::Graphics, &self.render_pipeline)
+            .push_constant(
+                &self.render_pipeline_layout,
+                br::vk::VK_SHADER_STAGE_FRAGMENT_BIT | br::vk::VK_SHADER_STAGE_VERTEX_BIT,
+                0,
+                &[sc_size.width as f32, sc_size.height as f32],
+            )
+            .bind_descriptor_sets(
+                br::PipelineBindPoint::Graphics,
+                &self.render_pipeline_layout,
+                0,
+                &[self.ds_param],
+                &[],
+            )
+            .draw(3, 1, 0, 0)
+            .bind_pipeline(br::PipelineBindPoint::Graphics, &self.bg_render_pipeline)
+            .bind_vertex_buffer_array(0, &[self.bg_vertex_buffer.as_transparent_ref()], &[0])
+            .draw(4, 1, 0, 0)
+    }
 }

@@ -1,9 +1,9 @@
-use std::{cell::Cell, collections::VecDeque, rc::Rc};
+use std::{cell::Cell, rc::Rc};
 
 use bedrock::{self as br, SurfaceCreateInfo};
 
 use crate::{
-    AppEvent,
+    AppEvent, AppEventBus,
     hittest::CursorShape,
     platform::linux_input_event_codes::BTN_LEFT,
     thirdparty::wl::{self, WpCursorShapeDeviceV1Shape, WpCursorShapeManagerV1},
@@ -13,21 +13,21 @@ enum PointerOnSurface {
     None,
     Main { serial: u32 },
 }
-struct WaylandShellEventHandler {
-    app_event_bus: *mut VecDeque<AppEvent>,
+struct WaylandShellEventHandler<'a> {
+    app_event_bus: &'a AppEventBus,
     ui_scale_factor: Rc<Cell<f32>>,
     pointer_on_surface: PointerOnSurface,
     main_surface_proxy_ptr: *mut wl::Surface,
 }
-impl wl::XdgSurfaceEventListener for WaylandShellEventHandler {
+impl wl::XdgSurfaceEventListener for WaylandShellEventHandler<'_> {
     fn configure(&mut self, _: &mut wl::XdgSurface, serial: u32) {
-        unsafe { &mut *self.app_event_bus }
-            .push_back(AppEvent::ToplevelWindowSurfaceConfigure { serial });
+        self.app_event_bus
+            .push(AppEvent::ToplevelWindowSurfaceConfigure { serial });
     }
 }
-impl wl::XdgToplevelEventListener for WaylandShellEventHandler {
+impl wl::XdgToplevelEventListener for WaylandShellEventHandler<'_> {
     fn configure(&mut self, _: &mut wl::XdgToplevel, width: i32, height: i32, states: &[i32]) {
-        unsafe { &mut *self.app_event_bus }.push_back(AppEvent::ToplevelWindowConfigure {
+        self.app_event_bus.push(AppEvent::ToplevelWindowConfigure {
             width: width as _,
             height: height as _,
         });
@@ -36,7 +36,7 @@ impl wl::XdgToplevelEventListener for WaylandShellEventHandler {
     }
 
     fn close(&mut self, _: &mut wl::XdgToplevel) {
-        unsafe { &mut *self.app_event_bus }.push_back(AppEvent::ToplevelWindowClose);
+        self.app_event_bus.push(AppEvent::ToplevelWindowClose);
     }
 
     fn configure_bounds(&mut self, _toplevel: &mut wl::XdgToplevel, width: i32, height: i32) {
@@ -47,7 +47,7 @@ impl wl::XdgToplevelEventListener for WaylandShellEventHandler {
         tracing::trace!(?capabilities, "wm capabilities");
     }
 }
-impl wl::SurfaceEventListener for WaylandShellEventHandler {
+impl wl::SurfaceEventListener for WaylandShellEventHandler<'_> {
     fn enter(&mut self, _surface: &mut wl::Surface, _output: &mut wl::Output) {
         tracing::trace!("enter output");
     }
@@ -68,7 +68,7 @@ impl wl::SurfaceEventListener for WaylandShellEventHandler {
         tracing::trace!(transform, "preferred buffer transform");
     }
 }
-impl wl::PointerEventListener for WaylandShellEventHandler {
+impl wl::PointerEventListener for WaylandShellEventHandler<'_> {
     fn enter(
         &mut self,
         _pointer: &mut wl::Pointer,
@@ -86,7 +86,7 @@ impl wl::PointerEventListener for WaylandShellEventHandler {
         match self.pointer_on_surface {
             PointerOnSurface::None => (),
             PointerOnSurface::Main { serial } => {
-                unsafe { &mut *self.app_event_bus }.push_back(AppEvent::MainWindowPointerMove {
+                self.app_event_bus.push(AppEvent::MainWindowPointerMove {
                     enter_serial: serial,
                     surface_x: surface_x.to_f32(),
                     surface_y: surface_y.to_f32(),
@@ -116,7 +116,7 @@ impl wl::PointerEventListener for WaylandShellEventHandler {
         match self.pointer_on_surface {
             PointerOnSurface::None => (),
             PointerOnSurface::Main { serial } => {
-                unsafe { &mut *self.app_event_bus }.push_back(AppEvent::MainWindowPointerMove {
+                self.app_event_bus.push(AppEvent::MainWindowPointerMove {
                     enter_serial: serial,
                     surface_x: surface_x.to_f32(),
                     surface_y: surface_y.to_f32(),
@@ -138,17 +138,14 @@ impl wl::PointerEventListener for WaylandShellEventHandler {
             PointerOnSurface::None => (),
             PointerOnSurface::Main { serial } => {
                 if button == BTN_LEFT && state == wl::PointerButtonState::Pressed {
-                    unsafe { &mut *self.app_event_bus }.push_back(
-                        AppEvent::MainWindowPointerLeftDown {
+                    self.app_event_bus
+                        .push(AppEvent::MainWindowPointerLeftDown {
                             enter_serial: serial,
-                        },
-                    );
+                        });
                 } else if button == BTN_LEFT && state == wl::PointerButtonState::Released {
-                    unsafe { &mut *self.app_event_bus }.push_back(
-                        AppEvent::MainWindowPointerLeftUp {
-                            enter_serial: serial,
-                        },
-                    );
+                    self.app_event_bus.push(AppEvent::MainWindowPointerLeftUp {
+                        enter_serial: serial,
+                    });
                 }
             }
         }
@@ -182,23 +179,23 @@ impl wl::PointerEventListener for WaylandShellEventHandler {
         tracing::trace!(axis, direction, "axis relative direction");
     }
 }
-impl wl::CallbackEventListener for WaylandShellEventHandler {
+impl wl::CallbackEventListener for WaylandShellEventHandler<'_> {
     fn done(&mut self, _callback: &mut wl::Callback, _data: u32) {
-        unsafe { &mut *self.app_event_bus }.push_back(AppEvent::ToplevelWindowFrameTiming);
+        self.app_event_bus.push(AppEvent::ToplevelWindowFrameTiming);
     }
 }
 
-pub struct AppShell {
-    shell_event_handler: Box<WaylandShellEventHandler>,
+pub struct AppShell<'a> {
+    shell_event_handler: Box<WaylandShellEventHandler<'a>>,
     display: wl::Display,
     surface: core::ptr::NonNull<wl::Surface>,
     xdg_surface: core::ptr::NonNull<wl::XdgSurface>,
     cursor_shape_device: core::ptr::NonNull<wl::WpCursorShapeDeviceV1>,
     frame_callback: core::ptr::NonNull<wl::Callback>,
 }
-impl AppShell {
+impl<'a> AppShell<'a> {
     #[tracing::instrument(skip(events))]
-    pub fn new(events: *mut VecDeque<AppEvent>) -> Self {
+    pub fn new(events: &'a AppEventBus) -> Self {
         let mut dp = wl::Display::connect().unwrap();
         let mut registry = dp.get_registry().unwrap();
         struct RegistryListener {

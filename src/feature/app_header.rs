@@ -269,7 +269,7 @@ impl MenuButtonView {
 
         let current = match composite_tree.get(self.ct_bg).composite_mode {
             CompositeMode::FillColor(ref x) => {
-                x.compute(current_sec, composite_tree.parameter_store())
+                x.evaluate(current_sec, composite_tree.parameter_store())
             }
             _ => unreachable!(),
         };

@@ -1,10 +1,10 @@
 //! UI Rect Compositioning
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashMap};
 
 use bedrock::{self as br, Image, ImageChild, MemoryBound, TypedVulkanStructure, VkHandle};
 
-use crate::{AppEvent, mathext::Matrix4, subsystem::Subsystem};
+use crate::{AppEvent, AppEventBus, mathext::Matrix4, subsystem::Subsystem};
 
 #[repr(C)]
 pub struct CompositeInstanceData {
@@ -44,6 +44,8 @@ pub enum CompositeMode {
     DirectSourceOver,
     ColorTint(AnimatableColor),
     FillColor(AnimatableColor),
+    ColorTintBackdropBlur(AnimatableColor, AnimatableFloat),
+    FillColorBackdropBlur(AnimatableColor, AnimatableFloat),
 }
 impl CompositeMode {
     const fn shader_mode_value(&self) -> f32 {
@@ -51,6 +53,8 @@ impl CompositeMode {
             Self::DirectSourceOver => 0.0,
             Self::ColorTint(_) => 1.0,
             Self::FillColor(_) => 2.0,
+            Self::ColorTintBackdropBlur(_, _) => 3.0,
+            Self::FillColorBackdropBlur(_, _) => 4.0,
         }
     }
 }
@@ -79,11 +83,11 @@ impl AnimatableFloat {
         }
     }
 
-    fn process_on_complete(&mut self, current_sec: f32, q: &mut VecDeque<AppEvent>) {
+    fn process_on_complete(&mut self, current_sec: f32, q: &AppEventBus) {
         match self {
             &mut Self::Animated(_, ref mut a) if a.end_sec <= current_sec => {
                 if let Some(e) = a.event_on_complete.take() {
-                    q.push_back(e);
+                    q.push(e);
                 }
             }
             _ => (),
@@ -97,7 +101,7 @@ pub enum AnimatableColor {
     Animated([f32; 4], AnimationData<[f32; 4]>),
 }
 impl AnimatableColor {
-    pub fn compute(
+    pub fn evaluate(
         &self,
         current_sec: f32,
         parameter_store: &CompositeTreeParameterStore,
@@ -111,11 +115,11 @@ impl AnimatableColor {
         }
     }
 
-    fn process_on_complete(&mut self, current_sec: f32, q: &mut VecDeque<AppEvent>) {
+    fn process_on_complete(&mut self, current_sec: f32, q: &AppEventBus) {
         match self {
             &mut Self::Animated(_, ref mut a) if a.end_sec <= current_sec => {
                 if let Some(e) = a.event_on_complete.take() {
-                    q.push_back(e);
+                    q.push(e);
                 }
             }
             _ => (),
@@ -481,15 +485,17 @@ impl<'d> CompositeInstanceManager<'d> {
         &self.buffer_stg
     }
 
-    pub const fn buffer(&self) -> &impl br::Buffer {
+    pub const fn buffer<'b>(&'b self) -> &'b (impl br::Buffer + use<'d>) {
         &self.buffer
     }
 
-    pub const fn streaming_buffer(&self) -> &impl br::Buffer {
+    pub const fn streaming_buffer<'b>(&'b self) -> &'b (impl br::Buffer + use<'d>) {
         &self.streaming_buffer
     }
 
-    pub const fn streaming_memory_exc(&mut self) -> &mut impl br::DeviceMemoryMut {
+    pub const fn streaming_memory_exc<'b>(
+        &'b mut self,
+    ) -> &'b mut (impl br::DeviceMemoryMut + use<'d>) {
         &mut self.streaming_memory
     }
 
@@ -501,11 +507,11 @@ impl<'d> CompositeInstanceManager<'d> {
         self.count
     }
 
-    pub const fn memory_stg(&self) -> &impl br::DeviceMemory {
+    pub const fn memory_stg<'b>(&'b self) -> &'b (impl br::DeviceMemory + use<'d>) {
         &self.memory_stg
     }
 
-    pub const fn memory_stg_exc(&mut self) -> &mut impl br::DeviceMemoryMut {
+    pub const fn memory_stg_exc<'b>(&'b mut self) -> &'b mut (impl br::DeviceMemoryMut + use<'d>) {
         &mut self.memory_stg
     }
 
@@ -566,6 +572,207 @@ impl CompositeTreeParameterStore {
             .zip(self.float_parameters.iter())
         {
             *v = p.evaluate(current_sec);
+        }
+    }
+}
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub struct SafeF32(f32);
+// SafeF32 never gets NaN
+impl Eq for SafeF32 {}
+impl Ord for SafeF32 {
+    #[inline(always)]
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        unsafe { self.partial_cmp(other).unwrap_unchecked() }
+    }
+}
+impl std::hash::Hash for SafeF32 {
+    #[inline(always)]
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.to_ne_bytes().hash(state)
+    }
+}
+impl SafeF32 {
+    pub const unsafe fn new_unchecked(v: f32) -> Self {
+        Self(v)
+    }
+
+    pub const fn value(&self) -> f32 {
+        self.0
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum CompositeRenderingInstruction {
+    DrawInstanceRange {
+        index_range: core::ops::Range<usize>,
+        backdrop_buffer: usize,
+    },
+    GrabBackdrop,
+    GenerateBackdropBlur {
+        stdev: SafeF32,
+        dest_backdrop_buffer: usize,
+        rects: Vec<br::Rect2D>,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct CompositeRenderingData {
+    pub instructions: Vec<CompositeRenderingInstruction>,
+    pub required_backdrop_buffer_count: usize,
+}
+
+const fn rect_overlaps(a: &br::Rect2D, b: &br::Rect2D) -> bool {
+    b.offset.x - (a.extent.width as i32) < a.offset.x
+        && a.offset.x < b.offset.x + (b.extent.width as i32)
+        && b.offset.y - (a.extent.height as i32) < a.offset.y
+        && a.offset.y < b.offset.y + (b.extent.height as i32)
+}
+
+struct CompositeRenderingInstructionBuilder {
+    insts: Vec<CompositeRenderingInstruction>,
+    last_free_backdrop_buffer: usize,
+    active_backdrop_blur_index_for_stdev: HashMap<SafeF32, usize>,
+    current_backdrop_overlap_rects: Vec<br::Rect2D>,
+    backdrop_active: bool,
+    max_backdrop_buffer_count: usize,
+    screen_rect: br::Rect2D,
+}
+impl CompositeRenderingInstructionBuilder {
+    fn new(screen_size: br::Extent2D) -> Self {
+        Self {
+            insts: Vec::new(),
+            last_free_backdrop_buffer: 0,
+            active_backdrop_blur_index_for_stdev: HashMap::new(),
+            current_backdrop_overlap_rects: Vec::new(),
+            backdrop_active: false,
+            max_backdrop_buffer_count: 0,
+            screen_rect: screen_size.into_rect(br::Offset2D::ZERO),
+        }
+    }
+
+    fn into_data(mut self) -> CompositeRenderingData {
+        // process for last backdrop layer
+        self.max_backdrop_buffer_count = self
+            .max_backdrop_buffer_count
+            .max(self.last_free_backdrop_buffer);
+
+        CompositeRenderingData {
+            instructions: self.insts,
+            required_backdrop_buffer_count: self.max_backdrop_buffer_count,
+        }
+    }
+
+    fn draw_instance(&mut self, index: usize, backdrop_buffer_index: usize) {
+        if let Some(&mut CompositeRenderingInstruction::DrawInstanceRange {
+            ref mut index_range,
+            backdrop_buffer,
+        }) = self.insts.last_mut()
+        {
+            if index_range.end == index && backdrop_buffer == backdrop_buffer_index {
+                // optimal pass: fuse
+                index_range.end += 1;
+                return;
+            }
+        }
+
+        self.insts
+            .push(CompositeRenderingInstruction::DrawInstanceRange {
+                index_range: index..index + 1,
+                backdrop_buffer: backdrop_buffer_index,
+            });
+    }
+
+    /// return: backdrop buffer index
+    fn request_backdrop_blur(&mut self, stdev: SafeF32, rect: br::Rect2D) -> usize {
+        if !rect_overlaps(&rect, &self.screen_rect) {
+            // perfectly culled
+            return 0;
+        }
+
+        if !self.backdrop_active {
+            // first time layer
+            self.backdrop_active = true;
+            self.insts.extend([
+                CompositeRenderingInstruction::GrabBackdrop,
+                CompositeRenderingInstruction::GenerateBackdropBlur {
+                    stdev,
+                    dest_backdrop_buffer: 0,
+                    rects: vec![rect],
+                },
+            ]);
+            self.max_backdrop_buffer_count = self
+                .max_backdrop_buffer_count
+                .max(self.last_free_backdrop_buffer);
+            self.last_free_backdrop_buffer = 1;
+            self.current_backdrop_overlap_rects.clear();
+            self.active_backdrop_blur_index_for_stdev.clear();
+            self.current_backdrop_overlap_rects.push(rect);
+            self.active_backdrop_blur_index_for_stdev
+                .insert(stdev, self.insts.len() - 1);
+
+            return 0;
+        }
+
+        let overlaps = self
+            .current_backdrop_overlap_rects
+            .iter()
+            .any(|x| rect_overlaps(&rect, x));
+
+        if overlaps {
+            // non-optimal pass: split to new layer
+            self.insts.extend([
+                CompositeRenderingInstruction::GrabBackdrop,
+                CompositeRenderingInstruction::GenerateBackdropBlur {
+                    stdev,
+                    dest_backdrop_buffer: 0,
+                    rects: vec![rect],
+                },
+            ]);
+            self.max_backdrop_buffer_count = self
+                .max_backdrop_buffer_count
+                .max(self.last_free_backdrop_buffer);
+            self.last_free_backdrop_buffer = 1;
+            self.current_backdrop_overlap_rects.clear();
+            self.active_backdrop_blur_index_for_stdev.clear();
+            self.current_backdrop_overlap_rects.push(rect);
+            self.active_backdrop_blur_index_for_stdev
+                .insert(stdev, self.insts.len() - 1);
+
+            return 0;
+        }
+
+        // optimal pass: no overlapping layer: fuse or generate
+        self.current_backdrop_overlap_rects.push(rect);
+
+        if let Some(&ix) = self.active_backdrop_blur_index_for_stdev.get(&stdev) {
+            // fuse
+            let &mut CompositeRenderingInstruction::GenerateBackdropBlur {
+                ref mut rects,
+                dest_backdrop_buffer,
+                ..
+            } = &mut self.insts[ix]
+            else {
+                unreachable!();
+            };
+
+            rects.push(rect);
+            dest_backdrop_buffer
+        } else {
+            // generate
+            self.insts
+                .push(CompositeRenderingInstruction::GenerateBackdropBlur {
+                    rects: vec![rect],
+                    dest_backdrop_buffer: self.last_free_backdrop_buffer,
+                    stdev,
+                });
+            self.last_free_backdrop_buffer += 1;
+            self.current_backdrop_overlap_rects.push(rect);
+            self.active_backdrop_blur_index_for_stdev
+                .insert(stdev, self.insts.len() - 1);
+
+            self.last_free_backdrop_buffer - 1
         }
     }
 }
@@ -663,10 +870,13 @@ impl CompositeTree {
         current_sec: f32,
         tex_size: br::Extent2D,
         mapped_ptr: &br::MappedMemory<'_, impl br::DeviceMemoryMut + ?Sized>,
-        event_queue: &mut VecDeque<AppEvent>,
-    ) -> usize {
+        event_bus: &AppEventBus,
+    ) -> CompositeRenderingData {
+        // let update_timer = std::time::Instant::now();
+
         self.parameter_store.evaluate_all(current_sec);
 
+        let mut inst_builder = CompositeRenderingInstructionBuilder::new(size);
         let mut instance_slot_index = 0;
         let mut processes = vec![(
             0,
@@ -699,7 +909,7 @@ impl CompositeTree {
                     let rate = x.interpolate(current_sec);
                     if rate >= 1.0 {
                         if let Some(e) = x.event_on_complete.take() {
-                            event_queue.push_back(e);
+                            event_bus.push(e);
                         }
                     }
 
@@ -712,7 +922,7 @@ impl CompositeTree {
                     let rate = x.interpolate(current_sec);
                     if rate >= 1.0 {
                         if let Some(e) = x.event_on_complete.take() {
-                            event_queue.push_back(e);
+                            event_bus.push(e);
                         }
                     }
 
@@ -725,7 +935,7 @@ impl CompositeTree {
                     let rate = x.interpolate(current_sec);
                     if rate >= 1.0 {
                         if let Some(e) = x.event_on_complete.take() {
-                            event_queue.push_back(e);
+                            event_bus.push(e);
                         }
                     }
 
@@ -738,7 +948,7 @@ impl CompositeTree {
                     let rate = x.interpolate(current_sec);
                     if rate >= 1.0 {
                         if let Some(e) = x.event_on_complete.take() {
-                            event_queue.push_back(e);
+                            event_bus.push(e);
                         }
                     }
 
@@ -767,16 +977,24 @@ impl CompositeTree {
                 .mul_mat4(Matrix4::translate(-r.pivot[0] * w, -r.pivot[1] * h)),
             );
 
-            r.opacity.process_on_complete(current_sec, event_queue);
-            r.scale_x.process_on_complete(current_sec, event_queue);
-            r.scale_y.process_on_complete(current_sec, event_queue);
+            r.opacity.process_on_complete(current_sec, event_bus);
+            r.scale_x.process_on_complete(current_sec, event_bus);
+            r.scale_y.process_on_complete(current_sec, event_bus);
             match r.composite_mode {
                 CompositeMode::DirectSourceOver => (),
                 CompositeMode::ColorTint(ref mut t) => {
-                    t.process_on_complete(current_sec, event_queue)
+                    t.process_on_complete(current_sec, event_bus)
                 }
                 CompositeMode::FillColor(ref mut t) => {
-                    t.process_on_complete(current_sec, event_queue)
+                    t.process_on_complete(current_sec, event_bus)
+                }
+                CompositeMode::ColorTintBackdropBlur(ref mut t, ref mut stdev) => {
+                    t.process_on_complete(current_sec, event_bus);
+                    stdev.process_on_complete(current_sec, event_bus);
+                }
+                CompositeMode::FillColorBackdropBlur(ref mut t, ref mut stdev) => {
+                    t.process_on_complete(current_sec, event_bus);
+                    stdev.process_on_complete(current_sec, event_bus);
                 }
             }
 
@@ -809,10 +1027,16 @@ impl CompositeTree {
                             color_tint: match r.composite_mode {
                                 CompositeMode::DirectSourceOver => [0.0; 4],
                                 CompositeMode::ColorTint(ref t) => {
-                                    t.compute(current_sec, &self.parameter_store)
+                                    t.evaluate(current_sec, &self.parameter_store)
                                 }
                                 CompositeMode::FillColor(ref t) => {
-                                    t.compute(current_sec, &self.parameter_store)
+                                    t.evaluate(current_sec, &self.parameter_store)
+                                }
+                                CompositeMode::ColorTintBackdropBlur(ref t, _) => {
+                                    t.evaluate(current_sec, &self.parameter_store)
+                                }
+                                CompositeMode::FillColorBackdropBlur(ref t, _) => {
+                                    t.evaluate(current_sec, &self.parameter_store)
                                 }
                             },
                             pos_x_animation_data: [0.0; 4],
@@ -827,6 +1051,33 @@ impl CompositeTree {
                     );
                 }
 
+                let backdrop_buffer_index = match r.composite_mode {
+                    CompositeMode::ColorTintBackdropBlur(ref t, ref stdev)
+                    | CompositeMode::FillColorBackdropBlur(ref t, ref stdev) => {
+                        let [_, _, _, a] = t.evaluate(current_sec, &self.parameter_store);
+                        if a > 0.0 {
+                            inst_builder.request_backdrop_blur(
+                                unsafe { SafeF32::new_unchecked(stdev.evaluate(current_sec)) },
+                                br::Rect2D {
+                                    offset: br::Offset2D {
+                                        x: left as _,
+                                        y: top as _,
+                                    },
+                                    extent: br::Extent2D {
+                                        width: w as _,
+                                        height: h as _,
+                                    },
+                                },
+                            )
+                        } else {
+                            0
+                        }
+                    }
+                    // とりあえず0
+                    _ => 0,
+                };
+
+                inst_builder.draw_instance(instance_slot_index, backdrop_buffer_index);
                 instance_slot_index += 1;
             }
 
@@ -838,7 +1089,10 @@ impl CompositeTree {
             );
         }
 
-        instance_slot_index
+        // let update_time = update_timer.elapsed();
+        // println!("instbuild({update_time:?}): {:?}", inst_builder.insts);
+
+        inst_builder.into_data()
     }
 }
 
@@ -1025,7 +1279,7 @@ impl<'d> CompositionSurfaceAtlas<'d> {
         }
     }
 
-    pub const fn resource(&self) -> &(impl br::ImageView + br::ImageChild) {
+    pub const fn resource<'s>(&'s self) -> &'s (impl br::ImageView + br::ImageChild + use<'d>) {
         &self.resource
     }
 

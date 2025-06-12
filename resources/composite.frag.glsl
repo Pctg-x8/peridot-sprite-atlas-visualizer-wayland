@@ -1,13 +1,15 @@
 #version 450
 
+#define FRAGMENT_SHADER
+#include "composite.resources.glsl"
+
 layout(location = 0) in vec4 uv_compositeMode_opacity;
 layout(location = 1) in vec4 uvOffset_texSizePixels;
 layout(location = 2) in vec4 relativePixelCoord_renderSizePixels;
 layout(location = 3) in vec4 sliceBordersLTRB;
 layout(location = 4) in vec4 colorTint;
 layout(location = 5) in vec4 texSlicedSizePixels;
-
-layout(set = 0, binding = 2) uniform sampler2D tex;
+layout(location = 6) in vec2 screenUV;
 
 layout(location = 0) out vec4 col_out;
 
@@ -43,7 +45,7 @@ vec4 tex_9s(in vec2 relativePixelCoord, in vec2 renderSizePixels, in vec2 uvOffs
 }
 
 void main() {
-    if (uv_compositeMode_opacity.z == 2.0) {
+    if (uv_compositeMode_opacity.z == 2.0 || uv_compositeMode_opacity.z == 4.0) {
         // no texture mapping
         col_out = colorTint;
     } else if (sliceBordersLTRB == vec4(0.0f)) {
@@ -53,7 +55,7 @@ void main() {
         col_out = tex_9s(relativePixelCoord_renderSizePixels.xy, relativePixelCoord_renderSizePixels.zw, uvOffset_texSizePixels.xy, uvOffset_texSizePixels.zw, sliceBordersLTRB, texSlicedSizePixels.xy);
     }
 
-    if (uv_compositeMode_opacity.z == 1.0) {
+    if (uv_compositeMode_opacity.z == 1.0 || uv_compositeMode_opacity.z == 3.0) {
         // input is r8 format
         col_out = colorTint * vec4(1.0, 1.0, 1.0, col_out.r);
     }
@@ -61,4 +63,10 @@ void main() {
     // apply opacity and premultiply
     col_out.a *= uv_compositeMode_opacity.w;
     col_out.rgb *= col_out.a;
+
+    if (col_out.a > 0.0 && (uv_compositeMode_opacity.z == 3.0 || uv_compositeMode_opacity.z == 4.0)) {
+        // blend with backdrop(forced alpha = 1)
+        const vec4 backdrop = texture(backdrop_tex, screenUV.xy);
+        col_out = vec4(col_out.rgb + backdrop.rgb * (1.0 - col_out.a), 1.0);
+    }
 }

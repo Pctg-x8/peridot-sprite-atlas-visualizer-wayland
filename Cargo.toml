@@ -9,6 +9,7 @@ bedrock = { git = "https://github.com/Pctg-x8/bedrock", branch = "peridot", feat
     "Presentation",
     "VK_KHR_wayland_surface",
     "Allow1_4APIs",
+    "VK_EXT_debug_utils",
 ] }
 freetype2 = { git = "https://github.com/Pctg-x8/ft2-rs" }
 fontconfig = { git = "https://github.com/Pctg-x8/fc-rs", features = [

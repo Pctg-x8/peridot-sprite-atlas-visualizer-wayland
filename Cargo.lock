@@ -26,7 +26,7 @@ checksum = "ace50bade8e6234aa140d9a2f552bbee1db4d353f69b8217bc503490fc1a9f26"
 [[package]]
 name = "bedrock"
 version = "0.1.0-vk1.4.305"
-source = "git+https://github.com/Pctg-x8/bedrock?branch=peridot#ba7648219718ddcb196b36028b54763e2e622cf9"
+source = "git+https://github.com/Pctg-x8/bedrock?branch=peridot#d375d53ab85dc404dbe096b4f4c1f2441f0ddfe9"
 dependencies = [
  "cfg-if",
  "derives",
@@ -48,14 +48,14 @@ checksum = "793db76d6187cd04dff33004d8e6c9cc4e05cd330500379d2394209271b4aeee"
 
 [[package]]
 name = "cfg-if"
-version = "1.0.0"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
+checksum = "9555578bc9e57714c812a1f84e4fc5b4d21fcb063490c624de019f7464c91268"
 
 [[package]]
 name = "derives"
 version = "0.1.0"
-source = "git+https://github.com/Pctg-x8/bedrock?branch=peridot#ba7648219718ddcb196b36028b54763e2e622cf9"
+source = "git+https://github.com/Pctg-x8/bedrock?branch=peridot#d375d53ab85dc404dbe096b4f4c1f2441f0ddfe9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -360,9 +360,9 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "syn"
-version = "2.0.101"
+version = "2.0.102"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ce2b7fc941b3a24138a0a7cf8e858bfc6a992e7978a068a5c760deb0ed43caf"
+checksum = "f6397daf94fa90f058bd0fd88429dd9e5738999cca8d701813c80723add80462"
 dependencies = [
  "proc-macro2",
  "quote",

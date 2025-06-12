@@ -5,7 +5,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use bedrock::{self as br, Device, Instance, MemoryBound, PhysicalDevice, VkHandle};
+use bedrock::{
+    self as br, Device, Instance, MemoryBound, PhysicalDevice, ResolverInterface, VkHandle,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoadShaderError {
@@ -26,6 +28,45 @@ impl br::VkHandle for SubsystemInstanceAccess {
     }
 }
 impl br::Instance for SubsystemInstanceAccess {}
+impl br::InstanceExtensions for SubsystemInstanceAccess {
+    fn set_debug_utils_object_name_ext_fn(&self) -> bedrock::vk::PFN_vkSetDebugUtilsObjectNameEXT {
+        unsafe { self.native_ptr().load_function_unconstrainted() }
+    }
+
+    unsafe fn new_debug_utils_messenger_raw(
+        &self,
+        _info: &bedrock::DebugUtilsMessengerCreateInfo,
+        _allocation_callbacks: Option<&bedrock::vk::VkAllocationCallbacks>,
+    ) -> bedrock::Result<bedrock::vk::VkDebugUtilsMessengerEXT> {
+        unimplemented!();
+    }
+
+    unsafe fn destroy_debug_utils_messenger_raw(
+        &self,
+        _obj: bedrock::vk::VkDebugUtilsMessengerEXT,
+        _allocation_callbacks: Option<&bedrock::vk::VkAllocationCallbacks>,
+    ) {
+        unimplemented!();
+    }
+
+    fn create_debug_utils_messenger_ext_fn(
+        &self,
+    ) -> bedrock::vk::PFN_vkCreateDebugUtilsMessengerEXT {
+        unimplemented!();
+    }
+
+    fn destroy_debug_utils_messenger_ext_fn(
+        &self,
+    ) -> bedrock::vk::PFN_vkDestroyDebugUtilsMessengerEXT {
+        unimplemented!();
+    }
+
+    fn get_physical_device_external_fence_properties_khr_fn(
+        &self,
+    ) -> bedrock::vk::PFN_vkGetPhysicalDeviceExternalFencePropertiesKHR {
+        unimplemented!();
+    }
+}
 
 #[repr(transparent)]
 struct SubsystemAdapterAccess(Subsystem);
@@ -148,7 +189,11 @@ impl Subsystem {
             )
             .api_version(br::Version::new(0, 1, 4, 0)),
             &[c"VK_LAYER_KHRONOS_validation".into()],
-            &[c"VK_KHR_surface".into(), c"VK_KHR_wayland_surface".into()],
+            &[
+                c"VK_KHR_surface".into(),
+                c"VK_KHR_wayland_surface".into(),
+                c"VK_EXT_debug_utils".into(),
+            ],
         )) {
             Ok(x) => x,
             Err(e) => {
@@ -458,6 +503,18 @@ impl Subsystem {
     }
 
     #[tracing::instrument(skip(self, create_info_array), err(Display))]
+    pub fn create_graphics_pipelines(
+        &self,
+        create_info_array: &[br::GraphicsPipelineCreateInfo],
+    ) -> br::Result<Vec<br::PipelineObject<&Self>>> {
+        br::Device::new_graphics_pipelines(
+            self,
+            create_info_array,
+            Some(&unsafe { br::VkHandleRef::dangling(self.pipeline_cache) }),
+        )
+    }
+
+    #[tracing::instrument(skip(self, create_info_array), err(Display))]
     pub fn create_graphics_pipelines_array<const N: usize>(
         &self,
         create_info_array: &[br::GraphicsPipelineCreateInfo; N],
@@ -669,11 +726,11 @@ impl<'g> StagingScratchBuffer<'g> {
         base
     }
 
-    pub fn map(
-        &self,
+    pub fn map<'s>(
+        &'s self,
         mode: StagingScratchBufferMapMode,
         range: core::ops::Range<br::DeviceSize>,
-    ) -> br::Result<MappedStagingScratchBuffer> {
+    ) -> br::Result<MappedStagingScratchBuffer<'s, 'g>> {
         let ptr = unsafe {
             br::vkfn_wrapper::map_memory(
                 self.gfx_device_ref.native_ptr(),
@@ -897,11 +954,11 @@ impl<'g> StagingScratchBufferManager<'g> {
         }
     }
 
-    pub fn of(
-        &self,
+    pub fn of<'s>(
+        &'s self,
         reservation: &StagingScratchBufferReservation,
     ) -> (
-        &impl br::VkHandle<Handle = br::vk::VkBuffer>,
+        &'s (impl br::VkHandle<Handle = br::vk::VkBuffer> + use<'g>),
         br::DeviceSize,
     ) {
         (
@@ -910,11 +967,11 @@ impl<'g> StagingScratchBufferManager<'g> {
         )
     }
 
-    pub fn map(
-        &mut self,
+    pub fn map<'s>(
+        &'s mut self,
         reservation: &StagingScratchBufferReservation,
         mode: StagingScratchBufferMapMode,
-    ) -> br::Result<MappedStagingScratchBuffer> {
+    ) -> br::Result<MappedStagingScratchBuffer<'s, 'g>> {
         self.buffer_blocks[reservation.block_index].map(
             mode,
             reservation.offset..(reservation.offset + reservation.size),

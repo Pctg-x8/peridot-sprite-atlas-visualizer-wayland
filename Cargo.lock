@@ -26,7 +26,7 @@ checksum = "ace50bade8e6234aa140d9a2f552bbee1db4d353f69b8217bc503490fc1a9f26"
 [[package]]
 name = "bedrock"
 version = "0.1.0-vk1.4.305"
-source = "git+https://github.com/Pctg-x8/bedrock?branch=peridot#d375d53ab85dc404dbe096b4f4c1f2441f0ddfe9"
+source = "git+https://github.com/Pctg-x8/bedrock?branch=peridot#e4e4381cd955865f0783766186615ea28a111d73"
 dependencies = [
  "cfg-if",
  "derives",
@@ -55,7 +55,7 @@ checksum = "9555578bc9e57714c812a1f84e4fc5b4d21fcb063490c624de019f7464c91268"
 [[package]]
 name = "derives"
 version = "0.1.0"
-source = "git+https://github.com/Pctg-x8/bedrock?branch=peridot#d375d53ab85dc404dbe096b4f4c1f2441f0ddfe9"
+source = "git+https://github.com/Pctg-x8/bedrock?branch=peridot#e4e4381cd955865f0783766186615ea28a111d73"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -163,9 +163,9 @@ dependencies = [
 
 [[package]]
 name = "memchr"
-version = "2.7.4"
+version = "2.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78ca9ab1a0babb1e7d5695e3530886289c18cf2f87ec19a575a0abdce112e3a3"
+checksum = "32a282da65faaf38286cf3be983213fcf1d2e2a58700e808f83f4ea9a4804bc0"
 
 [[package]]
 name = "nu-ansi-term"

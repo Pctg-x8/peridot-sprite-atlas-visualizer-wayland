@@ -24,8 +24,8 @@ use std::{
 use app_state::AppState;
 use bedrock::{
     self as br, CommandBufferMut, CommandPoolMut, DescriptorPoolMut, Device, DeviceMemoryMut,
-    Fence, FenceMut, Image, ImageChild, ImageChildMut, InstanceChild, MemoryBound, PhysicalDevice,
-    RenderPass, ShaderModule, Swapchain, VkHandle, VkHandleMut, VkObject,
+    Fence, FenceMut, Image, ImageChild, InstanceChild, MemoryBound, PhysicalDevice, RenderPass,
+    ShaderModule, Swapchain, VkHandle, VkHandleMut, VkObject,
 };
 use component::CommonButtonView;
 use composite::{
@@ -3522,7 +3522,6 @@ impl PopupMaskView {
 
 struct PopupCommonFrameView {
     ct_root: CompositeTreeRef,
-    ct_border: CompositeTreeRef,
     ht_root: HitTestTreeRef,
     height: f32,
     ui_scale_factor: f32,
@@ -3717,7 +3716,6 @@ impl PopupCommonFrameView {
 
         Self {
             ct_root,
-            ct_border,
             ht_root,
             height,
             ui_scale_factor: init.ui_scale_factor,
@@ -4268,6 +4266,359 @@ enum RenderPassType {
     ContinueFinal,
 }
 
+struct SubsystemBoundSurface<'s> {
+    handle: br::vk::VkSurfaceKHR,
+    subsystem: &'s Subsystem,
+}
+impl Drop for SubsystemBoundSurface<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            br::vkfn_wrapper::destroy_surface(
+                self.subsystem.instance().native_ptr(),
+                self.handle,
+                None,
+            );
+        }
+    }
+}
+impl br::VkHandle for SubsystemBoundSurface<'_> {
+    type Handle = br::vk::VkSurfaceKHR;
+
+    #[inline(always)]
+    fn native_ptr(&self) -> Self::Handle {
+        self.handle
+    }
+}
+impl br::InstanceChild for SubsystemBoundSurface<'_> {
+    type ConcreteInstance = <Subsystem as br::InstanceChild>::ConcreteInstance;
+
+    #[inline]
+    fn instance(&self) -> &Self::ConcreteInstance {
+        self.subsystem.instance()
+    }
+}
+impl br::Surface for SubsystemBoundSurface<'_> {}
+
+struct TemporalSwapchain<'s> {
+    subsystem: &'s Subsystem,
+    handle: br::vk::VkSwapchainKHR,
+    size: br::Extent2D,
+    format: br::Format,
+}
+impl Drop for TemporalSwapchain<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            br::vkfn_wrapper::destroy_swapchain(self.subsystem.native_ptr(), self.handle, None);
+        }
+    }
+}
+impl br::VkHandle for TemporalSwapchain<'_> {
+    type Handle = br::vk::VkSwapchainKHR;
+
+    #[inline(always)]
+    fn native_ptr(&self) -> Self::Handle {
+        self.handle
+    }
+}
+impl br::DeviceChildHandle for TemporalSwapchain<'_> {
+    #[inline(always)]
+    fn device_handle(&self) -> br::vk::VkDevice {
+        self.subsystem.native_ptr()
+    }
+}
+impl<'s> br::DeviceChild for TemporalSwapchain<'s> {
+    type ConcreteDevice = &'s Subsystem;
+
+    #[inline(always)]
+    fn device(&self) -> &Self::ConcreteDevice {
+        &self.subsystem
+    }
+}
+impl br::Swapchain for TemporalSwapchain<'_> {
+    fn size(&self) -> &br::Extent2D {
+        &self.size
+    }
+
+    fn format(&self) -> br::Format {
+        self.format
+    }
+}
+
+pub struct PrimaryRenderTarget<'s> {
+    subsystem: &'s Subsystem,
+    surface: br::vk::VkSurfaceKHR,
+    swapchain: br::vk::VkSwapchainKHR,
+    backbuffers: Vec<br::vk::VkImage>,
+    backbuffer_views: Vec<br::vk::VkImageView>,
+    size: br::Extent2D,
+    format: br::SurfaceFormat,
+    transform: br::SurfaceTransformFlags,
+    composite_alpha: br::CompositeAlphaFlags,
+}
+impl Drop for PrimaryRenderTarget<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            for x in self.backbuffer_views.drain(..) {
+                br::vkfn_wrapper::destroy_image_view(self.subsystem.native_ptr(), x, None);
+            }
+
+            br::vkfn_wrapper::destroy_swapchain(self.subsystem.native_ptr(), self.swapchain, None);
+            br::vkfn_wrapper::destroy_surface(
+                self.subsystem.instance().native_ptr(),
+                self.surface,
+                None,
+            );
+        }
+    }
+}
+impl br::VkHandle for PrimaryRenderTarget<'_> {
+    type Handle = br::vk::VkSwapchainKHR;
+
+    #[inline(always)]
+    fn native_ptr(&self) -> Self::Handle {
+        self.swapchain
+    }
+}
+impl br::VkHandleMut for PrimaryRenderTarget<'_> {
+    #[inline(always)]
+    fn native_ptr_mut(&mut self) -> Self::Handle {
+        self.swapchain
+    }
+}
+impl br::DeviceChildHandle for PrimaryRenderTarget<'_> {
+    #[inline(always)]
+    fn device_handle(&self) -> bedrock::vk::VkDevice {
+        self.subsystem.native_ptr()
+    }
+}
+impl<'s> br::DeviceChild for PrimaryRenderTarget<'s> {
+    type ConcreteDevice = &'s Subsystem;
+
+    #[inline(always)]
+    fn device(&self) -> &Self::ConcreteDevice {
+        &self.subsystem
+    }
+}
+impl br::Swapchain for PrimaryRenderTarget<'_> {
+    #[inline(always)]
+    fn size(&self) -> &br::Extent2D {
+        &self.size
+    }
+
+    #[inline(always)]
+    fn format(&self) -> br::Format {
+        self.format.format
+    }
+}
+impl<'s> PrimaryRenderTarget<'s> {
+    fn new(surface: SubsystemBoundSurface<'s>) -> Self {
+        let surface_caps = surface
+            .subsystem
+            .adapter()
+            .surface_capabilities(&surface)
+            .unwrap();
+        let surface_formats = surface
+            .subsystem
+            .adapter()
+            .surface_formats_alloc(&surface)
+            .unwrap();
+        let sc_transform = if surface_caps
+            .supported_transforms()
+            .has_any(br::SurfaceTransformFlags::IDENTITY)
+        {
+            br::SurfaceTransformFlags::IDENTITY
+        } else {
+            surface_caps.current_transform()
+        };
+        let sc_composite_alpha = if surface_caps
+            .supported_composite_alpha()
+            .has_any(br::CompositeAlphaFlags::OPAQUE)
+        {
+            br::CompositeAlphaFlags::OPAQUE
+        } else {
+            br::CompositeAlphaFlags::INHERIT
+        };
+        let sc_format = surface_formats
+            .iter()
+            .find(|x| {
+                x.format == br::vk::VK_FORMAT_R8G8B8A8_UNORM
+                    && x.colorSpace == br::vk::VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
+            })
+            .unwrap()
+            .clone();
+        let sc_size = br::Extent2D {
+            width: if surface_caps.currentExtent.width == 0xffff_ffff {
+                640
+            } else {
+                surface_caps.currentExtent.width
+            },
+            height: if surface_caps.currentExtent.height == 0xffff_ffff {
+                480
+            } else {
+                surface_caps.currentExtent.height
+            },
+        };
+
+        let sc = TemporalSwapchain {
+            handle: unsafe {
+                br::vkfn_wrapper::create_swapchain(
+                    surface.subsystem.native_ptr(),
+                    &br::SwapchainCreateInfo::new(
+                        &surface,
+                        2,
+                        sc_format,
+                        sc_size,
+                        br::ImageUsageFlags::COLOR_ATTACHMENT | br::ImageUsageFlags::TRANSFER_SRC,
+                    )
+                    .pre_transform(sc_transform)
+                    .composite_alpha(sc_composite_alpha),
+                    None,
+                )
+                .unwrap()
+            },
+            subsystem: surface.subsystem,
+            size: sc_size,
+            format: sc_format.format,
+        };
+
+        let backbuffer_views = sc
+            .images_alloc()
+            .unwrap()
+            .into_iter()
+            .map(|bb| {
+                br::ImageViewBuilder::new(
+                    bb,
+                    br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+                )
+                .create()
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        let (backbuffer_views, backbuffers): (Vec<_>, Vec<_>) = backbuffer_views
+            .into_iter()
+            .map(|x| {
+                let (v, i) = x.unmanage();
+
+                (v, i.native_ptr())
+            })
+            .unzip();
+        let swapchain = unsafe { core::ptr::read(&sc.handle) };
+        let subsystem = unsafe { core::ptr::read(&surface.subsystem) };
+        let surface1 = unsafe { core::ptr::read(&surface.handle) };
+        core::mem::forget(sc);
+        core::mem::forget(surface);
+
+        Self {
+            subsystem,
+            surface: surface1,
+            swapchain,
+            backbuffers,
+            backbuffer_views,
+            size: sc_size,
+            format: sc_format,
+            transform: sc_transform,
+            composite_alpha: sc_composite_alpha,
+        }
+    }
+
+    pub const fn color_format(&self) -> br::Format {
+        self.format.format
+    }
+
+    #[inline(always)]
+    pub fn backbuffer_count(&self) -> usize {
+        self.backbuffers.len()
+    }
+
+    #[inline(always)]
+    pub fn backbuffer_image<'x>(&'x self, index: usize) -> br::VkHandleRef<'x, br::vk::VkImage> {
+        unsafe { br::VkHandleRef::dangling(self.backbuffers[index]) }
+    }
+
+    #[inline]
+    pub fn backbuffer_views<'x>(
+        &'x self,
+    ) -> impl Iterator<Item = br::VkHandleRef<'x, br::vk::VkImageView>> + 'x {
+        self.backbuffer_views
+            .iter()
+            .map(|&x| unsafe { br::VkHandleRef::dangling(x) })
+    }
+
+    pub fn resize(&mut self, new_size: br::Extent2D) {
+        self.backbuffers.clear();
+        unsafe {
+            for x in self.backbuffer_views.drain(..) {
+                br::vkfn_wrapper::destroy_image_view(self.subsystem.native_ptr(), x, None);
+            }
+
+            br::vkfn_wrapper::destroy_swapchain(self.subsystem.native_ptr(), self.swapchain, None);
+        }
+
+        self.swapchain = unsafe {
+            br::vkfn_wrapper::create_swapchain(
+                self.subsystem.native_ptr(),
+                &br::SwapchainCreateInfo::new(
+                    &br::VkHandleRef::dangling(self.surface),
+                    2,
+                    self.format,
+                    new_size,
+                    br::ImageUsageFlags::COLOR_ATTACHMENT | br::ImageUsageFlags::TRANSFER_SRC,
+                )
+                .pre_transform(self.transform)
+                .composite_alpha(self.composite_alpha),
+                None,
+            )
+            .unwrap()
+        };
+
+        let backbuffer_count = unsafe {
+            br::vkfn_wrapper::get_swapchain_image_count(self.subsystem.native_ptr(), self.swapchain)
+                .unwrap()
+        };
+
+        let mut buf = Vec::with_capacity(backbuffer_count as _);
+        unsafe {
+            buf.set_len(buf.capacity());
+        }
+        unsafe {
+            br::vkfn_wrapper::get_swapchain_images(
+                self.subsystem.native_ptr(),
+                self.swapchain,
+                &mut buf,
+            )
+            .unwrap();
+        }
+
+        if self.backbuffers.capacity() < backbuffer_count as usize {
+            self.backbuffers
+                .reserve(backbuffer_count as usize - self.backbuffers.capacity());
+        }
+        if self.backbuffer_views.capacity() < backbuffer_count as usize {
+            self.backbuffer_views
+                .reserve(backbuffer_count as usize - self.backbuffer_views.capacity());
+        }
+        for b in buf.into_iter() {
+            self.backbuffers.push(b);
+            self.backbuffer_views.push(unsafe {
+                br::vkfn_wrapper::create_image_view(
+                    self.subsystem.native_ptr(),
+                    &br::ImageViewCreateInfo::new(
+                        &br::VkHandleRef::dangling(b),
+                        br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+                        br::vk::VK_IMAGE_VIEW_TYPE_2D,
+                        self.format.format,
+                    ),
+                    None,
+                )
+                .unwrap()
+            });
+        }
+
+        self.size = new_size;
+    }
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .pretty()
@@ -4474,98 +4825,14 @@ fn main() {
         action_handler: Some(Rc::downgrade(&ht_root_fallback_action_handler) as _),
     });
 
-    struct SubsystemBoundSurface<'s> {
-        handle: br::vk::VkSurfaceKHR,
-        subsystem: &'s Subsystem,
-    }
-    impl Drop for SubsystemBoundSurface<'_> {
-        fn drop(&mut self) {
-            unsafe {
-                br::vkfn_wrapper::destroy_surface(
-                    self.subsystem.instance().native_ptr(),
-                    self.handle,
-                    None,
-                );
-            }
-        }
-    }
-    impl br::VkHandle for SubsystemBoundSurface<'_> {
-        type Handle = br::vk::VkSurfaceKHR;
-
-        #[inline(always)]
-        fn native_ptr(&self) -> Self::Handle {
-            self.handle
-        }
-    }
-    impl br::InstanceChild for SubsystemBoundSurface<'_> {
-        type ConcreteInstance = <Subsystem as br::InstanceChild>::ConcreteInstance;
-
-        #[inline]
-        fn instance(&self) -> &Self::ConcreteInstance {
-            self.subsystem.instance()
-        }
-    }
-    impl br::Surface for SubsystemBoundSurface<'_> {}
-
-    let surface = SubsystemBoundSurface {
+    let mut sc = PrimaryRenderTarget::new(SubsystemBoundSurface {
         handle: unsafe {
             app_shell
                 .create_vulkan_surface(subsystem.instance())
                 .unwrap()
         },
         subsystem: &subsystem,
-    };
-    let surface_caps = subsystem.adapter().surface_capabilities(&surface).unwrap();
-    let surface_formats = subsystem.adapter().surface_formats_alloc(&surface).unwrap();
-    let sc_transform = if surface_caps
-        .supported_transforms()
-        .has_any(br::SurfaceTransformFlags::IDENTITY)
-    {
-        br::SurfaceTransformFlags::IDENTITY.bits()
-    } else {
-        surface_caps.currentTransform
-    };
-    let sc_composite_alpha = if surface_caps
-        .supported_composite_alpha()
-        .has_any(br::CompositeAlphaFlags::OPAQUE)
-    {
-        br::CompositeAlphaFlags::OPAQUE.bits()
-    } else {
-        br::CompositeAlphaFlags::INHERIT.bits()
-    };
-    let sc_format = surface_formats
-        .iter()
-        .find(|x| {
-            x.format == br::vk::VK_FORMAT_R8G8B8A8_UNORM
-                && x.colorSpace == br::vk::VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
-        })
-        .unwrap()
-        .clone();
-    let mut sc_size = br::Extent2D {
-        width: if surface_caps.currentExtent.width == 0xffff_ffff {
-            640
-        } else {
-            surface_caps.currentExtent.width
-        },
-        height: if surface_caps.currentExtent.height == 0xffff_ffff {
-            480
-        } else {
-            surface_caps.currentExtent.height
-        },
-    };
-    let mut sc = Rc::new(
-        br::SwapchainBuilder::new(
-            &surface,
-            2,
-            sc_format.clone(),
-            sc_size,
-            br::ImageUsageFlags::COLOR_ATTACHMENT | br::ImageUsageFlags::TRANSFER_SRC,
-        )
-        .pre_transform(sc_transform)
-        .composite_alpha(sc_composite_alpha)
-        .create(&subsystem)
-        .unwrap(),
-    );
+    });
 
     let mut fc_pat = fontconfig::Pattern::new();
     fc_pat.add_family_name(c"system-ui");
@@ -4629,7 +4896,7 @@ fn main() {
 
     let mut composite_grab_buffer = br::ImageObject::new(
         &subsystem,
-        &br::ImageCreateInfo::new(sc_size, sc_format.format)
+        &br::ImageCreateInfo::new(sc.size, sc.color_format())
             .sampled()
             .transfer_dest(),
     )
@@ -4658,7 +4925,7 @@ fn main() {
     let main_rp_grabbed = br::RenderPassObject::new(
         &subsystem,
         &br::RenderPassCreateInfo2::new(
-            &[br::AttachmentDescription2::new(sc_format.format)
+            &[br::AttachmentDescription2::new(sc.color_format())
                 .with_layout_to(br::ImageLayout::TransferSrcOpt.from_undefined())
                 .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store)],
             &[br::SubpassDescription2::new()
@@ -4682,7 +4949,7 @@ fn main() {
     let main_rp_final = br::RenderPassObject::new(
         &subsystem,
         &br::RenderPassCreateInfo2::new(
-            &[br::AttachmentDescription2::new(sc_format.format)
+            &[br::AttachmentDescription2::new(sc.color_format())
                 .with_layout_to(br::ImageLayout::PresentSrc.from_undefined())
                 .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store)],
             &[br::SubpassDescription2::new()
@@ -4707,7 +4974,7 @@ fn main() {
     let main_rp_continue_grabbed = br::RenderPassObject::new(
         &subsystem,
         &br::RenderPassCreateInfo2::new(
-            &[br::AttachmentDescription2::new(sc_format.format)
+            &[br::AttachmentDescription2::new(sc.color_format())
                 .with_layout_to(
                     br::ImageLayout::TransferSrcOpt.from(br::ImageLayout::TransferSrcOpt),
                 )
@@ -4735,7 +5002,7 @@ fn main() {
     let main_rp_continue_final = br::RenderPassObject::new(
         &subsystem,
         &br::RenderPassCreateInfo2::new(
-            &[br::AttachmentDescription2::new(sc_format.format)
+            &[br::AttachmentDescription2::new(sc.color_format())
                 .with_layout_to(br::ImageLayout::PresentSrc.from(br::ImageLayout::TransferSrcOpt))
                 .color_memory_op(br::LoadOp::Load, br::StoreOp::Store)],
             &[br::SubpassDescription2::new()
@@ -4762,7 +5029,7 @@ fn main() {
     let composite_backdrop_blur_rp = br::RenderPassObject::new(
         &subsystem,
         &br::RenderPassCreateInfo2::new(
-            &[br::AttachmentDescription2::new(sc_format.format)
+            &[br::AttachmentDescription2::new(sc.color_format())
                 .with_layout_to(br::ImageLayout::ShaderReadOnlyOpt.from_undefined())
                 .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store)],
             &[br::SubpassDescription2::new()
@@ -4786,74 +5053,61 @@ fn main() {
         .set_name(Some(c"composite_backdrop_blur_rp"))
         .unwrap();
 
-    let mut backbuffer_views = sc
-        .images_alloc()
-        .unwrap()
-        .into_iter()
-        .map(|bb| {
-            br::ImageViewBuilder::new(
-                bb.clone_parent(),
-                br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
-            )
-            .create()
-            .unwrap()
-        })
-        .collect::<Vec<_>>();
-    let mut main_grabbed_fbs = backbuffer_views
-        .iter()
+    let mut main_grabbed_fbs = sc
+        .backbuffer_views()
         .map(|bb| {
             br::FramebufferObject::new(
                 &subsystem,
                 &br::FramebufferCreateInfo::new(
                     &main_rp_grabbed,
                     &[bb.as_transparent_ref()],
-                    sc_size.width,
-                    sc_size.height,
+                    sc.size.width,
+                    sc.size.height,
                 ),
             )
             .unwrap()
         })
         .collect::<Vec<_>>();
-    let mut main_final_fbs = backbuffer_views
-        .iter()
+    let mut main_final_fbs = sc
+        .backbuffer_views()
         .map(|bb| {
             br::FramebufferObject::new(
                 &subsystem,
                 &br::FramebufferCreateInfo::new(
                     &main_rp_final,
                     &[bb.as_transparent_ref()],
-                    sc_size.width,
-                    sc_size.height,
+                    sc.size.width,
+                    sc.size.height,
                 ),
             )
             .unwrap()
         })
         .collect::<Vec<_>>();
-    let mut main_continue_grabbed_fbs = backbuffer_views
-        .iter()
+    let mut main_continue_grabbed_fbs = sc
+        .backbuffer_views()
         .map(|bb| {
             br::FramebufferObject::new(
                 &subsystem,
                 &br::FramebufferCreateInfo::new(
                     &main_rp_continue_grabbed,
                     &[bb.as_transparent_ref()],
-                    sc_size.width,
-                    sc_size.height,
+                    sc.size.width,
+                    sc.size.height,
                 ),
             )
             .unwrap()
         })
         .collect::<Vec<_>>();
-    let mut main_continue_final_fbs = backbuffer_views
-        .iter()
+    let mut main_continue_final_fbs = sc
+        .backbuffer_views()
         .map(|bb| {
             br::FramebufferObject::new(
                 &subsystem,
                 &br::FramebufferCreateInfo::new(
                     &main_rp_continue_final,
                     &[bb.as_transparent_ref()],
-                    sc_size.width,
-                    sc_size.height,
+                    sc.size.width,
+                    sc.size.height,
                 ),
             )
             .unwrap()
@@ -4870,10 +5124,10 @@ fn main() {
             &subsystem,
             &br::ImageCreateInfo::new(
                 br::Extent2D {
-                    width: sc_size.width >> (lv + 1),
-                    height: sc_size.height >> (lv + 1),
+                    width: sc.size.width >> (lv + 1),
+                    height: sc.size.height >> (lv + 1),
                 },
-                sc_format.format,
+                sc.color_format(),
             )
             .sampled()
             .as_color_attachment(),
@@ -4918,8 +5172,8 @@ fn main() {
                 &br::FramebufferCreateInfo::new(
                     &composite_backdrop_blur_rp,
                     &[b.as_transparent_ref()],
-                    sc_size.width >> (lv + 1),
-                    sc_size.height >> (lv + 1),
+                    sc.size.width >> (lv + 1),
+                    sc.size.height >> (lv + 1),
                 ),
             )
             .unwrap()
@@ -4935,8 +5189,8 @@ fn main() {
                 &br::FramebufferCreateInfo::new(
                     &composite_backdrop_blur_rp,
                     &[b.as_transparent_ref()],
-                    sc_size.width >> (lv + 1),
-                    sc_size.height >> (lv + 1),
+                    sc.size.width >> (lv + 1),
+                    sc.size.height >> (lv + 1),
                 ),
             )
             .unwrap()
@@ -5135,10 +5389,10 @@ fn main() {
                 &composite_vinput,
                 &composite_ia_state,
                 &br::PipelineViewportStateCreateInfo::new(
-                    &[sc_size
+                    &[sc.size
                         .into_rect(br::Offset2D::ZERO)
                         .make_viewport(0.0..1.0)],
-                    &[sc_size.into_rect(br::Offset2D::ZERO)],
+                    &[sc.size.into_rect(br::Offset2D::ZERO)],
                 ),
                 &composite_raster_state,
                 &composite_blend_state,
@@ -5151,10 +5405,10 @@ fn main() {
                 &composite_vinput,
                 &composite_ia_state,
                 &br::PipelineViewportStateCreateInfo::new(
-                    &[sc_size
+                    &[sc.size
                         .into_rect(br::Offset2D::ZERO)
                         .make_viewport(0.0..1.0)],
-                    &[sc_size.into_rect(br::Offset2D::ZERO)],
+                    &[sc.size.into_rect(br::Offset2D::ZERO)],
                 ),
                 &composite_raster_state,
                 &composite_blend_state,
@@ -5167,10 +5421,10 @@ fn main() {
                 &composite_vinput,
                 &composite_ia_state,
                 &br::PipelineViewportStateCreateInfo::new(
-                    &[sc_size
+                    &[sc.size
                         .into_rect(br::Offset2D::ZERO)
                         .make_viewport(0.0..1.0)],
-                    &[sc_size.into_rect(br::Offset2D::ZERO)],
+                    &[sc.size.into_rect(br::Offset2D::ZERO)],
                 ),
                 &composite_raster_state,
                 &composite_blend_state,
@@ -5183,10 +5437,10 @@ fn main() {
                 &composite_vinput,
                 &composite_ia_state,
                 &br::PipelineViewportStateCreateInfo::new(
-                    &[sc_size
+                    &[sc.size
                         .into_rect(br::Offset2D::ZERO)
                         .make_viewport(0.0..1.0)],
-                    &[sc_size.into_rect(br::Offset2D::ZERO)],
+                    &[sc.size.into_rect(br::Offset2D::ZERO)],
                 ),
                 &composite_raster_state,
                 &composite_blend_state,
@@ -5197,8 +5451,8 @@ fn main() {
     let blur_sample_viewport_scissors = (0..BLUR_SAMPLE_STEPS + 1)
         .map(|lv| {
             let size = br::Extent2D {
-                width: sc_size.width >> lv,
-                height: sc_size.height >> lv,
+                width: sc.size.width >> lv,
+                height: sc.size.height >> lv,
             };
 
             (
@@ -5271,7 +5525,7 @@ fn main() {
     let editing_atlas_renderer = Rc::new(RefCell::new(EditingAtlasRenderer::new(
         &init_context.for_view.subsystem,
         main_rp_final.subpass(0),
-        sc_size,
+        sc.size,
         SizePixels {
             width: 32,
             height: 32,
@@ -5334,7 +5588,7 @@ fn main() {
         &subsystem,
         &br::CommandBufferAllocateInfo::new(
             &mut main_cp,
-            backbuffer_views.len() as _,
+            sc.backbuffer_count() as _,
             br::CommandBufferLevel::Primary,
         ),
     )
@@ -5425,7 +5679,7 @@ fn main() {
                             .unwrap();
                         let composite_render_instructions = unsafe {
                             app_update_context.for_view_feedback.composite_tree.update(
-                                sc_size,
+                                sc.size,
                                 current_t.as_secs_f32(),
                                 composition_alphamask_surface_atlas.vk_extent(),
                                 &ptr,
@@ -5536,7 +5790,7 @@ fn main() {
                         {
                             let image = br::ImageObject::new(
                                 &subsystem,
-                                &br::ImageCreateInfo::new(sc_size, sc_format.format)
+                                &br::ImageCreateInfo::new(sc.size, sc.color_format())
                                     .sampled()
                                     .as_color_attachment()
                                     .transfer_dest(),
@@ -5589,8 +5843,8 @@ fn main() {
                                     &br::FramebufferCreateInfo::new(
                                         &composite_backdrop_blur_rp,
                                         &[b.as_transparent_ref()],
-                                        sc_size.width,
-                                        sc_size.height,
+                                        sc.size.width,
+                                        sc.size.height,
                                     ),
                                 )
                                 .unwrap()
@@ -5746,7 +6000,7 @@ fn main() {
                                             main_rp_continue_final.subpass(0)
                                         }
                                     },
-                                    sc_size,
+                                    sc.size,
                                 );
                         }
 
@@ -5768,7 +6022,7 @@ fn main() {
                                         RenderPassType::Final => &main_final_fbs[n],
                                         _ => unreachable!("cannot continue at first"),
                                     },
-                                    sc_size.into_rect(br::Offset2D::ZERO),
+                                    sc.size.into_rect(br::Offset2D::ZERO),
                                     &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 1.0])],
                                 ),
                                 &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
@@ -5777,7 +6031,7 @@ fn main() {
                                 app_update_context
                                     .editing_atlas_renderer
                                     .borrow()
-                                    .render_commands(sc_size, r)
+                                    .render_commands(sc.size, r)
                             })
                             .inject(|mut r| {
                                 let mut in_render_pass = true;
@@ -5811,7 +6065,7 @@ fn main() {
                                                             }
                                                             _ => unreachable!("not at first"),
                                                         },
-                                                        sc_size.into_rect(br::Offset2D::ZERO),
+                                                        sc.size.into_rect(br::Offset2D::ZERO),
                                                         &[br::ClearValue::color_f32([
                                                             0.0, 0.0, 0.0, 1.0,
                                                         ])],
@@ -5847,8 +6101,8 @@ fn main() {
                                                         br::vk::VK_SHADER_STAGE_VERTEX_BIT,
                                                         0,
                                                         &[
-                                                            sc_size.width as f32,
-                                                            sc_size.height as f32,
+                                                            sc.size.width as f32,
+                                                            sc.size.height as f32,
                                                         ],
                                                     )
                                                     .bind_descriptor_sets(
@@ -5890,7 +6144,7 @@ fn main() {
                                                     ]
                                                 ))
                                                 .copy_image(
-                                                    backbuffer_views[n].image(),
+                                                    &sc.backbuffer_image(n),
                                                     br::ImageLayout::TransferSrcOpt,
                                                     composite_grab_buffer.image(),
                                                     br::ImageLayout::TransferDestOpt,
@@ -5909,7 +6163,7 @@ fn main() {
                                                             ),
                                                         srcOffset: br::Offset3D::ZERO,
                                                         dstOffset: br::Offset3D::ZERO,
-                                                        extent: sc_size.with_depth(1),
+                                                        extent: sc.size.with_depth(1),
                                                     }],
                                                 )
                                                 .pipeline_barrier_2(&br::DependencyInfo::new(
@@ -5956,9 +6210,9 @@ fn main() {
                                                             br::Rect2D {
                                                                 offset: br::Offset2D::ZERO,
                                                                 extent: br::Extent2D {
-                                                                    width: sc_size.width
+                                                                    width: sc.size.width
                                                                         >> (lv + 1),
-                                                                    height: sc_size.height
+                                                                    height: sc.size.height
                                                                         >> (lv + 1),
                                                                 },
                                                             },
@@ -5979,8 +6233,8 @@ fn main() {
                                                         br::vk::VK_SHADER_STAGE_VERTEX_BIT,
                                                         0,
                                                         &[
-                                                            ((sc_size.width >> lv) as f32).recip(),
-                                                            ((sc_size.height >> lv) as f32).recip(),
+                                                            ((sc.size.width >> lv) as f32).recip(),
+                                                            ((sc.size.height >> lv) as f32).recip(),
                                                             stdev.value(),
                                                         ],
                                                     )
@@ -6010,8 +6264,8 @@ fn main() {
                                                             br::Rect2D {
                                                                 offset: br::Offset2D::ZERO,
                                                                 extent: br::Extent2D {
-                                                                    width: sc_size.width >> lv,
-                                                                    height: sc_size.height >> lv,
+                                                                    width: sc.size.width >> lv,
+                                                                    height: sc.size.height >> lv,
                                                                 },
                                                             },
                                                             &[br::ClearValue::color_f32([
@@ -6031,9 +6285,9 @@ fn main() {
                                                         br::vk::VK_SHADER_STAGE_VERTEX_BIT,
                                                         0,
                                                         &[
-                                                            ((sc_size.width >> (lv + 1)) as f32)
+                                                            ((sc.size.width >> (lv + 1)) as f32)
                                                                 .recip(),
-                                                            ((sc_size.height >> (lv + 1)) as f32)
+                                                            ((sc.size.height >> (lv + 1)) as f32)
                                                                 .recip(),
                                                             stdev.value(),
                                                         ],
@@ -6058,51 +6312,6 @@ fn main() {
                             .end()
                             .unwrap();
                         }
-
-                        /*
-                        for (cb, fb) in main_cbs.iter_mut().zip(main_fbs.iter()) {
-                            unsafe {
-                                cb.begin(&br::CommandBufferBeginInfo::new(), &subsystem)
-                                    .unwrap()
-                            }
-                            .begin_render_pass2(
-                                &br::RenderPassBeginInfo::new(
-                                    &main_rp,
-                                    fb,
-                                    sc_size.into_rect(br::Offset2D::ZERO),
-                                    &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 1.0])],
-                                ),
-                                &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-                            )
-                            .inject(|r| {
-                                app_update_context
-                                    .editing_atlas_renderer
-                                    .borrow()
-                                    .render_commands(sc_size, r)
-                            })
-                            .bind_pipeline(br::PipelineBindPoint::Graphics, &composite_pipeline)
-                            .push_constant(
-                                &composite_pipeline_layout,
-                                br::vk::VK_SHADER_STAGE_VERTEX_BIT,
-                                0,
-                                &[sc_size.width as f32, sc_size.height as f32],
-                            )
-                            .bind_descriptor_sets(
-                                br::PipelineBindPoint::Graphics,
-                                &composite_pipeline_layout,
-                                0,
-                                &[
-                                    composite_alphamask_group_descriptor,
-                                    composite_backdrop_descriptor,
-                                ],
-                                &[],
-                            )
-                            .draw(4, last_composite_instance_count as _, 0, 0)
-                            .end_render_pass2(&br::SubpassEndInfo::new())
-                            .end()
-                            .unwrap();
-                        }
-                        */
 
                         main_cb_invalid = false;
                     }
@@ -6145,12 +6354,10 @@ fn main() {
                 }
                 AppEvent::ToplevelWindowSurfaceConfigure { serial } => {
                     if let Some((w, h)) = frame_resize_request.take() {
-                        if w != sc_size.width || h != sc_size.height {
+                        if w != sc.size.width || h != sc.size.height {
                             tracing::trace!(w, h, "frame resize");
 
                             client_size.set((w as f32, h as f32));
-                            sc_size.width = (w as f32 * app_shell.ui_scale_factor()) as _;
-                            sc_size.height = (h as f32 * app_shell.ui_scale_factor()) as _;
 
                             if last_rendering {
                                 last_render_command_fence.wait().unwrap();
@@ -6163,159 +6370,79 @@ fn main() {
                             }
                             main_cb_invalid = true;
 
-                            drop(main_grabbed_fbs);
-                            drop(main_final_fbs);
-                            drop(main_continue_grabbed_fbs);
-                            drop(main_continue_final_fbs);
-                            drop(backbuffer_views);
-                            drop(sc);
-                            sc = Rc::new(
-                                br::SwapchainBuilder::new(
-                                    &surface,
-                                    2,
-                                    sc_format.clone(),
-                                    sc_size,
-                                    br::ImageUsageFlags::COLOR_ATTACHMENT
-                                        | br::ImageUsageFlags::TRANSFER_SRC,
-                                )
-                                .pre_transform(sc_transform)
-                                .composite_alpha(sc_composite_alpha)
-                                .create(&subsystem)
-                                .unwrap(),
-                            );
+                            sc.resize(br::Extent2D {
+                                width: (w as f32 * app_shell.ui_scale_factor()) as _,
+                                height: (h as f32 * app_shell.ui_scale_factor()) as _,
+                            });
 
-                            backbuffer_views = sc
-                                .images_alloc()
-                                .unwrap()
-                                .into_iter()
-                                .map(|bb| {
-                                    br::ImageViewBuilder::new(
-                                        bb.clone_parent(),
-                                        br::ImageSubresourceRange::new(
-                                            br::AspectMask::COLOR,
-                                            0..1,
-                                            0..1,
-                                        ),
-                                    )
-                                    .create()
-                                    .unwrap()
-                                })
-                                .collect::<Vec<_>>();
-                            main_grabbed_fbs = backbuffer_views
-                                .iter()
+                            main_grabbed_fbs = sc
+                                .backbuffer_views()
                                 .map(|bb| {
                                     br::FramebufferObject::new(
                                         &subsystem,
                                         &br::FramebufferCreateInfo::new(
                                             &main_rp_grabbed,
                                             &[bb.as_transparent_ref()],
-                                            sc_size.width,
-                                            sc_size.height,
+                                            sc.size.width,
+                                            sc.size.height,
                                         ),
                                     )
                                     .unwrap()
                                 })
                                 .collect::<Vec<_>>();
-                            main_final_fbs = backbuffer_views
-                                .iter()
+                            main_final_fbs = sc
+                                .backbuffer_views()
                                 .map(|bb| {
                                     br::FramebufferObject::new(
                                         &subsystem,
                                         &br::FramebufferCreateInfo::new(
                                             &main_rp_final,
                                             &[bb.as_transparent_ref()],
-                                            sc_size.width,
-                                            sc_size.height,
+                                            sc.size.width,
+                                            sc.size.height,
                                         ),
                                     )
                                     .unwrap()
                                 })
                                 .collect::<Vec<_>>();
-                            main_continue_grabbed_fbs = backbuffer_views
-                                .iter()
+                            main_continue_grabbed_fbs = sc
+                                .backbuffer_views()
                                 .map(|bb| {
                                     br::FramebufferObject::new(
                                         &subsystem,
                                         &br::FramebufferCreateInfo::new(
                                             &main_rp_continue_grabbed,
                                             &[bb.as_transparent_ref()],
-                                            sc_size.width,
-                                            sc_size.height,
+                                            sc.size.width,
+                                            sc.size.height,
                                         ),
                                     )
                                     .unwrap()
                                 })
                                 .collect::<Vec<_>>();
-                            main_continue_final_fbs = backbuffer_views
-                                .iter()
+                            main_continue_final_fbs = sc
+                                .backbuffer_views()
                                 .map(|bb| {
                                     br::FramebufferObject::new(
                                         &subsystem,
                                         &br::FramebufferCreateInfo::new(
                                             &main_rp_continue_final,
                                             &[bb.as_transparent_ref()],
-                                            sc_size.width,
-                                            sc_size.height,
+                                            sc.size.width,
+                                            sc.size.height,
                                         ),
                                     )
                                     .unwrap()
                                 })
                                 .collect::<Vec<_>>();
 
-                            /*drop(composite_backdrop_buffer);
-                            drop(composite_backdrop_buffer_memory);
-                            let mut composite_backdrop_buffer1 = br::ImageObject::new(
-                                &subsystem,
-                                &br::ImageCreateInfo::new(sc_size, sc_format.format)
-                                    .transfer_dest()
-                                    .sampled(),
-                            )
-                            .unwrap();
-                            let req = composite_backdrop_buffer1.requirements();
-                            let Some(memory_index) =
-                                subsystem.find_device_local_memory_index(req.memoryTypeBits)
-                            else {
-                                tracing::error!(
-                                    memory_index_mask = req.memoryTypeBits,
-                                    "no suitable memory for composite backdrop buffers"
-                                );
-                                std::process::exit(1);
-                            };
-                            composite_backdrop_buffer_memory = br::DeviceMemoryObject::new(
-                                &subsystem,
-                                &br::MemoryAllocateInfo::new(req.size, memory_index),
-                            )
-                            .unwrap();
-                            composite_backdrop_buffer1
-                                .bind(&composite_backdrop_buffer_memory, 0)
-                                .unwrap();
-                            // validation errorが邪魔なのでここで生成する
-                            composite_backdrop_buffer = br::ImageViewBuilder::new(
-                                composite_backdrop_buffer1,
-                                br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
-                            )
-                            .create()
-                            .unwrap();
-
-                            subsystem.update_descriptor_sets(
-                                &[composite_backdrop_descriptor.binding_at(0).write(
-                                    br::DescriptorContents::CombinedImageSampler(vec![
-                                        br::DescriptorImageInfo::new(
-                                            &composite_backdrop_buffer,
-                                            br::ImageLayout::ShaderReadOnlyOpt,
-                                        )
-                                        .with_sampler(&composite_sampler),
-                                    ]),
-                                )],
-                                &[],
-                            );*/
                             composite_backdrop_buffers_invalidated = true;
 
                             drop(composite_grab_buffer);
                             drop(composite_grab_buffer_memory);
                             let mut composite_grab_buffer1 = br::ImageObject::new(
                                 &subsystem,
-                                &br::ImageCreateInfo::new(sc_size, sc_format.format)
+                                &br::ImageCreateInfo::new(sc.size, sc.color_format())
                                     .sampled()
                                     .transfer_dest(),
                             )
@@ -6357,10 +6484,10 @@ fn main() {
                                     &subsystem,
                                     &br::ImageCreateInfo::new(
                                         br::Extent2D {
-                                            width: sc_size.width >> (lv + 1),
-                                            height: sc_size.height >> (lv + 1),
+                                            width: sc.size.width >> (lv + 1),
+                                            height: sc.size.height >> (lv + 1),
                                         },
-                                        sc_format.format,
+                                        sc.color_format(),
                                     )
                                     .sampled()
                                     .as_color_attachment(),
@@ -6407,8 +6534,8 @@ fn main() {
                                         &br::FramebufferCreateInfo::new(
                                             &composite_backdrop_blur_rp,
                                             &[b.as_transparent_ref()],
-                                            sc_size.width >> (lv + 1),
-                                            sc_size.height >> (lv + 1),
+                                            sc.size.width >> (lv + 1),
+                                            sc.size.height >> (lv + 1),
                                         ),
                                     )
                                     .unwrap()
@@ -6425,8 +6552,8 @@ fn main() {
                                             &br::FramebufferCreateInfo::new(
                                                 &composite_backdrop_blur_rp,
                                                 &[b.as_transparent_ref()],
-                                                sc_size.width >> (lv + 1),
-                                                sc_size.height >> (lv + 1),
+                                                sc.size.width >> (lv + 1),
+                                                sc.size.height >> (lv + 1),
                                             ),
                                         )
                                         .unwrap()
@@ -6470,10 +6597,10 @@ fn main() {
                                         &composite_vinput,
                                         &composite_ia_state,
                                         &br::PipelineViewportStateCreateInfo::new(
-                                            &[sc_size
+                                            &[sc.size
                                                 .into_rect(br::Offset2D::ZERO)
                                                 .make_viewport(0.0..1.0)],
-                                            &[sc_size.into_rect(br::Offset2D::ZERO)],
+                                            &[sc.size.into_rect(br::Offset2D::ZERO)],
                                         ),
                                         &composite_raster_state,
                                         &composite_blend_state,
@@ -6486,10 +6613,10 @@ fn main() {
                                         &composite_vinput,
                                         &composite_ia_state,
                                         &br::PipelineViewportStateCreateInfo::new(
-                                            &[sc_size
+                                            &[sc.size
                                                 .into_rect(br::Offset2D::ZERO)
                                                 .make_viewport(0.0..1.0)],
-                                            &[sc_size.into_rect(br::Offset2D::ZERO)],
+                                            &[sc.size.into_rect(br::Offset2D::ZERO)],
                                         ),
                                         &composite_raster_state,
                                         &composite_blend_state,
@@ -6502,10 +6629,10 @@ fn main() {
                                         &composite_vinput,
                                         &composite_ia_state,
                                         &br::PipelineViewportStateCreateInfo::new(
-                                            &[sc_size
+                                            &[sc.size
                                                 .into_rect(br::Offset2D::ZERO)
                                                 .make_viewport(0.0..1.0)],
-                                            &[sc_size.into_rect(br::Offset2D::ZERO)],
+                                            &[sc.size.into_rect(br::Offset2D::ZERO)],
                                         ),
                                         &composite_raster_state,
                                         &composite_blend_state,
@@ -6518,10 +6645,10 @@ fn main() {
                                         &composite_vinput,
                                         &composite_ia_state,
                                         &br::PipelineViewportStateCreateInfo::new(
-                                            &[sc_size
+                                            &[sc.size
                                                 .into_rect(br::Offset2D::ZERO)
                                                 .make_viewport(0.0..1.0)],
-                                            &[sc_size.into_rect(br::Offset2D::ZERO)],
+                                            &[sc.size.into_rect(br::Offset2D::ZERO)],
                                         ),
                                         &composite_raster_state,
                                         &composite_blend_state,
@@ -6540,8 +6667,8 @@ fn main() {
                             let blur_sample_viewport_scissors = (0..BLUR_SAMPLE_STEPS + 1)
                                 .map(|lv| {
                                     let size = br::Extent2D {
-                                        width: sc_size.width >> lv,
-                                        height: sc_size.height >> lv,
+                                        width: sc.size.width >> lv,
+                                        height: sc.size.height >> lv,
                                     };
 
                                     (
@@ -6614,7 +6741,7 @@ fn main() {
                                             main_rp_continue_final.subpass(0)
                                         }
                                     },
-                                    sc_size,
+                                    sc.size,
                                 );
                         }
                     }

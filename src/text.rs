@@ -4,7 +4,6 @@ use crate::{
     },
     thirdparty::{freetype as ft, harfbuzz as hb},
 };
-use bedrock::{self as br, DeviceMemoryMut, Image, MemoryBound, VkHandle};
 use freetype2::*;
 
 struct GlyphBitmap {
@@ -153,72 +152,5 @@ impl TextLayout {
         }
 
         buf
-    }
-
-    #[deprecated = "use build_stg_image_pixel_buffer with StagingScratchBufferManager"]
-    pub fn build_stg_image<'d, D: br::Device + 'd>(
-        &self,
-        device: &'d D,
-        adapter_memory_info: &br::MemoryProperties,
-    ) -> (br::ImageObject<&'d D>, br::DeviceMemoryObject<&'d D>) {
-        let mut img = br::ImageObject::new(
-            device,
-            &br::ImageCreateInfo::new(
-                br::Extent2D {
-                    width: self.width_px(),
-                    height: self.height_px(),
-                },
-                br::vk::VK_FORMAT_R8_UNORM,
-            )
-            .usage_with(br::ImageUsageFlags::TRANSFER_SRC)
-            .use_linear_tiling(),
-        )
-        .expect("Failed to create staging text image");
-        let mreq = img.requirements();
-        let memory_index = adapter_memory_info
-            .find_host_visible_index(mreq.memoryTypeBits)
-            .expect("no suitable memory for image staging");
-        let mut mem = br::DeviceMemoryObject::new(
-            device,
-            &br::MemoryAllocateInfo::new(mreq.size, memory_index),
-        )
-        .expect("Failed to allocate text surface stg memory");
-        img.bind(&mem, 0).expect("Failed to bind stg memory");
-        let subresource_layout =
-            img.layout_info(&br::ImageSubresource::new(br::AspectMask::COLOR, 0, 0));
-
-        let n = mem.native_ptr();
-        let ptr = mem
-            .map(0..(subresource_layout.rowPitch * self.height_px() as br::DeviceSize) as _)
-            .unwrap();
-        for b in self.bitmaps.iter() {
-            for y in 0..b.rows {
-                let dy = y as isize + self.max_ascender as isize - b.ascending_pixels;
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        b.buf.as_ptr().add(b.pitch * y),
-                        ptr.addr_of_mut(
-                            subresource_layout.rowPitch as usize * dy as usize
-                                + b.left_offset as usize,
-                        ),
-                        b.width,
-                    )
-                }
-            }
-        }
-        if !adapter_memory_info.is_coherent(memory_index) {
-            unsafe {
-                device
-                    .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(
-                        n,
-                        0,
-                        subresource_layout.rowPitch * self.height_px() as br::DeviceSize,
-                    )])
-                    .unwrap();
-            }
-        }
-        ptr.end();
-
-        (img, mem)
     }
 }

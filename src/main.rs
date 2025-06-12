@@ -32,7 +32,7 @@ use composite::{
     AnimatableColor, AnimatableFloat, AnimationData, AtlasRect, CompositeInstanceData,
     CompositeInstanceManager, CompositeMode, CompositeRect, CompositeRenderingData,
     CompositeRenderingInstruction, CompositeStreamingData, CompositeTree,
-    CompositeTreeFloatParameterRef, CompositeTreeRef, CompositionSurfaceAtlas,
+    CompositeTreeFloatParameterRef, CompositeTreeRef, CompositionSurfaceAtlas, RenderPassType,
 };
 use coordinate::SizePixels;
 use feature::editing_atlas_renderer::EditingAtlasRenderer;
@@ -4258,14 +4258,6 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RenderPassType {
-    Grabbed,
-    Final,
-    ContinueGrabbed,
-    ContinueFinal,
-}
-
 struct SubsystemBoundSurface<'s> {
     handle: br::vk::VkSurfaceKHR,
     subsystem: &'s Subsystem,
@@ -5326,6 +5318,7 @@ fn main() {
         )
     }));
     subsystem.update_descriptor_sets(&descriptor_writes, &[]);
+
     let mut composite_backdrop_buffer_descriptor_pool = br::DescriptorPoolObject::new(
         &subsystem,
         &br::DescriptorPoolCreateInfo::new(
@@ -5649,6 +5642,7 @@ fn main() {
     let mut last_pointer_pos = (0.0f32, 0.0f32);
     let mut last_composite_render_instructions = CompositeRenderingData {
         instructions: Vec::new(),
+        render_pass_types: Vec::new(),
         required_backdrop_buffer_count: 0,
     };
     let mut composite_instance_buffer_dirty = false;
@@ -5963,28 +5957,11 @@ fn main() {
                     }
 
                     if main_cb_invalid {
-                        let mut render_pass_types = Vec::new();
-                        for x in last_composite_render_instructions.instructions.iter() {
-                            match x {
-                                CompositeRenderingInstruction::DrawInstanceRange { .. } => (),
-                                CompositeRenderingInstruction::GrabBackdrop => {
-                                    if render_pass_types.is_empty() {
-                                        render_pass_types.push(RenderPassType::Grabbed);
-                                    } else {
-                                        render_pass_types.push(RenderPassType::ContinueGrabbed);
-                                    }
-                                }
-                                CompositeRenderingInstruction::GenerateBackdropBlur { .. } => (),
-                            }
-                        }
-                        if render_pass_types.is_empty() {
-                            render_pass_types.push(RenderPassType::Final);
-                        } else {
-                            render_pass_types.push(RenderPassType::ContinueFinal);
-                        }
-
-                        if render_pass_types[0] != editing_atlas_current_bound_pipeline {
-                            editing_atlas_current_bound_pipeline = render_pass_types[0];
+                        if last_composite_render_instructions.render_pass_types[0]
+                            != editing_atlas_current_bound_pipeline
+                        {
+                            editing_atlas_current_bound_pipeline =
+                                last_composite_render_instructions.render_pass_types[0];
                             app_update_context
                                 .editing_atlas_renderer
                                 .borrow_mut()
@@ -6005,23 +5982,22 @@ fn main() {
                         }
 
                         for (n, cb) in main_cbs.iter_mut().enumerate() {
-                            let mut rpt_pointer = 0;
+                            let (first_rp, first_fb) = match last_composite_render_instructions
+                                .render_pass_types[0]
+                            {
+                                RenderPassType::Grabbed => (&main_rp_grabbed, &main_grabbed_fbs[n]),
+                                RenderPassType::Final => (&main_rp_final, &main_final_fbs[n]),
+                                _ => unreachable!("cannot continue at first"),
+                            };
+
                             unsafe {
                                 cb.begin(&br::CommandBufferBeginInfo::new(), &subsystem)
                                     .unwrap()
                             }
                             .begin_render_pass2(
                                 &br::RenderPassBeginInfo::new(
-                                    match render_pass_types[rpt_pointer] {
-                                        RenderPassType::Grabbed => &main_rp_grabbed,
-                                        RenderPassType::Final => &main_rp_final,
-                                        _ => unreachable!("cannot continue at first"),
-                                    },
-                                    match render_pass_types[rpt_pointer] {
-                                        RenderPassType::Grabbed => &main_grabbed_fbs[n],
-                                        RenderPassType::Final => &main_final_fbs[n],
-                                        _ => unreachable!("cannot continue at first"),
-                                    },
+                                    first_rp,
+                                    first_fb,
                                     sc.size.into_rect(br::Offset2D::ZERO),
                                     &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 1.0])],
                                 ),
@@ -6034,8 +6010,10 @@ fn main() {
                                     .render_commands(sc.size, r)
                             })
                             .inject(|mut r| {
+                                let mut rpt_pointer = 0;
                                 let mut in_render_pass = true;
                                 let mut pipeline_bound = false;
+
                                 for x in last_composite_render_instructions.instructions.iter() {
                                     match x {
                                         &CompositeRenderingInstruction::DrawInstanceRange {
@@ -6045,26 +6023,20 @@ fn main() {
                                             if !in_render_pass {
                                                 in_render_pass = true;
 
+                                                let (rp, fb) = match last_composite_render_instructions.render_pass_types[rpt_pointer] {
+                                                    RenderPassType::ContinueGrabbed => {
+                                                        (&main_rp_continue_grabbed, &main_continue_grabbed_fbs[n])
+                                                    }
+                                                    RenderPassType::ContinueFinal => {
+                                                        (&main_rp_continue_final, &main_continue_final_fbs[n])
+                                                    }
+                                                    _ => unreachable!("not at first"),
+                                                };
+
                                                 r = r.begin_render_pass2(
                                                     &br::RenderPassBeginInfo::new(
-                                                        match render_pass_types[rpt_pointer] {
-                                                            RenderPassType::ContinueGrabbed => {
-                                                                &main_rp_continue_grabbed
-                                                            }
-                                                            RenderPassType::ContinueFinal => {
-                                                                &main_rp_continue_final
-                                                            }
-                                                            _ => unreachable!("not at first"),
-                                                        },
-                                                        match render_pass_types[rpt_pointer] {
-                                                            RenderPassType::ContinueGrabbed => {
-                                                                &main_continue_grabbed_fbs[n]
-                                                            }
-                                                            RenderPassType::ContinueFinal => {
-                                                                &main_continue_final_fbs[n]
-                                                            }
-                                                            _ => unreachable!("not at first"),
-                                                        },
+                                                        rp,
+                                                        fb,
                                                         sc.size.into_rect(br::Offset2D::ZERO),
                                                         &[br::ClearValue::color_f32([
                                                             0.0, 0.0, 0.0, 1.0,
@@ -6081,7 +6053,7 @@ fn main() {
                                                 r = r
                                                     .bind_pipeline(
                                                         br::PipelineBindPoint::Graphics,
-                                                        match render_pass_types[rpt_pointer] {
+                                                        match last_composite_render_instructions.render_pass_types[rpt_pointer] {
                                                             RenderPassType::Grabbed => {
                                                                 &composite_pipeline_grabbed
                                                             }

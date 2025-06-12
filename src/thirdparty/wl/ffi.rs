@@ -85,14 +85,6 @@ pub union Argument {
 
 pub const MARSHAL_FLAG_DESTROY: u32 = 1 << 0;
 
-pub type DispatcherFunc = extern "C" fn(
-    user_data: *const core::ffi::c_void,
-    target: *mut core::ffi::c_void,
-    opcode: u32,
-    msg: *const Message,
-    args: *mut Argument,
-) -> core::ffi::c_int;
-
 #[link(name = "wayland-client")]
 unsafe extern "C" {
     pub unsafe fn wl_proxy_marshal_flags(
@@ -111,18 +103,10 @@ unsafe extern "C" {
         flags: u32,
         args: *mut Argument,
     ) -> *mut Proxy;
-    pub unsafe fn wl_proxy_marshal(p: *mut Proxy, opcode: u32, ...);
-    pub unsafe fn wl_proxy_marshal_array(p: *mut Proxy, opcode: u32, args: *mut Argument);
     pub unsafe fn wl_proxy_destroy(p: *mut Proxy);
     pub unsafe fn wl_proxy_add_listener(
         proxy: *mut Proxy,
         implementation: *const core::ffi::c_void,
-        data: *mut core::ffi::c_void,
-    ) -> core::ffi::c_int;
-    pub unsafe fn wl_proxy_add_dispatcher(
-        proxy: *mut Proxy,
-        dispatcher_func: DispatcherFunc,
-        dispatcher_data: *const core::ffi::c_void,
         data: *mut core::ffi::c_void,
     ) -> core::ffi::c_int;
     pub unsafe fn wl_proxy_get_version(proxy: *const Proxy) -> u32;

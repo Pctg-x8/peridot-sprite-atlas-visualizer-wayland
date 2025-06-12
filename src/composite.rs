@@ -603,6 +603,14 @@ impl SafeF32 {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderPassType {
+    Grabbed,
+    Final,
+    ContinueGrabbed,
+    ContinueFinal,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum CompositeRenderingInstruction {
     DrawInstanceRange {
@@ -620,6 +628,7 @@ pub enum CompositeRenderingInstruction {
 #[derive(Debug, PartialEq, Eq)]
 pub struct CompositeRenderingData {
     pub instructions: Vec<CompositeRenderingInstruction>,
+    pub render_pass_types: Vec<RenderPassType>,
     pub required_backdrop_buffer_count: usize,
 }
 
@@ -632,6 +641,7 @@ const fn rect_overlaps(a: &br::Rect2D, b: &br::Rect2D) -> bool {
 
 struct CompositeRenderingInstructionBuilder {
     insts: Vec<CompositeRenderingInstruction>,
+    render_pass_types: Vec<RenderPassType>,
     last_free_backdrop_buffer: usize,
     active_backdrop_blur_index_for_stdev: HashMap<SafeF32, usize>,
     current_backdrop_overlap_rects: Vec<br::Rect2D>,
@@ -643,6 +653,7 @@ impl CompositeRenderingInstructionBuilder {
     fn new(screen_size: br::Extent2D) -> Self {
         Self {
             insts: Vec::new(),
+            render_pass_types: Vec::new(),
             last_free_backdrop_buffer: 0,
             active_backdrop_blur_index_for_stdev: HashMap::new(),
             current_backdrop_overlap_rects: Vec::new(),
@@ -657,9 +668,15 @@ impl CompositeRenderingInstructionBuilder {
         self.max_backdrop_buffer_count = self
             .max_backdrop_buffer_count
             .max(self.last_free_backdrop_buffer);
+        if self.render_pass_types.is_empty() {
+            self.render_pass_types.push(RenderPassType::Final);
+        } else {
+            self.render_pass_types.push(RenderPassType::ContinueFinal);
+        }
 
         CompositeRenderingData {
             instructions: self.insts,
+            render_pass_types: self.render_pass_types,
             required_backdrop_buffer_count: self.max_backdrop_buffer_count,
         }
     }
@@ -702,6 +719,11 @@ impl CompositeRenderingInstructionBuilder {
                     rects: vec![rect],
                 },
             ]);
+            if self.render_pass_types.is_empty() {
+                self.render_pass_types.push(RenderPassType::Grabbed);
+            } else {
+                self.render_pass_types.push(RenderPassType::ContinueGrabbed);
+            }
             self.max_backdrop_buffer_count = self
                 .max_backdrop_buffer_count
                 .max(self.last_free_backdrop_buffer);
@@ -730,6 +752,11 @@ impl CompositeRenderingInstructionBuilder {
                     rects: vec![rect],
                 },
             ]);
+            if self.render_pass_types.is_empty() {
+                self.render_pass_types.push(RenderPassType::Grabbed);
+            } else {
+                self.render_pass_types.push(RenderPassType::ContinueGrabbed);
+            }
             self.max_backdrop_buffer_count = self
                 .max_backdrop_buffer_count
                 .max(self.last_free_backdrop_buffer);

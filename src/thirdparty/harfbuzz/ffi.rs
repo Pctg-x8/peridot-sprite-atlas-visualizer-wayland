@@ -1,4 +1,4 @@
-#![allow(non_camel_case_types)]
+#![allow(non_camel_case_types, dead_code)]
 
 /// https://doc.rust-lang.org/nomicon/ffi.html#representing-opaque-structs
 macro_rules! FFIOpaqueStruct {

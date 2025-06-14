@@ -1,0 +1,13 @@
+id: io.ct2.peridot.SpriteAtlasVisualizer
+runtime: org.freedesktop.Platform
+runtime-version: "24.08"
+sdk: org.freedesktop.Sdk
+command: peridot-sprite-atlas-visualizer
+modules:
+  - name: main
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 peridot-sprite-atlas-visualizer-wayland /app/bin/peridot-sprite-atlas-visualizer
+    sources:
+      - type: dir
+        path: target/debug

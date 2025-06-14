@@ -4,3 +4,5 @@
 /local
 /resources/icons/*.svg
 .vk-pipeline-cache
+/.flatpak-builder
+/package

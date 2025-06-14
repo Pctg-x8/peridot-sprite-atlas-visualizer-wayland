@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 
+use quick_xml::events::BytesStart;
+
 pub enum InterfaceElementContent<'a> {
     Method {
         name: Cow<'a, [u8]>,
@@ -27,22 +29,64 @@ pub enum MethodSignalElementContent<'a> {
     },
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ReadError<'a> {
+    #[error("read_event failed: {0}")]
+    ReadEventFailed(quick_xml::Error),
+    #[error("no {name} attr in {tag} tag")]
+    MissingRequiredAttr {
+        name: &'static str,
+        tag: &'static str,
+    },
+    #[error("unexpected {phase} element: {event:?}")]
+    UnexpectedElement {
+        phase: &'static str,
+        event: quick_xml::events::Event<'a>,
+    },
+    #[error("invalid pairing of </{tag}>")]
+    InvalidTagPairing { tag: &'static str },
+    #[error("invalid pairing of {tag:?}")]
+    InvalidTagPairingString {
+        tag: Result<String, std::string::FromUtf8Error>,
+    },
+    #[error("invalid nested tag {tag}")]
+    InvalidNestedTag { tag: &'static str },
+    #[error("attribute error: {0}")]
+    Attribute(#[from] quick_xml::events::attributes::AttrError),
+}
+
 pub fn read_toplevel<'a>(
     reader: &mut quick_xml::Reader<&'a [u8]>,
     mut callback: impl for<'b> FnMut(
         &[Option<Result<String, quick_xml::Error>>],
         Cow<'b, [u8]>,
         &mut quick_xml::Reader<&'a [u8]>,
-    ),
-) {
+    ) -> Result<(), ReadError<'a>>,
+) -> Result<(), ReadError<'a>> {
     let mut node_paths = Vec::new();
 
     loop {
-        match reader.read_event().unwrap() {
+        match reader.read_event().map_err(ReadError::ReadEventFailed)? {
+            quick_xml::events::Event::DocType(x) => {
+                tracing::debug!("TODO: parse head doctype: {:?}", x.unescape());
+                break;
+            }
+            quick_xml::events::Event::Comment(_) => (),
+            e => {
+                return Err(ReadError::UnexpectedElement {
+                    phase: "introspection heading",
+                    event: e,
+                });
+            }
+        }
+    }
+
+    loop {
+        match reader.read_event().map_err(ReadError::ReadEventFailed)? {
             quick_xml::events::Event::Start(x) if x.name().0 == b"node" => {
                 let mut name = None;
                 for a in x.attributes() {
-                    let a = a.unwrap();
+                    let a = a?;
 
                     if a.key.0 == b"name" {
                         name = Some(a.unescape_value().map(Into::into));
@@ -54,7 +98,7 @@ pub fn read_toplevel<'a>(
             quick_xml::events::Event::Start(x) if x.name().0 == b"interface" => {
                 let mut name = None;
                 for a in x.attributes() {
-                    let a = a.unwrap();
+                    let a = a?;
 
                     if a.key.0 == b"name" {
                         name = Some(a.value);
@@ -63,39 +107,70 @@ pub fn read_toplevel<'a>(
 
                 callback(
                     &node_paths,
-                    name.expect("no name attr in interface tag"),
+                    name.ok_or(ReadError::MissingRequiredAttr {
+                        name: "name",
+                        tag: "interface",
+                    })?,
                     reader,
-                );
+                )?;
             }
             quick_xml::events::Event::End(x) if x.name().0 == b"node" => {
                 if node_paths.pop().is_none() {
-                    panic!("invalid pairing of </node>");
+                    return Err(ReadError::InvalidTagPairing { tag: "node" });
                 }
             }
             quick_xml::events::Event::Text(x) if x.trim_ascii().is_empty() => (),
-            quick_xml::events::Event::CData(x) => println!("? xml cdata: {x:?}"),
-            quick_xml::events::Event::Comment(x) => println!("? xml comment: {x:?}"),
-            quick_xml::events::Event::Decl(x) => println!("? xml decl: {x:?}"),
-            quick_xml::events::Event::PI(x) => println!("? xml pi: {x:?}"),
-            quick_xml::events::Event::DocType(x) => println!("? xml doctype: {x:?}"),
+            quick_xml::events::Event::Comment(_) => (),
             quick_xml::events::Event::Eof => break,
             e => {
-                unreachable!("unexpected toplevel element: {e:?}");
+                return Err(ReadError::UnexpectedElement {
+                    phase: "toplevel",
+                    event: e,
+                });
             }
         }
     }
+
+    Ok(())
+}
+
+pub fn skip_read_interface_tag_contents<'a>(
+    reader: &mut quick_xml::Reader<&'a [u8]>,
+) -> Result<(), ReadError<'a>> {
+    loop {
+        match reader.read_event().map_err(ReadError::ReadEventFailed)? {
+            quick_xml::events::Event::Start(x) if x.name().0 == b"interface" => {
+                return Err(ReadError::InvalidNestedTag { tag: "interface" });
+            }
+            quick_xml::events::Event::End(x) if x.name().0 == b"interface" => {
+                break;
+            }
+            e @ quick_xml::events::Event::Eof => {
+                return Err(ReadError::UnexpectedElement {
+                    phase: "interface(skipping)",
+                    event: e,
+                });
+            }
+            _ => (),
+        }
+    }
+
+    Ok(())
 }
 
 pub fn read_interface_tag_content<'a>(
     reader: &mut quick_xml::Reader<&'a [u8]>,
-    mut callback: impl for<'b> FnMut(InterfaceElementContent<'b>, &mut quick_xml::Reader<&'a [u8]>),
-) {
+    mut callback: impl for<'b> FnMut(
+        InterfaceElementContent<'b>,
+        &mut quick_xml::Reader<&'a [u8]>,
+    ) -> Result<(), ReadError<'a>>,
+) -> Result<(), ReadError<'a>> {
     loop {
-        match reader.read_event().unwrap() {
+        match reader.read_event().map_err(ReadError::ReadEventFailed)? {
             quick_xml::events::Event::Start(x) if x.name().0 == b"method" => {
                 let mut name = None;
                 for a in x.attributes() {
-                    let a = a.unwrap();
+                    let a = a?;
 
                     if a.key.0 == b"name" {
                         name = Some(a.value);
@@ -104,16 +179,19 @@ pub fn read_interface_tag_content<'a>(
 
                 callback(
                     InterfaceElementContent::Method {
-                        name: name.expect("no name attr in method tag"),
+                        name: name.ok_or(ReadError::MissingRequiredAttr {
+                            name: "name",
+                            tag: "method",
+                        })?,
                         empty: false,
                     },
                     reader,
-                );
+                )?;
             }
             quick_xml::events::Event::Start(x) if x.name().0 == b"signal" => {
                 let mut name = None;
                 for a in x.attributes() {
-                    let a = a.unwrap();
+                    let a = a?;
 
                     if a.key.0 == b"name" {
                         name = Some(a.value);
@@ -122,16 +200,19 @@ pub fn read_interface_tag_content<'a>(
 
                 callback(
                     InterfaceElementContent::Signal {
-                        name: name.expect("no name attr in signal tag"),
+                        name: name.ok_or(ReadError::MissingRequiredAttr {
+                            name: "name",
+                            tag: "signal",
+                        })?,
                         empty: false,
                     },
                     reader,
-                );
+                )?;
             }
             quick_xml::events::Event::Empty(x) if x.name().0 == b"method" => {
                 let mut name = None;
                 for a in x.attributes() {
-                    let a = a.unwrap();
+                    let a = a?;
 
                     if a.key.0 == b"name" {
                         name = Some(a.value);
@@ -140,16 +221,19 @@ pub fn read_interface_tag_content<'a>(
 
                 callback(
                     InterfaceElementContent::Method {
-                        name: name.expect("no name attr in method tag"),
+                        name: name.ok_or(ReadError::MissingRequiredAttr {
+                            name: "name",
+                            tag: "method",
+                        })?,
                         empty: true,
                     },
                     reader,
-                );
+                )?;
             }
             quick_xml::events::Event::Empty(x) if x.name().0 == b"signal" => {
                 let mut name = None;
                 for a in x.attributes() {
-                    let a = a.unwrap();
+                    let a = a?;
 
                     if a.key.0 == b"name" {
                         name = Some(a.value);
@@ -158,18 +242,21 @@ pub fn read_interface_tag_content<'a>(
 
                 callback(
                     InterfaceElementContent::Signal {
-                        name: name.expect("no name attr in signal tag"),
+                        name: name.ok_or(ReadError::MissingRequiredAttr {
+                            name: "name",
+                            tag: "signal",
+                        })?,
                         empty: true,
                     },
                     reader,
-                );
+                )?;
             }
             quick_xml::events::Event::Empty(x) if x.name().0 == b"property" => {
                 let mut name = None;
                 let mut r#type = None;
                 let mut access = None;
                 for a in x.attributes() {
-                    let a = a.unwrap();
+                    let a = a?;
 
                     if a.key.0 == b"name" {
                         name = Some(a.value);
@@ -182,152 +269,217 @@ pub fn read_interface_tag_content<'a>(
 
                 callback(
                     InterfaceElementContent::Property {
-                        name: name.expect("no name attr in property tag"),
-                        r#type: r#type.expect("no type attr in property tag"),
-                        access: access.expect("no access attr in property tag"),
+                        name: name.ok_or(ReadError::MissingRequiredAttr {
+                            name: "name",
+                            tag: "property",
+                        })?,
+                        r#type: r#type.ok_or(ReadError::MissingRequiredAttr {
+                            name: "type",
+                            tag: "property",
+                        })?,
+                        access: access.ok_or(ReadError::MissingRequiredAttr {
+                            name: "access",
+                            tag: "property",
+                        })?,
                     },
                     reader,
-                );
+                )?;
             }
             quick_xml::events::Event::End(x) => {
                 if x.name().0 == b"interface" {
                     break;
                 }
 
-                panic!("invalid closing pair: {:?}", x.name());
+                return Err(ReadError::InvalidTagPairingString {
+                    tag: String::from_utf8(x.name().0.into()),
+                });
             }
             quick_xml::events::Event::Text(x) if x.trim_ascii().is_empty() => (),
-            e => unreachable!("unexpected element in node: {e:?}"),
+            e => {
+                return Err(ReadError::UnexpectedElement {
+                    phase: "interface",
+                    event: e,
+                });
+            }
         }
     }
+
+    Ok(())
 }
 
 pub fn read_method_tag_content<'a>(
     reader: &mut quick_xml::Reader<&'a [u8]>,
-    mut callback: impl for<'b> FnMut(MethodSignalElementContent<'b>, &mut quick_xml::Reader<&'a [u8]>),
-) {
+    mut callback: impl for<'b> FnMut(
+        MethodSignalElementContent<'b>,
+        &mut quick_xml::Reader<&'a [u8]>,
+    ) -> Result<(), ReadError<'a>>,
+) -> Result<(), ReadError<'a>> {
     loop {
-        match reader.read_event().unwrap() {
+        match reader.read_event().map_err(ReadError::ReadEventFailed)? {
             quick_xml::events::Event::Empty(x) if x.name().0 == b"arg" => {
-                let mut name = None;
-                let mut r#type = None;
-                let mut direction = None;
-                for a in x.attributes() {
-                    let a = a.unwrap();
-
-                    if a.key.0 == b"name" {
-                        name = Some(a.value);
-                    } else if a.key.0 == b"type" {
-                        r#type = Some(a.value);
-                    } else if a.key.0 == b"direction" {
-                        direction = Some(a.value);
-                    }
-                }
+                let content = ArgTag::parse(&x)?;
 
                 callback(
                     MethodSignalElementContent::Arg {
-                        name: name.expect("no name attr in arg tag"),
-                        r#type: r#type.expect("no type attr in arg tag"),
-                        direction,
+                        name: content.name,
+                        r#type: content.r#type,
+                        direction: content.direction,
                     },
                     reader,
-                );
+                )?;
             }
             quick_xml::events::Event::Empty(x) if x.name().0 == b"annotation" => {
-                let mut name = None;
-                let mut r#value = None;
-                for a in x.attributes() {
-                    let a = a.unwrap();
-
-                    if a.key.0 == b"name" {
-                        name = Some(a.value);
-                    } else if a.key.0 == b"value" {
-                        value = Some(a.value);
-                    }
-                }
+                let content = AnnotationTag::parse(&x)?;
 
                 callback(
                     MethodSignalElementContent::Annotation {
-                        name: name.expect("no name attr in annotation tag"),
-                        value: value.expect("no value attr in annotation tag"),
+                        name: content.name,
+                        value: content.value,
                     },
                     reader,
-                );
+                )?;
             }
             quick_xml::events::Event::End(x) => {
                 if x.name().0 == b"method" {
                     break;
                 }
 
-                panic!("invalid closing pair: {:?}", x.name());
+                return Err(ReadError::InvalidTagPairingString {
+                    tag: String::from_utf8(x.name().0.into()),
+                });
             }
             quick_xml::events::Event::Text(x) if x.trim_ascii().is_empty() => (),
-            e => unreachable!("unexpected element in node: {e:?}"),
+            e => {
+                return Err(ReadError::UnexpectedElement {
+                    phase: "method",
+                    event: e,
+                });
+            }
         }
     }
+
+    Ok(())
 }
 
 pub fn read_signal_tag_content<'a>(
     reader: &mut quick_xml::Reader<&'a [u8]>,
-    mut callback: impl for<'b> FnMut(MethodSignalElementContent<'b>, &mut quick_xml::Reader<&'a [u8]>),
-) {
+    mut callback: impl for<'b> FnMut(
+        MethodSignalElementContent<'b>,
+        &mut quick_xml::Reader<&'a [u8]>,
+    ) -> Result<(), ReadError<'a>>,
+) -> Result<(), ReadError<'a>> {
     loop {
-        match reader.read_event().unwrap() {
+        match reader.read_event().map_err(ReadError::ReadEventFailed)? {
             quick_xml::events::Event::Empty(x) if x.name().0 == b"arg" => {
-                let mut name = None;
-                let mut r#type = None;
-                let mut direction = None;
-                for a in x.attributes() {
-                    let a = a.unwrap();
-
-                    if a.key.0 == b"name" {
-                        name = Some(a.value);
-                    } else if a.key.0 == b"type" {
-                        r#type = Some(a.value);
-                    } else if a.key.0 == b"direction" {
-                        direction = Some(a.value);
-                    }
-                }
+                let content = ArgTag::parse(&x)?;
 
                 callback(
                     MethodSignalElementContent::Arg {
-                        name: name.expect("no name attr in arg tag"),
-                        r#type: r#type.expect("no type attr in arg tag"),
-                        direction,
+                        name: content.name,
+                        r#type: content.r#type,
+                        direction: content.direction,
                     },
                     reader,
-                );
+                )?;
             }
             quick_xml::events::Event::Empty(x) if x.name().0 == b"annotation" => {
-                let mut name = None;
-                let mut r#value = None;
-                for a in x.attributes() {
-                    let a = a.unwrap();
-
-                    if a.key.0 == b"name" {
-                        name = Some(a.value);
-                    } else if a.key.0 == b"value" {
-                        value = Some(a.value);
-                    }
-                }
+                let content = AnnotationTag::parse(&x)?;
 
                 callback(
                     MethodSignalElementContent::Annotation {
-                        name: name.expect("no name attr in annotation tag"),
-                        value: value.expect("no value attr in annotation tag"),
+                        name: content.name,
+                        value: content.value,
                     },
                     reader,
-                );
+                )?;
             }
             quick_xml::events::Event::End(x) => {
                 if x.name().0 == b"signal" {
                     break;
                 }
 
-                panic!("invalid closing pair: {:?}", x.name());
+                return Err(ReadError::InvalidTagPairingString {
+                    tag: String::from_utf8(x.name().0.into()),
+                });
             }
             quick_xml::events::Event::Text(x) if x.trim_ascii().is_empty() => (),
-            e => unreachable!("unexpected element in node: {e:?}"),
+            e => {
+                return Err(ReadError::UnexpectedElement {
+                    phase: "signal",
+                    event: e,
+                });
+            }
         }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct ArgTag<'a> {
+    pub name: Cow<'a, [u8]>,
+    pub r#type: Cow<'a, [u8]>,
+    pub direction: Option<Cow<'a, [u8]>>,
+}
+impl<'b> ArgTag<'b> {
+    pub fn parse<'a>(content: &'b BytesStart<'a>) -> Result<Self, ReadError<'a>> {
+        let mut name = None;
+        let mut r#type = None;
+        let mut direction = None;
+        for a in content.attributes() {
+            let a = a?;
+
+            if a.key.0 == b"name" {
+                name = Some(a.value);
+            } else if a.key.0 == b"type" {
+                r#type = Some(a.value);
+            } else if a.key.0 == b"direction" {
+                direction = Some(a.value);
+            }
+        }
+
+        Ok(Self {
+            name: name.ok_or(ReadError::MissingRequiredAttr {
+                name: "name",
+                tag: "arg",
+            })?,
+            r#type: r#type.ok_or(ReadError::MissingRequiredAttr {
+                name: "type",
+                tag: "arg",
+            })?,
+            direction,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AnnotationTag<'a> {
+    pub name: Cow<'a, [u8]>,
+    pub value: Cow<'a, [u8]>,
+}
+impl<'b> AnnotationTag<'b> {
+    pub fn parse<'a>(content: &'b BytesStart<'a>) -> Result<Self, ReadError<'a>> {
+        let mut name = None;
+        let mut r#value = None;
+        for a in content.attributes() {
+            let a = a?;
+
+            if a.key.0 == b"name" {
+                name = Some(a.value);
+            } else if a.key.0 == b"value" {
+                value = Some(a.value);
+            }
+        }
+
+        Ok(Self {
+            name: name.ok_or(ReadError::MissingRequiredAttr {
+                name: "name",
+                tag: "annotation",
+            })?,
+            value: value.ok_or(ReadError::MissingRequiredAttr {
+                name: "value",
+                tag: "annotation",
+            })?,
+        })
     }
 }

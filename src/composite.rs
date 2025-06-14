@@ -1079,12 +1079,13 @@ impl CompositeTree {
                 }
 
                 let backdrop_buffer_index = match r.composite_mode {
-                    CompositeMode::ColorTintBackdropBlur(ref t, ref stdev)
-                    | CompositeMode::FillColorBackdropBlur(ref t, ref stdev) => {
-                        let [_, _, _, a] = t.evaluate(current_sec, &self.parameter_store);
-                        if a > 0.0 {
+                    CompositeMode::ColorTintBackdropBlur(_, ref stdev)
+                    | CompositeMode::FillColorBackdropBlur(_, ref stdev) => {
+                        let stdev = stdev.evaluate(current_sec);
+
+                        if stdev > 0.0 {
                             inst_builder.request_backdrop_blur(
-                                unsafe { SafeF32::new_unchecked(stdev.evaluate(current_sec)) },
+                                unsafe { SafeF32::new_unchecked(stdev) },
                                 br::Rect2D {
                                     offset: br::Offset2D {
                                         x: left as _,

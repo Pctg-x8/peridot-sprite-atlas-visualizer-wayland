@@ -25,7 +25,7 @@ use app_state::AppState;
 use bedrock::{
     self as br, CommandBufferMut, CommandPoolMut, DescriptorPoolMut, Device, DeviceMemoryMut,
     Fence, FenceMut, Image, ImageChild, InstanceChild, MemoryBound, PhysicalDevice, RenderPass,
-    ShaderModule, Swapchain, VkHandle, VkHandleMut, VkObject,
+    ShaderModule, Swapchain, VkHandle, VkHandleMut, VkObject, VkRawHandle,
 };
 use component::CommonButtonView;
 use composite::{
@@ -3048,7 +3048,7 @@ impl AppMenuBaseView {
             AnimatableFloat::Animated(
                 0.0,
                 AnimationData {
-                    to_value: 9.0 / 3.0,
+                    to_value: 3.0,
                     start_sec: current_sec,
                     end_sec: current_sec + 0.25,
                     curve_p1: (0.5, 0.5),
@@ -3074,7 +3074,7 @@ impl AppMenuBaseView {
                 },
             ),
             AnimatableFloat::Animated(
-                9.0 / 3.0,
+                3.0,
                 AnimationData {
                     to_value: 0.0,
                     start_sec: current_sec,
@@ -3258,9 +3258,19 @@ impl<'c> HitTestTreeActionHandler<'c> for AppMenuActionHandler {
                                 .to_str()
                                 .unwrap()
                         };
-                        // ほんとうはちゃんとxml解析したほうがいいが一旦雑にみる
-                        let has_file_chooser =
-                            doc.contains("<interface name=\"org.freedesktop.portal.FileChooser\"");
+
+                        let mut has_file_chooser = false;
+                        if let Err(e) = dbus::introspect_document::read_toplevel(
+                            &mut quick_xml::Reader::from_str(doc),
+                            |_, ifname, r| {
+                                has_file_chooser =
+                                    ifname.as_ref() == b"org.freedesktop.portal.FileChooser";
+
+                                dbus::introspect_document::skip_read_interface_tag_contents(r)
+                            },
+                        ) {
+                            tracing::warn!(reason = ?e, "Failed to parse introspection document from portal object");
+                        }
 
                         if !has_file_chooser {
                             context.event_queue.push(AppEvent::UIMessageDialogRequest {
@@ -4281,6 +4291,9 @@ impl br::VkHandle for SubsystemBoundSurface<'_> {
         self.handle
     }
 }
+impl br::VkObject for SubsystemBoundSurface<'_> {
+    const TYPE: br::vk::VkObjectType = br::vk::VkSurfaceKHR::OBJECT_TYPE;
+}
 impl br::InstanceChild for SubsystemBoundSurface<'_> {
     type ConcreteInstance = <Subsystem as br::InstanceChild>::ConcreteInstance;
 
@@ -4311,6 +4324,9 @@ impl br::VkHandle for TemporalSwapchain<'_> {
     fn native_ptr(&self) -> Self::Handle {
         self.handle
     }
+}
+impl br::VkObject for TemporalSwapchain<'_> {
+    const TYPE: br::vk::VkObjectType = br::vk::VkSwapchainKHR::OBJECT_TYPE;
 }
 impl br::DeviceChildHandle for TemporalSwapchain<'_> {
     #[inline(always)]
@@ -4472,6 +4488,8 @@ impl<'s> PrimaryRenderTarget<'s> {
             size: sc_size,
             format: sc_format.format,
         };
+
+        sc.set_name(Some(c"primary swapchain")).unwrap();
 
         let backbuffer_views = sc
             .images_alloc()
@@ -4687,6 +4705,8 @@ fn main() {
                                     })
                                 });
                                 println!("      arg: {type:?} {name:?} ({direction:?})");
+
+                                Ok(())
                             }
                             dbus::introspect_document::MethodSignalElementContent::Annotation {
                                 name,
@@ -4699,8 +4719,12 @@ fn main() {
                                     core::str::from_utf8_unchecked(&value)
                                 });
                                 println!("      annotation: {name:?} = {value:?}");
+
+                                Ok(())
                             }
-                        });
+                        })
+                    } else {
+                        Ok(())
                     }
                 }
                 dbus::introspect_document::InterfaceElementContent::Signal { name, empty } => {
@@ -4728,6 +4752,8 @@ fn main() {
                                     })
                                 });
                                 println!("      arg: {type:?} {name:?} ({direction:?})");
+
+                                Ok(())
                             }
                             dbus::introspect_document::MethodSignalElementContent::Annotation {
                                 name,
@@ -4740,8 +4766,12 @@ fn main() {
                                     core::str::from_utf8_unchecked(&value)
                                 });
                                 println!("      annotation: {name:?} = {value:?}");
+
+                                Ok(())
                             }
-                        });
+                        })
+                    } else {
+                        Ok(())
                     }
                 }
                 dbus::introspect_document::InterfaceElementContent::Property {
@@ -4759,10 +4789,13 @@ fn main() {
                         core::str::from_utf8_unchecked(&access)
                     });
                     println!("    property: {type:?} {name:?} ({access:?})");
+
+                    Ok(())
                 }
             })
         },
-    );
+    )
+    .unwrap();
 
     assert_eq!(reply_iter.has_next(), false);
 
@@ -5604,13 +5637,25 @@ fn main() {
 
     let mut acquire_completion =
         br::SemaphoreObject::new(&subsystem, &br::SemaphoreCreateInfo::new()).unwrap();
+    acquire_completion
+        .set_name(Some(c"acquire_completion"))
+        .unwrap();
     let render_completion =
         br::SemaphoreObject::new(&subsystem, &br::SemaphoreCreateInfo::new()).unwrap();
+    render_completion
+        .set_name(Some(c"render_completion"))
+        .unwrap();
     let mut last_render_command_fence =
         br::FenceObject::new(&subsystem, &br::FenceCreateInfo::new(0)).unwrap();
+    last_render_command_fence
+        .set_name(Some(c"last_render_command_fence"))
+        .unwrap();
     let mut last_rendering = false;
     let mut last_update_command_fence =
         br::FenceObject::new(&subsystem, &br::FenceCreateInfo::new(0)).unwrap();
+    last_update_command_fence
+        .set_name(Some(c"last_update_command_fence"))
+        .unwrap();
     let mut last_updating = false;
 
     let mut app_update_context = AppUpdateContext {

@@ -1,0 +1,471 @@
+use std::rc::Rc;
+
+use bedrock::{self as br, CommandBufferMut, RenderPass, ShaderModule, VkHandle};
+
+use crate::{
+    AppEvent, AppUpdateContext, BLEND_STATE_SINGLE_NONE, IA_STATE_TRILIST, MS_STATE_EMPTY,
+    RASTER_STATE_DEFAULT_FILL_NOCULL, RoundedRectConstants, VI_STATE_EMPTY, ViewInitContext,
+    composite::{
+        AnimatableColor, AnimatableFloat, AnimationData, CompositeMode, CompositeRect,
+        CompositeTree, CompositeTreeRef,
+    },
+    hittest::{HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef},
+};
+
+const POPUP_ANIMATION_DURATION: f32 = 0.2;
+const POPUP_MASK_OPACITY: f32 = 0.125;
+const POPUP_MASK_BLUR_POWER: f32 = 3.0;
+
+pub struct MaskView {
+    ct_root: CompositeTreeRef,
+    ht_root: HitTestTreeRef,
+}
+impl MaskView {
+    pub fn new(init: &mut ViewInitContext) -> Self {
+        let ct_root = init.composite_tree.register(CompositeRect {
+            relative_size_adjustment: [1.0, 1.0],
+            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            composite_mode: CompositeMode::FillColor(AnimatableColor::Value([0.0, 0.0, 0.0, 0.0])),
+            ..Default::default()
+        });
+
+        let ht_root = init.ht.create(HitTestTreeData {
+            width_adjustment_factor: 1.0,
+            height_adjustment_factor: 1.0,
+            ..Default::default()
+        });
+
+        Self { ct_root, ht_root }
+    }
+
+    #[inline]
+    pub fn bind_action_handler<'c, ActionContext>(
+        &self,
+        handler: &Rc<impl HitTestTreeActionHandler<'c, Context = ActionContext> + 'static>,
+        ht: &mut HitTestTreeManager<'c, ActionContext>,
+    ) {
+        ht.set_action_handler(self.ht_root, handler);
+    }
+
+    // TODO: このへんどうにかしたいかも
+    pub const fn ct_root(&self) -> CompositeTreeRef {
+        self.ct_root
+    }
+
+    pub const fn ht_root(&self) -> HitTestTreeRef {
+        self.ht_root
+    }
+
+    #[inline(always)]
+    pub fn is_sender(&self, sender: HitTestTreeRef) -> bool {
+        self.ht_root == sender
+    }
+
+    pub fn mount<ActionContext>(
+        &self,
+        ct_parent: CompositeTreeRef,
+        ct: &mut CompositeTree,
+        ht_parent: HitTestTreeRef,
+        ht: &mut HitTestTreeManager<ActionContext>,
+    ) {
+        ct.add_child(ct_parent, self.ct_root);
+        ht.add_child(ht_parent, self.ht_root);
+    }
+
+    pub fn unmount_ht(&self, ht: &mut HitTestTreeManager<AppUpdateContext<'_>>) {
+        ht.remove_child(self.ht_root);
+    }
+
+    pub fn unmount_visual(&self, ct: &mut CompositeTree) {
+        ct.remove_child(self.ct_root);
+    }
+
+    pub fn show(&self, ct: &mut CompositeTree, current_sec: f32) {
+        ct.get_mut(self.ct_root).composite_mode = CompositeMode::FillColorBackdropBlur(
+            AnimatableColor::Animated(
+                [0.0, 0.0, 0.0, 0.0],
+                AnimationData {
+                    to_value: [0.0, 0.0, 0.0, POPUP_MASK_OPACITY],
+                    start_sec: current_sec,
+                    end_sec: current_sec + POPUP_ANIMATION_DURATION,
+                    curve_p1: (0.5, 0.5),
+                    curve_p2: (0.5, 0.5),
+                    event_on_complete: None,
+                },
+            ),
+            AnimatableFloat::Animated(
+                0.0,
+                AnimationData {
+                    to_value: POPUP_MASK_BLUR_POWER,
+                    start_sec: current_sec,
+                    end_sec: current_sec + POPUP_ANIMATION_DURATION,
+                    curve_p1: (0.25, 0.5),
+                    curve_p2: (0.5, 1.0),
+                    event_on_complete: None,
+                },
+            ),
+        );
+
+        ct.mark_dirty(self.ct_root);
+    }
+
+    pub fn hide(&self, ct: &mut CompositeTree, current_sec: f32, event_on_complete: AppEvent) {
+        ct.get_mut(self.ct_root).composite_mode = CompositeMode::FillColorBackdropBlur(
+            AnimatableColor::Animated(
+                [0.0, 0.0, 0.0, POPUP_MASK_OPACITY],
+                AnimationData {
+                    to_value: [0.0, 0.0, 0.0, 0.0],
+                    start_sec: current_sec,
+                    end_sec: current_sec + POPUP_ANIMATION_DURATION,
+                    curve_p1: (0.5, 0.5),
+                    curve_p2: (0.5, 0.5),
+                    event_on_complete: Some(event_on_complete),
+                },
+            ),
+            AnimatableFloat::Animated(
+                POPUP_MASK_BLUR_POWER,
+                AnimationData {
+                    to_value: 0.0,
+                    start_sec: current_sec,
+                    end_sec: current_sec + POPUP_ANIMATION_DURATION,
+                    curve_p1: (0.5, 0.5),
+                    curve_p2: (0.5, 0.5),
+                    event_on_complete: None,
+                },
+            ),
+        );
+
+        ct.mark_dirty(self.ct_root);
+    }
+}
+
+pub struct CommonFrameView {
+    ct_root: CompositeTreeRef,
+    ht_root: HitTestTreeRef,
+    height: f32,
+    ui_scale_factor: f32,
+}
+impl CommonFrameView {
+    const CORNER_RADIUS: f32 = 16.0;
+
+    pub fn new(init: &mut ViewInitContext, width: f32, height: f32) -> Self {
+        let render_size_px = ((Self::CORNER_RADIUS * 2.0 + 1.0) * init.ui_scale_factor) as u32;
+        let frame_image_atlas_rect = init.atlas.alloc(render_size_px, render_size_px);
+        let frame_border_image_atlas_rect = init.atlas.alloc(render_size_px, render_size_px);
+
+        let render_pass = br::RenderPassObject::new(
+            init.subsystem,
+            &br::RenderPassCreateInfo2::new(
+                &[br::AttachmentDescription2::new(init.atlas.format())
+                    .with_layout_to(br::ImageLayout::ShaderReadOnlyOpt.from_undefined())
+                    .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store)],
+                &[br::SubpassDescription2::new()
+                    .colors(&[br::AttachmentReference2::color_attachment_opt(0)])],
+                &[br::SubpassDependency2::new(
+                    br::SubpassIndex::Internal(0),
+                    br::SubpassIndex::External,
+                )
+                .of_memory(
+                    br::AccessFlags::COLOR_ATTACHMENT.write,
+                    br::AccessFlags::SHADER.read,
+                )
+                .of_execution(
+                    br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    br::PipelineStageFlags::FRAGMENT_SHADER,
+                )],
+            ),
+        )
+        .unwrap();
+        let framebuffer = br::FramebufferObject::new(
+            &init.subsystem,
+            &br::FramebufferCreateInfo::new(
+                &render_pass,
+                &[init.atlas.resource().as_transparent_ref()],
+                init.atlas.size(),
+                init.atlas.size(),
+            ),
+        )
+        .unwrap();
+
+        let [pipeline, pipeline_border] = init
+            .subsystem
+            .create_graphics_pipelines_array(&[
+                br::GraphicsPipelineCreateInfo::new(
+                    init.subsystem.require_empty_pipeline_layout(),
+                    render_pass.subpass(0),
+                    &[
+                        init.subsystem
+                            .require_shader("resources/filltri.vert")
+                            .on_stage(br::ShaderStage::Vertex, c"main"),
+                        init.subsystem
+                            .require_shader("resources/rounded_rect.frag")
+                            .on_stage(br::ShaderStage::Fragment, c"main")
+                            .with_specialization_info(&br::SpecializationInfo::new(
+                                &RoundedRectConstants {
+                                    corner_radius: Self::CORNER_RADIUS,
+                                },
+                            )),
+                    ],
+                    VI_STATE_EMPTY,
+                    IA_STATE_TRILIST,
+                    &br::PipelineViewportStateCreateInfo::new(
+                        &[frame_image_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
+                        &[frame_image_atlas_rect.vk_rect()],
+                    ),
+                    RASTER_STATE_DEFAULT_FILL_NOCULL,
+                    BLEND_STATE_SINGLE_NONE,
+                )
+                .multisample_state(MS_STATE_EMPTY),
+                br::GraphicsPipelineCreateInfo::new(
+                    init.subsystem.require_empty_pipeline_layout(),
+                    render_pass.subpass(0),
+                    &[
+                        init.subsystem
+                            .require_shader("resources/filltri.vert")
+                            .on_stage(br::ShaderStage::Vertex, c"main"),
+                        init.subsystem
+                            .require_shader("resources/rounded_rect_border.frag")
+                            .on_stage(br::ShaderStage::Fragment, c"main")
+                            .with_specialization_info(&br::SpecializationInfo::new(
+                                &RoundedRectConstants {
+                                    corner_radius: Self::CORNER_RADIUS,
+                                },
+                            )),
+                    ],
+                    VI_STATE_EMPTY,
+                    IA_STATE_TRILIST,
+                    &br::PipelineViewportStateCreateInfo::new(
+                        &[frame_border_image_atlas_rect
+                            .vk_rect()
+                            .make_viewport(0.0..1.0)],
+                        &[frame_border_image_atlas_rect.vk_rect()],
+                    ),
+                    RASTER_STATE_DEFAULT_FILL_NOCULL,
+                    BLEND_STATE_SINGLE_NONE,
+                )
+                .multisample_state(MS_STATE_EMPTY),
+            ])
+            .unwrap();
+
+        let mut cp = init
+            .subsystem
+            .create_transient_graphics_command_pool()
+            .unwrap();
+        let [mut cb] = br::CommandBufferObject::alloc_array(
+            &init.subsystem,
+            &br::CommandBufferFixedCountAllocateInfo::new(&mut cp, br::CommandBufferLevel::Primary),
+        )
+        .unwrap();
+        unsafe {
+            cb.begin(&br::CommandBufferBeginInfo::new(), &init.subsystem)
+                .unwrap()
+        }
+        .begin_render_pass2(
+            &br::RenderPassBeginInfo::new(
+                &render_pass,
+                &framebuffer,
+                frame_image_atlas_rect.vk_rect(),
+                &[br::ClearValue::color_f32([0.0; 4])],
+            ),
+            &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+        )
+        .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline)
+        .draw(3, 1, 0, 0)
+        .end_render_pass2(&br::SubpassEndInfo::new())
+        .begin_render_pass2(
+            &br::RenderPassBeginInfo::new(
+                &render_pass,
+                &framebuffer,
+                frame_border_image_atlas_rect.vk_rect(),
+                &[br::ClearValue::color_f32([0.0; 4])],
+            ),
+            &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+        )
+        .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline_border)
+        .draw(3, 1, 0, 0)
+        .end_render_pass2(&br::SubpassEndInfo::new())
+        .end()
+        .unwrap();
+
+        init.subsystem
+            .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&cb)])
+            .unwrap();
+
+        let ct_root = init.composite_tree.register(CompositeRect {
+            offset: [
+                -width * 0.5 * init.ui_scale_factor,
+                -height * 0.5 * init.ui_scale_factor,
+            ],
+            relative_offset_adjustment: [0.5, 0.5],
+            size: [width * init.ui_scale_factor, height * init.ui_scale_factor],
+            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            texatlas_rect: frame_image_atlas_rect,
+            slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.0, 0.0, 0.0, 1.0])),
+            opacity: AnimatableFloat::Value(0.0),
+            ..Default::default()
+        });
+        let ct_border = init.composite_tree.register(CompositeRect {
+            offset: [
+                -width * 0.5 * init.ui_scale_factor,
+                -height * 0.5 * init.ui_scale_factor,
+            ],
+            relative_offset_adjustment: [0.5, 0.5],
+            size: [width * init.ui_scale_factor, height * init.ui_scale_factor],
+            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            texatlas_rect: frame_border_image_atlas_rect,
+            slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([
+                0.25, 0.25, 0.25, 1.0,
+            ])),
+            ..Default::default()
+        });
+
+        init.composite_tree.add_child(ct_root, ct_border);
+
+        let ht_root = init.ht.create(HitTestTreeData {
+            left: -width * 0.5,
+            top: -height * 0.5,
+            left_adjustment_factor: 0.5,
+            top_adjustment_factor: 0.5,
+            width,
+            height,
+            ..Default::default()
+        });
+
+        Self {
+            ct_root,
+            ht_root,
+            height,
+            ui_scale_factor: init.ui_scale_factor,
+        }
+    }
+
+    #[inline]
+    pub fn bind_action_handler<'c, ActionContext>(
+        &self,
+        handler: &Rc<impl HitTestTreeActionHandler<'c, Context = ActionContext> + 'static>,
+        ht: &mut HitTestTreeManager<'c, ActionContext>,
+    ) {
+        ht.set_action_handler(self.ht_root, handler);
+    }
+
+    // TODO: このへんどうにかしたいかも
+    pub const fn ct_root(&self) -> CompositeTreeRef {
+        self.ct_root
+    }
+
+    pub const fn ht_root(&self) -> HitTestTreeRef {
+        self.ht_root
+    }
+
+    #[inline(always)]
+    pub fn is_sender(&self, sender: HitTestTreeRef) -> bool {
+        self.ht_root == sender
+    }
+
+    pub fn mount<ActionContext>(
+        &self,
+        ct_parent: CompositeTreeRef,
+        ct: &mut CompositeTree,
+        ht_parent: HitTestTreeRef,
+        ht: &mut HitTestTreeManager<ActionContext>,
+    ) {
+        ct.add_child(ct_parent, self.ct_root);
+        ht.add_child(ht_parent, self.ht_root);
+    }
+
+    pub fn show(&self, ct: &mut CompositeTree, current_sec: f32) {
+        ct.get_mut(self.ct_root).opacity = AnimatableFloat::Animated(
+            0.0,
+            AnimationData {
+                to_value: 1.0,
+                start_sec: current_sec,
+                end_sec: current_sec + POPUP_ANIMATION_DURATION,
+                curve_p1: (0.5, 0.5),
+                curve_p2: (0.5, 0.5),
+                event_on_complete: None,
+            },
+        );
+        ct.get_mut(self.ct_root).offset[1] = (-0.5 * self.height + 8.0) * self.ui_scale_factor;
+        ct.get_mut(self.ct_root).animation_data_top = Some(AnimationData {
+            to_value: (-0.5 * self.height) * self.ui_scale_factor,
+            start_sec: current_sec,
+            end_sec: current_sec + POPUP_ANIMATION_DURATION,
+            curve_p1: (0.25, 0.5),
+            curve_p2: (0.5, 0.9),
+            event_on_complete: None,
+        });
+        ct.get_mut(self.ct_root).scale_x = AnimatableFloat::Animated(
+            0.9,
+            AnimationData {
+                to_value: 1.0,
+                start_sec: current_sec,
+                end_sec: current_sec + POPUP_ANIMATION_DURATION,
+                curve_p1: (0.25, 0.5),
+                curve_p2: (0.5, 0.9),
+                event_on_complete: None,
+            },
+        );
+        ct.get_mut(self.ct_root).scale_y = AnimatableFloat::Animated(
+            0.9,
+            AnimationData {
+                to_value: 1.0,
+                start_sec: current_sec,
+                end_sec: current_sec + POPUP_ANIMATION_DURATION,
+                curve_p1: (0.25, 0.5),
+                curve_p2: (0.5, 0.9),
+                event_on_complete: None,
+            },
+        );
+
+        ct.mark_dirty(self.ct_root);
+    }
+
+    pub fn hide(&self, ct: &mut CompositeTree, current_sec: f32) {
+        ct.get_mut(self.ct_root).opacity = AnimatableFloat::Animated(
+            1.0,
+            AnimationData {
+                to_value: 0.0,
+                start_sec: current_sec,
+                end_sec: current_sec + POPUP_ANIMATION_DURATION,
+                curve_p1: (0.5, 0.5),
+                curve_p2: (0.5, 0.5),
+                event_on_complete: None,
+            },
+        );
+        ct.get_mut(self.ct_root).offset[1] = (-0.5 * self.height) * self.ui_scale_factor;
+        ct.get_mut(self.ct_root).animation_data_top = Some(AnimationData {
+            to_value: (-0.5 * self.height + 8.0) * self.ui_scale_factor,
+            start_sec: current_sec,
+            end_sec: current_sec + POPUP_ANIMATION_DURATION,
+            curve_p1: (0.25, 0.5),
+            curve_p2: (0.5, 0.9),
+            event_on_complete: None,
+        });
+        ct.get_mut(self.ct_root).scale_x = AnimatableFloat::Animated(
+            1.0,
+            AnimationData {
+                to_value: 0.9,
+                start_sec: current_sec,
+                end_sec: current_sec + POPUP_ANIMATION_DURATION,
+                curve_p1: (0.25, 0.5),
+                curve_p2: (0.5, 0.9),
+                event_on_complete: None,
+            },
+        );
+        ct.get_mut(self.ct_root).scale_y = AnimatableFloat::Animated(
+            1.0,
+            AnimationData {
+                to_value: 0.9,
+                start_sec: current_sec,
+                end_sec: current_sec + POPUP_ANIMATION_DURATION,
+                curve_p1: (0.25, 0.5),
+                curve_p2: (0.5, 0.9),
+                event_on_complete: None,
+            },
+        );
+
+        ct.mark_dirty(self.ct_root);
+    }
+}

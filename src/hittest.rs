@@ -12,7 +12,7 @@ pub struct HitTestTreeData<'c, ActionContext> {
     pub width_adjustment_factor: f32,
     pub height_adjustment_factor: f32,
     pub action_handler:
-        Option<std::rc::Weak<dyn HitTestTreeActionHandler<'c, Context = ActionContext>>>,
+        Option<std::rc::Weak<dyn HitTestTreeActionHandler<'c, Context = ActionContext> + 'c>>,
 }
 impl<ActionContext> Default for HitTestTreeData<'_, ActionContext> {
     #[inline]
@@ -34,7 +34,7 @@ impl<'c, ActionContext> HitTestTreeData<'c, ActionContext> {
     #[inline]
     pub fn action_handler(
         &self,
-    ) -> Option<std::rc::Rc<dyn HitTestTreeActionHandler<'c, Context = ActionContext>>> {
+    ) -> Option<std::rc::Rc<dyn HitTestTreeActionHandler<'c, Context = ActionContext> + 'c>> {
         self.action_handler
             .as_ref()
             .and_then(std::rc::Weak::upgrade)
@@ -96,7 +96,7 @@ impl<'c, ActionContext> HitTestTreeManager<'c, ActionContext> {
     pub fn set_action_handler(
         &mut self,
         r: HitTestTreeRef,
-        h: &std::rc::Rc<impl HitTestTreeActionHandler<'c, Context = ActionContext> + 'static>,
+        h: &std::rc::Rc<impl HitTestTreeActionHandler<'c, Context = ActionContext> + 'c>,
     ) {
         self.data[r.0].action_handler = Some(std::rc::Rc::downgrade(h) as _);
     }
@@ -313,8 +313,7 @@ pub trait HitTestTreeActionHandler<'c> {
         &self,
         sender: HitTestTreeRef,
         context: &mut Self::Context,
-        ht: &mut HitTestTreeManager<Self::Context>,
-        args: PointerActionArgs,
+        args: &PointerActionArgs,
     ) -> EventContinueControl {
         EventContinueControl::empty()
     }
@@ -324,8 +323,7 @@ pub trait HitTestTreeActionHandler<'c> {
         &self,
         sender: HitTestTreeRef,
         context: &mut Self::Context,
-        ht: &mut HitTestTreeManager<Self::Context>,
-        args: PointerActionArgs,
+        args: &PointerActionArgs,
     ) -> EventContinueControl {
         EventContinueControl::empty()
     }
@@ -335,8 +333,7 @@ pub trait HitTestTreeActionHandler<'c> {
         &self,
         sender: HitTestTreeRef,
         context: &mut Self::Context,
-        ht: &mut HitTestTreeManager<Self::Context>,
-        args: PointerActionArgs,
+        args: &PointerActionArgs,
     ) -> EventContinueControl {
         EventContinueControl::empty()
     }
@@ -346,8 +343,7 @@ pub trait HitTestTreeActionHandler<'c> {
         &self,
         sender: HitTestTreeRef,
         context: &mut Self::Context,
-        ht: &mut HitTestTreeManager<Self::Context>,
-        args: PointerActionArgs,
+        args: &PointerActionArgs,
     ) -> EventContinueControl {
         EventContinueControl::empty()
     }
@@ -357,8 +353,7 @@ pub trait HitTestTreeActionHandler<'c> {
         &self,
         sender: HitTestTreeRef,
         context: &mut Self::Context,
-        ht: &mut HitTestTreeManager<Self::Context>,
-        args: PointerActionArgs,
+        args: &PointerActionArgs,
     ) -> EventContinueControl {
         EventContinueControl::empty()
     }
@@ -368,8 +363,7 @@ pub trait HitTestTreeActionHandler<'c> {
         &self,
         sender: HitTestTreeRef,
         context: &mut Self::Context,
-        ht: &mut HitTestTreeManager<Self::Context>,
-        args: PointerActionArgs,
+        args: &PointerActionArgs,
     ) -> EventContinueControl {
         EventContinueControl::empty()
     }

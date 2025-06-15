@@ -5,7 +5,7 @@ use bedrock::{
 use std::{cell::Cell, rc::Rc};
 
 use crate::{
-    AppUpdateContext, BLEND_STATE_SINGLE_NONE, FillcolorRConstants, IA_STATE_TRILIST,
+    AppEvent, AppUpdateContext, BLEND_STATE_SINGLE_NONE, FillcolorRConstants, IA_STATE_TRILIST,
     MS_STATE_EMPTY, PresenterInitContext, RASTER_STATE_DEFAULT_FILL_NOCULL, VI_STATE_FLOAT2_ONLY,
     ViewInitContext,
     composite::{
@@ -27,6 +27,7 @@ struct MenuButtonView {
     ht_root: HitTestTreeRef,
     hovering: Cell<bool>,
     pressing: Cell<bool>,
+    is_dirty: Cell<bool>,
 }
 impl MenuButtonView {
     const ICON_VERTICES: &'static [[f32; 2]] = &[
@@ -246,6 +247,7 @@ impl MenuButtonView {
             ht_root,
             hovering: Cell::new(false),
             pressing: Cell::new(false),
+            is_dirty: Cell::new(false),
         }
     }
 
@@ -260,7 +262,12 @@ impl MenuButtonView {
         ht.add_child(ht_parent, self.ht_root);
     }
 
-    fn update_button_bg_opacity(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
+    fn update(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
+        if !self.is_dirty.replace(false) {
+            // not modified
+            return;
+        }
+
         let opacity = match (self.hovering.get(), self.pressing.get()) {
             (_, true) => 0.375,
             (true, _) => 0.25,
@@ -288,27 +295,27 @@ impl MenuButtonView {
         composite_tree.mark_dirty(self.ct_bg);
     }
 
-    pub fn on_hover(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
+    pub fn on_hover(&self) {
         self.hovering.set(true);
-        self.update_button_bg_opacity(composite_tree, current_sec);
+        self.is_dirty.set(true);
     }
 
-    pub fn on_leave(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
+    pub fn on_leave(&self) {
         self.hovering.set(false);
         // はずれたらpressingもなかったことにする
         self.pressing.set(false);
 
-        self.update_button_bg_opacity(composite_tree, current_sec);
+        self.is_dirty.set(true);
     }
 
-    pub fn on_press(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
+    pub fn on_press(&self) {
         self.pressing.set(true);
-        self.update_button_bg_opacity(composite_tree, current_sec);
+        self.is_dirty.set(true);
     }
 
-    pub fn on_release(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
+    pub fn on_release(&self) {
         self.pressing.set(false);
-        self.update_button_bg_opacity(composite_tree, current_sec);
+        self.is_dirty.set(true);
     }
 }
 
@@ -489,15 +496,11 @@ impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
     fn on_pointer_enter(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
-        _ht: &mut HitTestTreeManager<Self::Context>,
-        _args: PointerActionArgs,
+        _context: &mut Self::Context,
+        _args: &PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.menu_button_view.ht_root {
-            self.menu_button_view.on_hover(
-                &mut context.for_view_feedback.composite_tree,
-                context.for_view_feedback.current_sec,
-            );
+            self.menu_button_view.on_hover();
             return EventContinueControl::STOP_PROPAGATION;
         }
 
@@ -507,15 +510,11 @@ impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
     fn on_pointer_leave(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
-        _ht: &mut HitTestTreeManager<Self::Context>,
-        _args: PointerActionArgs,
+        _context: &mut Self::Context,
+        _args: &PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.menu_button_view.ht_root {
-            self.menu_button_view.on_leave(
-                &mut context.for_view_feedback.composite_tree,
-                context.for_view_feedback.current_sec,
-            );
+            self.menu_button_view.on_leave();
             return EventContinueControl::STOP_PROPAGATION;
         }
 
@@ -525,15 +524,11 @@ impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
     fn on_pointer_down(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
-        _ht: &mut HitTestTreeManager<Self::Context>,
-        _args: PointerActionArgs,
+        _context: &mut Self::Context,
+        _args: &PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.menu_button_view.ht_root {
-            self.menu_button_view.on_press(
-                &mut context.for_view_feedback.composite_tree,
-                context.for_view_feedback.current_sec,
-            );
+            self.menu_button_view.on_press();
             return EventContinueControl::STOP_PROPAGATION;
         }
 
@@ -543,15 +538,11 @@ impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
     fn on_pointer_up(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
-        _ht: &mut HitTestTreeManager<Self::Context>,
-        _args: PointerActionArgs,
+        _context: &mut Self::Context,
+        _args: &PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.menu_button_view.ht_root {
-            self.menu_button_view.on_release(
-                &mut context.for_view_feedback.composite_tree,
-                context.for_view_feedback.current_sec,
-            );
+            self.menu_button_view.on_release();
             return EventContinueControl::STOP_PROPAGATION;
         }
 
@@ -562,13 +553,10 @@ impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
         &self,
         sender: HitTestTreeRef,
         context: &mut Self::Context,
-        ht: &mut HitTestTreeManager<Self::Context>,
-        _args: PointerActionArgs,
+        _args: &PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.menu_button_view.ht_root {
-            context
-                .state
-                .toggle_menu(&mut context.for_view_feedback, ht);
+            context.event_queue.push(AppEvent::AppMenuToggle);
             return EventContinueControl::STOP_PROPAGATION;
         }
 
@@ -578,7 +566,7 @@ impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
 
 pub struct Presenter {
     base_view: BaseView,
-    _action_handler: Rc<ActionHandler>,
+    action_handler: Rc<ActionHandler>,
 }
 impl Presenter {
     pub fn new(init: &mut PresenterInitContext) -> Self {
@@ -599,7 +587,7 @@ impl Presenter {
 
         Self {
             base_view,
-            _action_handler: action_handler,
+            action_handler,
         }
     }
 
@@ -611,6 +599,15 @@ impl Presenter {
         ht: &mut HitTestTreeManager<AppUpdateContext<'_>>,
     ) {
         self.base_view.mount(ct_parent, ct, ht_parent, ht);
+    }
+
+    pub fn update<ActionContext>(
+        &self,
+        ct: &mut CompositeTree,
+        ht: &mut HitTestTreeManager<ActionContext>,
+        current_sec: f32,
+    ) {
+        self.action_handler.menu_button_view.update(ct, current_sec);
     }
 
     pub const fn height(&self) -> f32 {

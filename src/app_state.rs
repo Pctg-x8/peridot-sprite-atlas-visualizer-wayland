@@ -2,10 +2,7 @@ use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
-use crate::{
-    AppUpdateContext, ViewFeedbackContext, coordinate::SizePixels, hittest::HitTestTreeManager,
-    peridot,
-};
+use crate::{coordinate::SizePixels, peridot};
 
 #[derive(Debug)]
 pub struct SpriteInfo {
@@ -54,22 +51,17 @@ impl SpriteInfo {
     }
 }
 
-pub struct AppState<'a> {
+pub struct AppState<'subsystem> {
     atlas_size: SizePixels,
-    atlas_size_view_feedbacks: Vec<Box<dyn FnMut(&SizePixels) + 'a>>,
+    atlas_size_view_feedbacks: Vec<Box<dyn FnMut(&SizePixels) + 'subsystem>>,
     sprites: Vec<SpriteInfo>,
-    sprites_view_feedbacks: Vec<Box<dyn FnMut(&[SpriteInfo]) + 'a>>,
+    sprites_view_feedbacks: Vec<Box<dyn FnMut(&[SpriteInfo]) + 'subsystem>>,
     visible_menu: bool,
-    visible_menu_view_feedbacks: Vec<
-        Box<
-            dyn FnMut(&mut ViewFeedbackContext, &mut HitTestTreeManager<AppUpdateContext<'a>>, bool)
-                + 'a,
-        >,
-    >,
+    visible_menu_view_feedbacks: Vec<Box<dyn FnMut(bool) + 'subsystem>>,
     current_open_path: Option<PathBuf>,
-    current_open_path_view_feedbacks: Vec<Box<dyn FnMut(&Option<PathBuf>) + 'a>>,
+    current_open_path_view_feedbacks: Vec<Box<dyn FnMut(&Option<PathBuf>) + 'subsystem>>,
 }
-impl<'a> AppState<'a> {
+impl<'subsystem> AppState<'subsystem> {
     pub fn new() -> Self {
         Self {
             atlas_size: SizePixels {
@@ -164,15 +156,11 @@ impl<'a> AppState<'a> {
         }
     }
 
-    pub fn toggle_menu(
-        &mut self,
-        vf_context: &mut ViewFeedbackContext,
-        ht: &mut HitTestTreeManager<AppUpdateContext<'a>>,
-    ) {
+    pub fn toggle_menu(&mut self) {
         self.visible_menu = !self.visible_menu;
 
         for cb in self.visible_menu_view_feedbacks.iter_mut() {
-            cb(vf_context, ht, self.visible_menu);
+            cb(self.visible_menu);
         }
     }
 
@@ -257,11 +245,7 @@ impl<'a> AppState<'a> {
     }
 
     /// synchronizes views with the state: notifies current state to all view feedback receivers
-    pub fn synchronize_view(
-        &mut self,
-        ctx: &mut ViewFeedbackContext,
-        ht: &mut HitTestTreeManager<AppUpdateContext<'a>>,
-    ) {
+    pub fn synchronize_view(&mut self) {
         for cb in self.atlas_size_view_feedbacks.iter_mut() {
             cb(&self.atlas_size);
         }
@@ -275,35 +259,37 @@ impl<'a> AppState<'a> {
         }
 
         for cb in self.visible_menu_view_feedbacks.iter_mut() {
-            cb(ctx, ht, self.visible_menu);
+            cb(self.visible_menu);
         }
     }
 
     // TODO: unregister
-    pub fn register_sprites_view_feedback(&mut self, mut fb: impl FnMut(&[SpriteInfo]) + 'a) {
+    pub fn register_sprites_view_feedback(
+        &mut self,
+        mut fb: impl FnMut(&[SpriteInfo]) + 'subsystem,
+    ) {
         fb(&self.sprites);
         self.sprites_view_feedbacks.push(Box::new(fb));
     }
 
     // TODO: unregister
-    pub fn register_atlas_size_view_feedback(&mut self, mut fb: impl FnMut(&SizePixels) + 'a) {
+    pub fn register_atlas_size_view_feedback(
+        &mut self,
+        mut fb: impl FnMut(&SizePixels) + 'subsystem,
+    ) {
         fb(&self.atlas_size);
         self.atlas_size_view_feedbacks.push(Box::new(fb));
     }
 
     // TODO: unregister
-    pub fn register_visible_menu_view_feedback(
-        &mut self,
-        fb: impl FnMut(&mut ViewFeedbackContext, &mut HitTestTreeManager<AppUpdateContext<'a>>, bool)
-        + 'a,
-    ) {
+    pub fn register_visible_menu_view_feedback(&mut self, fb: impl FnMut(bool) + 'subsystem) {
         self.visible_menu_view_feedbacks.push(Box::new(fb));
     }
 
     // TODO: unregister
     pub fn register_current_open_path_view_feedback(
         &mut self,
-        mut fb: impl FnMut(&Option<PathBuf>) + 'a,
+        mut fb: impl FnMut(&Option<PathBuf>) + 'subsystem,
     ) {
         fb(&self.current_open_path);
         self.current_open_path_view_feedbacks.push(Box::new(fb));

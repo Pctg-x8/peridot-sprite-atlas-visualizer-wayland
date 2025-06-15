@@ -138,15 +138,11 @@ impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
     fn on_pointer_enter(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
-        _ht: &mut HitTestTreeManager<Self::Context>,
-        _args: PointerActionArgs,
+        _context: &mut Self::Context,
+        _args: &PointerActionArgs,
     ) -> EventContinueControl {
         if self.confirm_button.is_sender(sender) {
-            self.confirm_button.on_hover(
-                &mut context.for_view_feedback.composite_tree,
-                context.for_view_feedback.current_sec,
-            );
+            self.confirm_button.on_hover();
 
             return EventContinueControl::STOP_PROPAGATION;
         }
@@ -165,15 +161,11 @@ impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
     fn on_pointer_leave(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
-        _ht: &mut HitTestTreeManager<Self::Context>,
-        _args: PointerActionArgs,
+        _context: &mut Self::Context,
+        _args: &PointerActionArgs,
     ) -> EventContinueControl {
         if self.confirm_button.is_sender(sender) {
-            self.confirm_button.on_leave(
-                &mut context.for_view_feedback.composite_tree,
-                context.for_view_feedback.current_sec,
-            );
+            self.confirm_button.on_leave();
 
             return EventContinueControl::STOP_PROPAGATION;
         }
@@ -193,14 +185,10 @@ impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
         &self,
         sender: HitTestTreeRef,
         context: &mut Self::Context,
-        _ht: &mut HitTestTreeManager<Self::Context>,
-        _args: PointerActionArgs,
+        _args: &PointerActionArgs,
     ) -> EventContinueControl {
         if self.confirm_button.is_sender(sender) {
-            self.confirm_button.on_press(
-                &mut context.for_view_feedback.composite_tree,
-                context.for_view_feedback.current_sec,
-            );
+            self.confirm_button.on_press();
 
             return EventContinueControl::STOP_PROPAGATION;
         }
@@ -222,15 +210,11 @@ impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
     fn on_pointer_up(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
-        _ht: &mut HitTestTreeManager<Self::Context>,
-        _args: PointerActionArgs,
+        _context: &mut Self::Context,
+        _args: &PointerActionArgs,
     ) -> EventContinueControl {
         if self.confirm_button.is_sender(sender) {
-            self.confirm_button.on_release(
-                &mut context.for_view_feedback.composite_tree,
-                context.for_view_feedback.current_sec,
-            );
+            self.confirm_button.on_release();
 
             return EventContinueControl::STOP_PROPAGATION;
         }
@@ -250,8 +234,7 @@ impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
         &self,
         sender: HitTestTreeRef,
         context: &mut Self::Context,
-        _ht: &mut HitTestTreeManager<Self::Context>,
-        _args: PointerActionArgs,
+        _args: &PointerActionArgs,
     ) -> EventContinueControl {
         if self.confirm_button.is_sender(sender) {
             context
@@ -368,5 +351,16 @@ impl Presenter {
 
     pub fn unmount(&self, ct: &mut CompositeTree) {
         self.action_handler.mask_view.unmount_visual(ct);
+    }
+
+    pub fn update<ActionContext>(
+        &self,
+        ct: &mut CompositeTree,
+        ht: &mut HitTestTreeManager<ActionContext>,
+        current_sec: f32,
+    ) {
+        self.action_handler
+            .confirm_button
+            .update(ct, ht, current_sec);
     }
 }

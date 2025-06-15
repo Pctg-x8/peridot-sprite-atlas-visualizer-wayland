@@ -5,11 +5,13 @@ use core::{
 
 mod cursor_shape;
 mod ffi;
+mod xdg_foreign;
 mod xdg_shell;
 use ffi::wl_proxy_destroy;
 
 pub use self::cursor_shape::*;
 pub use self::ffi::Fixed;
+pub use self::xdg_foreign::*;
 pub use self::xdg_shell::*;
 
 const NEWID_ARG: ffi::Argument = ffi::Argument { n: 0 };

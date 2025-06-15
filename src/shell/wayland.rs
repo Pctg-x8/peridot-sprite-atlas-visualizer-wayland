@@ -190,6 +190,7 @@ pub struct AppShell<'a> {
     display: wl::Display,
     surface: core::ptr::NonNull<wl::Surface>,
     xdg_surface: core::ptr::NonNull<wl::XdgSurface>,
+    zxdg_exporter_v2: Option<core::ptr::NonNull<wl::ZxdgExporterV2>>,
     cursor_shape_device: core::ptr::NonNull<wl::WpCursorShapeDeviceV1>,
     frame_callback: core::ptr::NonNull<wl::Callback>,
 }
@@ -203,6 +204,7 @@ impl<'a> AppShell<'a> {
             xdg_wm_base: Option<wl::Owned<wl::XdgWmBase>>,
             seat: Option<wl::Owned<wl::Seat>>,
             cursor_shape_manager: Option<wl::Owned<WpCursorShapeManagerV1>>,
+            zxdg_exporter_v2: Option<wl::Owned<wl::ZxdgExporterV2>>,
         }
         impl wl::RegistryListener for RegistryListener {
             #[tracing::instrument(name = "RegistryListener::global", skip(self, registry))]
@@ -254,6 +256,16 @@ impl<'a> AppShell<'a> {
                         }
                     };
                 }
+
+                if interface == c"zxdg_exporter_v2" {
+                    self.zxdg_exporter_v2 = match registry.bind(name, version) {
+                        Ok(x) => Some(x),
+                        Err(e) => {
+                            tracing::warn!(reason = ?e, "Failed to bind");
+                            None
+                        }
+                    }
+                }
             }
 
             fn global_remove(&mut self, _registry: &mut wl::Registry, name: u32) {
@@ -265,6 +277,7 @@ impl<'a> AppShell<'a> {
             xdg_wm_base: None,
             seat: None,
             cursor_shape_manager: None,
+            zxdg_exporter_v2: None,
         };
         if let Err(e) = registry.add_listener(&mut rl) {
             tracing::warn!(target = "registry", reason = ?e, "Failed to set listener");
@@ -274,18 +287,26 @@ impl<'a> AppShell<'a> {
         }
         drop(registry);
 
-        let (mut compositor, mut xdg_wm_base, mut seat, mut cursor_shape_manager);
+        let (
+            mut compositor,
+            mut xdg_wm_base,
+            mut seat,
+            mut cursor_shape_manager,
+            mut zxdg_exporter_v2,
+        );
         match rl {
             RegistryListener {
                 compositor: Some(compositor1),
                 xdg_wm_base: Some(xdg_wm_base1),
                 seat: Some(seat1),
                 cursor_shape_manager: Some(cursor_shape_manager1),
+                zxdg_exporter_v2: zxdg_exporter_v21,
             } => {
                 compositor = compositor1;
                 xdg_wm_base = xdg_wm_base1;
                 seat = seat1;
                 cursor_shape_manager = cursor_shape_manager1;
+                zxdg_exporter_v2 = zxdg_exporter_v21;
             }
             rl => {
                 if rl.compositor.is_none() {
@@ -437,6 +458,7 @@ impl<'a> AppShell<'a> {
             xdg_surface: xdg_surface.unwrap(),
             cursor_shape_device: cursor_shape_device.unwrap(),
             frame_callback: frame.unwrap(),
+            zxdg_exporter_v2: zxdg_exporter_v2.map(|x| x.unwrap()),
         }
     }
 

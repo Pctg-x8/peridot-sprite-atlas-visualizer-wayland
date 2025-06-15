@@ -20,6 +20,7 @@ pub struct CommonButtonView {
     preferred_height: f32,
     hovering: Cell<bool>,
     pressing: Cell<bool>,
+    is_dirty: Cell<bool>,
 }
 impl CommonButtonView {
     const PADDING_H: f32 = 24.0;
@@ -253,6 +254,7 @@ impl CommonButtonView {
             preferred_height: Self::PADDING_V * 2.0 + text_layout.height() / init.ui_scale_factor,
             hovering: Cell::new(false),
             pressing: Cell::new(false),
+            is_dirty: Cell::new(false),
         }
     }
 
@@ -298,20 +300,28 @@ impl CommonButtonView {
         ht.add_child(ht_parent, self.ht_root);
     }
 
-    fn update_button_bg_opacity(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
+    pub fn update<ActionContext>(
+        &self,
+        ct: &mut CompositeTree,
+        ht: &mut HitTestTreeManager<ActionContext>,
+        current_sec: f32,
+    ) {
+        if !self.is_dirty.replace(false) {
+            // not modified
+            return;
+        }
+
         let opacity = match (self.hovering.get(), self.pressing.get()) {
             (_, true) => 0.375,
             (true, _) => 0.25,
             _ => 0.0,
         };
 
-        let current = match composite_tree.get(self.ct_root).composite_mode {
-            CompositeMode::ColorTint(ref x) => {
-                x.evaluate(current_sec, composite_tree.parameter_store())
-            }
+        let current = match ct.get(self.ct_root).composite_mode {
+            CompositeMode::ColorTint(ref x) => x.evaluate(current_sec, ct.parameter_store()),
             _ => unreachable!(),
         };
-        composite_tree.get_mut(self.ct_root).composite_mode =
+        ct.get_mut(self.ct_root).composite_mode =
             CompositeMode::ColorTint(AnimatableColor::Animated(
                 current,
                 AnimationData {
@@ -323,29 +333,28 @@ impl CommonButtonView {
                     event_on_complete: None,
                 },
             ));
-        composite_tree.mark_dirty(self.ct_root);
+        ct.mark_dirty(self.ct_root);
     }
 
-    pub fn on_hover(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
+    pub fn on_hover(&self) {
         self.hovering.set(true);
-        self.update_button_bg_opacity(composite_tree, current_sec);
+        self.is_dirty.set(true);
     }
 
-    pub fn on_leave(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
+    pub fn on_leave(&self) {
         self.hovering.set(false);
         // はずれたらpressingもなかったことにする
         self.pressing.set(false);
-
-        self.update_button_bg_opacity(composite_tree, current_sec);
+        self.is_dirty.set(true);
     }
 
-    pub fn on_press(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
+    pub fn on_press(&self) {
         self.pressing.set(true);
-        self.update_button_bg_opacity(composite_tree, current_sec);
+        self.is_dirty.set(true);
     }
 
-    pub fn on_release(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
+    pub fn on_release(&self) {
         self.pressing.set(false);
-        self.update_button_bg_opacity(composite_tree, current_sec);
+        self.is_dirty.set(true);
     }
 }

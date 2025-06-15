@@ -12,11 +12,13 @@ mod subsystem;
 mod svg;
 mod text;
 mod thirdparty;
+mod trigger_cell;
 mod uikit;
 
 use std::{
     cell::{Cell, RefCell, UnsafeCell},
     collections::{HashMap, VecDeque},
+    os::fd::AsRawFd,
     path::Path,
     rc::Rc,
 };
@@ -42,9 +44,12 @@ use input::{EventContinueControl, PointerInputManager};
 use subsystem::{StagingScratchBufferManager, Subsystem};
 use text::TextLayout;
 use thirdparty::{
-    dbus, fontconfig,
+    dbus,
+    epoll::{EPOLLERR, EPOLLHUP, EPOLLIN, EPOLLOUT, Epoll, EpollData, epoll_event},
+    fontconfig,
     freetype::{self, FreeType},
 };
+use trigger_cell::TriggerCell;
 
 pub enum AppEvent {
     ToplevelWindowConfigure {
@@ -76,6 +81,8 @@ pub enum AppEvent {
     UIPopupUnmount {
         id: uuid::Uuid,
     },
+    AppMenuToggle,
+    AppMenuRequestAddSprite,
 }
 
 pub struct AppEventBus {
@@ -148,12 +155,21 @@ pub struct RoundedRectConstants {
     pub corner_radius: f32,
 }
 
+pub trait ViewUpdate<ActionContext> {
+    fn update(
+        &self,
+        ct: &mut CompositeTree,
+        ht: &mut HitTestTreeManager<ActionContext>,
+        current_sec: f32,
+    );
+}
+
 pub struct FontSet {
     pub ui_default: freetype::Owned<freetype::Face>,
 }
 
-pub struct ViewInitContext<'d, 'r> {
-    pub subsystem: &'d Subsystem,
+pub struct ViewInitContext<'d, 'r, 'subsystem> {
+    pub subsystem: &'subsystem Subsystem,
     pub staging_scratch_buffer: &'r mut StagingScratchBufferManager<'d>,
     pub atlas: &'r mut CompositionSurfaceAtlas<'d>,
     pub ui_scale_factor: f32,
@@ -163,22 +179,18 @@ pub struct ViewInitContext<'d, 'r> {
     pub fonts: &'r mut FontSet,
 }
 
-pub struct PresenterInitContext<'d, 'r> {
-    pub for_view: ViewInitContext<'d, 'r>,
-    pub app_state: &'r mut AppState<'d>,
+pub struct PresenterInitContext<'d, 'r, 'state, 'subsystem> {
+    pub for_view: ViewInitContext<'d, 'r, 'subsystem>,
+    pub app_state: &'state mut AppState<'subsystem>,
 }
 
-pub struct ViewFeedbackContext {
-    pub composite_tree: CompositeTree,
+pub struct ViewFeedbackContext<'d> {
+    pub composite_tree: &'d mut CompositeTree,
     pub current_sec: f32,
 }
 
 pub struct AppUpdateContext<'d> {
-    pub for_view_feedback: ViewFeedbackContext,
-    pub state: AppState<'d>,
-    pub editing_atlas_renderer: Rc<RefCell<EditingAtlasRenderer<'d>>>,
     pub event_queue: &'d AppEventBus,
-    pub dbus: &'d dbus::Connection,
 }
 
 pub struct SpriteListToggleButtonView {
@@ -189,6 +201,8 @@ pub struct SpriteListToggleButtonView {
     ui_scale_factor: Cell<f32>,
     hovering: Cell<bool>,
     pressing: Cell<bool>,
+    is_dirty: Cell<bool>,
+    place_inner: TriggerCell<bool>,
 }
 impl SpriteListToggleButtonView {
     const SIZE: f32 = 20.0;
@@ -563,7 +577,10 @@ impl SpriteListToggleButtonView {
                 Self::SIZE * init.ui_scale_factor,
                 Self::SIZE * init.ui_scale_factor,
             ],
-            offset: [0.0, 8.0 * init.ui_scale_factor],
+            offset: [
+                (-Self::SIZE - 8.0) * init.ui_scale_factor,
+                8.0 * init.ui_scale_factor,
+            ],
             relative_offset_adjustment: [1.0, 0.0],
             instance_slot_index: Some(init.composite_instance_manager.alloc()),
             texatlas_rect: circle_atlas_rect,
@@ -592,6 +609,7 @@ impl SpriteListToggleButtonView {
             width: Self::SIZE,
             height: Self::SIZE,
             top: 8.0,
+            left: -Self::SIZE - 8.0,
             left_adjustment_factor: 1.0,
             ..Default::default()
         });
@@ -604,6 +622,8 @@ impl SpriteListToggleButtonView {
             ui_scale_factor: Cell::new(init.ui_scale_factor),
             hovering: Cell::new(false),
             pressing: Cell::new(false),
+            is_dirty: Cell::new(false),
+            place_inner: TriggerCell::new(true),
         }
     }
 
@@ -618,75 +638,70 @@ impl SpriteListToggleButtonView {
         ht.add_child(ht_parent, self.ht_root);
     }
 
-    pub fn place_inner(
+    pub fn update<ActionContext>(
         &self,
         ct: &mut CompositeTree,
-        ht: &mut HitTestTreeManager<AppUpdateContext>,
+        ht: &mut HitTestTreeManager<ActionContext>,
         current_sec: f32,
     ) {
         let ui_scale_factor = self.ui_scale_factor.get();
 
-        ct.get_mut(self.ct_root).offset[0] = 8.0 * ui_scale_factor;
-        ct.get_mut(self.ct_root).animation_data_left = Some(AnimationData {
-            to_value: (-Self::SIZE - 8.0) * ui_scale_factor,
-            start_sec: current_sec,
-            end_sec: current_sec + 0.25,
-            curve_p1: (0.25, 0.8),
-            curve_p2: (0.5, 1.0),
-            event_on_complete: None,
-        });
-        ct.mark_dirty(self.ct_root);
-        ht.get_data_mut(self.ht_root).left = -Self::SIZE - 8.0;
-    }
+        if let Some(place_inner) = self.place_inner.get_if_triggered() {
+            if place_inner {
+                ct.get_mut(self.ct_root).offset[0] = 8.0 * ui_scale_factor;
+                ct.get_mut(self.ct_root).animation_data_left = Some(AnimationData {
+                    to_value: (-Self::SIZE - 8.0) * ui_scale_factor,
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.25,
+                    curve_p1: (0.25, 0.8),
+                    curve_p2: (0.5, 1.0),
+                    event_on_complete: None,
+                });
+                ct.mark_dirty(self.ct_root);
+                ht.get_data_mut(self.ht_root).left = -Self::SIZE - 8.0;
+            } else {
+                ct.get_mut(self.ct_root).offset[0] = (-Self::SIZE - 8.0) * ui_scale_factor;
+                ct.get_mut(self.ct_root).animation_data_left = Some(AnimationData {
+                    to_value: 8.0 * ui_scale_factor,
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.25,
+                    curve_p1: (0.25, 0.8),
+                    curve_p2: (0.5, 1.0),
+                    event_on_complete: None,
+                });
+                ct.mark_dirty(self.ct_root);
+                ht.get_data_mut(self.ht_root).left = 8.0;
+            }
 
-    pub fn place_outer(
-        &self,
-        ct: &mut CompositeTree,
-        ht: &mut HitTestTreeManager<AppUpdateContext>,
-        current_sec: f32,
-    ) {
-        let ui_scale_factor = self.ui_scale_factor.get();
+            let ct_icon = ct.get_mut(self.ct_icon);
+            ct_icon.texatlas_rect = self.icon_atlas_rect.clone();
+            if !place_inner {
+                // flip icon when placed outer
+                core::mem::swap(
+                    &mut ct_icon.texatlas_rect.left,
+                    &mut ct_icon.texatlas_rect.right,
+                );
+            }
 
-        ct.get_mut(self.ct_root).offset[0] = (-Self::SIZE - 8.0) * ui_scale_factor;
-        ct.get_mut(self.ct_root).animation_data_left = Some(AnimationData {
-            to_value: 8.0 * ui_scale_factor,
-            start_sec: current_sec,
-            end_sec: current_sec + 0.25,
-            curve_p1: (0.25, 0.8),
-            curve_p2: (0.5, 1.0),
-            event_on_complete: None,
-        });
-        ct.mark_dirty(self.ct_root);
-        ht.get_data_mut(self.ht_root).left = 8.0;
-    }
-
-    pub fn flip_icon(&self, flipped: bool, ct: &mut CompositeTree) {
-        let ct_icon = ct.get_mut(self.ct_icon);
-        ct_icon.texatlas_rect = self.icon_atlas_rect.clone();
-        if flipped {
-            core::mem::swap(
-                &mut ct_icon.texatlas_rect.left,
-                &mut ct_icon.texatlas_rect.right,
-            );
+            ct.mark_dirty(self.ct_icon);
         }
 
-        ct.mark_dirty(self.ct_icon);
-    }
+        if !self.is_dirty.replace(false) {
+            // not modified
+            return;
+        }
 
-    fn update_button_bg_opacity(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
         let opacity = match (self.hovering.get(), self.pressing.get()) {
             (_, true) => 0.375,
             (true, _) => 0.25,
             _ => 0.0,
         };
 
-        let current = match composite_tree.get(self.ct_root).composite_mode {
-            CompositeMode::ColorTint(ref x) => {
-                x.evaluate(current_sec, composite_tree.parameter_store())
-            }
+        let current = match ct.get(self.ct_root).composite_mode {
+            CompositeMode::ColorTint(ref x) => x.evaluate(current_sec, ct.parameter_store()),
             _ => unreachable!(),
         };
-        composite_tree.get_mut(self.ct_root).composite_mode =
+        ct.get_mut(self.ct_root).composite_mode =
             CompositeMode::ColorTint(AnimatableColor::Animated(
                 current,
                 AnimationData {
@@ -698,30 +713,37 @@ impl SpriteListToggleButtonView {
                     event_on_complete: None,
                 },
             ));
-        composite_tree.mark_dirty(self.ct_root);
+        ct.mark_dirty(self.ct_root);
     }
 
-    pub fn on_hover(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
+    pub fn place_inner(&self) {
+        self.place_inner.set(true);
+    }
+
+    pub fn place_outer(&self) {
+        self.place_inner.set(false);
+    }
+
+    pub fn on_hover(&self) {
         self.hovering.set(true);
-        self.update_button_bg_opacity(composite_tree, current_sec);
+        self.is_dirty.set(true);
     }
 
-    pub fn on_leave(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
+    pub fn on_leave(&self) {
         self.hovering.set(false);
         // はずれたらpressingもなかったことにする
         self.pressing.set(false);
-
-        self.update_button_bg_opacity(composite_tree, current_sec);
+        self.is_dirty.set(true);
     }
 
-    pub fn on_press(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
+    pub fn on_press(&self) {
         self.pressing.set(true);
-        self.update_button_bg_opacity(composite_tree, current_sec);
+        self.is_dirty.set(true);
     }
 
-    pub fn on_release(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
+    pub fn on_release(&self) {
         self.pressing.set(false);
-        self.update_button_bg_opacity(composite_tree, current_sec);
+        self.is_dirty.set(true);
     }
 }
 
@@ -969,7 +991,9 @@ pub struct SpriteListPaneView {
     ht_frame: HitTestTreeRef,
     ht_resize_area: HitTestTreeRef,
     width: Cell<f32>,
+    shown: TriggerCell<bool>,
     ui_scale_factor: Cell<f32>,
+    is_dirty: Cell<bool>,
 }
 impl SpriteListPaneView {
     const CORNER_RADIUS: f32 = 24.0;
@@ -1498,7 +1522,9 @@ impl SpriteListPaneView {
             ht_frame,
             ht_resize_area,
             width: Cell::new(Self::INIT_WIDTH),
+            shown: TriggerCell::new(true),
             ui_scale_factor: Cell::new(init.ui_scale_factor as _),
+            is_dirty: Cell::new(false),
         }
     }
 
@@ -1513,55 +1539,63 @@ impl SpriteListPaneView {
         ht.add_child(ht_parent, self.ht_frame);
     }
 
-    pub fn set_width(
+    pub fn update<ActionContext>(
         &self,
-        width: f32,
         ct: &mut CompositeTree,
-        ht: &mut HitTestTreeManager<AppUpdateContext>,
+        ht: &mut HitTestTreeManager<ActionContext>,
+        current_sec: f32,
     ) {
+        if let Some(shown) = self.shown.get_if_triggered() {
+            if shown {
+                ct.get_mut(self.ct_root).offset[0] = -self.width.get() * self.ui_scale_factor.get();
+                ct.get_mut(self.ct_root).animation_data_left = Some(AnimationData {
+                    to_value: Self::FLOATING_MARGIN * self.ui_scale_factor.get(),
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.25,
+                    curve_p1: (0.4, 1.25),
+                    curve_p2: (0.5, 1.0),
+                    event_on_complete: None,
+                });
+                ct.mark_dirty(self.ct_root);
+                ht.get_data_mut(self.ht_frame).left = Self::FLOATING_MARGIN;
+            } else {
+                ct.get_mut(self.ct_root).offset[0] =
+                    Self::FLOATING_MARGIN * self.ui_scale_factor.get();
+                ct.get_mut(self.ct_root).animation_data_left = Some(AnimationData {
+                    to_value: -self.width.get() * self.ui_scale_factor.get(),
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.25,
+                    curve_p1: (0.4, 1.25),
+                    curve_p2: (0.5, 1.0),
+                    event_on_complete: None,
+                });
+                ct.mark_dirty(self.ct_root);
+                ht.get_data_mut(self.ht_frame).left = -self.width.get();
+            }
+        }
+
+        if !self.is_dirty.replace(false) {
+            // no modification
+            return;
+        }
+
+        let width = self.width.get();
         ct.get_mut(self.ct_root).size[0] = width * self.ui_scale_factor.get();
         ct.mark_dirty(self.ct_root);
         ht.get_data_mut(self.ht_frame).width = width;
+    }
 
+    pub fn set_width(&self, width: f32) {
         self.width.set(width);
+        self.is_dirty.set(true);
     }
 
-    pub fn show(
-        &self,
-        ct: &mut CompositeTree,
-        ht: &mut HitTestTreeManager<AppUpdateContext>,
-        current_sec: f32,
-    ) {
-        ct.get_mut(self.ct_root).offset[0] = -self.width.get() * self.ui_scale_factor.get();
-        ct.get_mut(self.ct_root).animation_data_left = Some(AnimationData {
-            to_value: Self::FLOATING_MARGIN * self.ui_scale_factor.get(),
-            start_sec: current_sec,
-            end_sec: current_sec + 0.25,
-            curve_p1: (0.4, 1.25),
-            curve_p2: (0.5, 1.0),
-            event_on_complete: None,
-        });
-        ct.mark_dirty(self.ct_root);
-        ht.get_data_mut(self.ht_frame).left = Self::FLOATING_MARGIN;
+    pub fn show(&self) {
+        self.shown.set(true);
     }
 
-    pub fn hide(
-        &self,
-        ct: &mut CompositeTree,
-        ht: &mut HitTestTreeManager<AppUpdateContext>,
-        current_sec: f32,
-    ) {
-        ct.get_mut(self.ct_root).offset[0] = Self::FLOATING_MARGIN * self.ui_scale_factor.get();
-        ct.get_mut(self.ct_root).animation_data_left = Some(AnimationData {
-            to_value: -self.width.get() * self.ui_scale_factor.get(),
-            start_sec: current_sec,
-            end_sec: current_sec + 0.25,
-            curve_p1: (0.4, 1.25),
-            curve_p2: (0.5, 1.0),
-            event_on_complete: None,
-        });
-        ct.mark_dirty(self.ct_root);
-        ht.get_data_mut(self.ht_frame).left = -self.width.get();
+    pub fn hide(&self) {
+        self.shown.set(false);
     }
 }
 
@@ -1586,15 +1620,11 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
     fn on_pointer_enter(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
-        _ht: &mut HitTestTreeManager<Self::Context>,
-        _args: hittest::PointerActionArgs,
+        _context: &mut Self::Context,
+        _args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.toggle_button_view.ht_root {
-            self.toggle_button_view.on_hover(
-                &mut context.for_view_feedback.composite_tree,
-                context.for_view_feedback.current_sec,
-            );
+            self.toggle_button_view.on_hover();
 
             return EventContinueControl::STOP_PROPAGATION;
         }
@@ -1605,15 +1635,11 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
     fn on_pointer_leave(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
-        _ht: &mut HitTestTreeManager<Self::Context>,
-        _args: hittest::PointerActionArgs,
+        _context: &mut Self::Context,
+        _args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.toggle_button_view.ht_root {
-            self.toggle_button_view.on_leave(
-                &mut context.for_view_feedback.composite_tree,
-                context.for_view_feedback.current_sec,
-            );
+            self.toggle_button_view.on_leave();
 
             return EventContinueControl::STOP_PROPAGATION;
         }
@@ -1624,9 +1650,8 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
     fn on_pointer_down(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
-        _ht: &mut HitTestTreeManager<Self::Context>,
-        args: hittest::PointerActionArgs,
+        _context: &mut Self::Context,
+        args: &hittest::PointerActionArgs,
     ) -> input::EventContinueControl {
         if self.shown.get() {
             if sender == self.view.ht_frame {
@@ -1644,10 +1669,7 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
         }
 
         if sender == self.toggle_button_view.ht_root {
-            self.toggle_button_view.on_press(
-                &mut context.for_view_feedback.composite_tree,
-                context.for_view_feedback.current_sec,
-            );
+            self.toggle_button_view.on_press();
 
             return EventContinueControl::STOP_PROPAGATION;
         }
@@ -1658,9 +1680,8 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
     fn on_pointer_move(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
-        ht: &mut HitTestTreeManager<Self::Context>,
-        args: hittest::PointerActionArgs,
+        _context: &mut Self::Context,
+        args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         if self.shown.get() {
             if sender == self.view.ht_frame {
@@ -1671,8 +1692,7 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
             if sender == self.ht_resize_area {
                 if let Some((base_width, base_cx)) = self.resize_state.get() {
                     let w = (base_width + (args.client_x - base_cx)).max(16.0);
-                    self.view
-                        .set_width(w, &mut context.for_view_feedback.composite_tree, ht);
+                    self.view.set_width(w);
 
                     return EventContinueControl::STOP_PROPAGATION;
                 }
@@ -1685,9 +1705,8 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
     fn on_pointer_up(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
-        ht: &mut HitTestTreeManager<Self::Context>,
-        args: hittest::PointerActionArgs,
+        _context: &mut Self::Context,
+        args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         if self.shown.get() {
             if sender == self.view.ht_frame {
@@ -1698,8 +1717,7 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
             if sender == self.ht_resize_area {
                 if let Some((base_width, base_cx)) = self.resize_state.replace(None) {
                     let w = (base_width + (args.client_x - base_cx)).max(16.0);
-                    self.view
-                        .set_width(w, &mut context.for_view_feedback.composite_tree, ht);
+                    self.view.set_width(w);
 
                     return EventContinueControl::RELEASE_CAPTURE_ELEMENT;
                 }
@@ -1707,10 +1725,7 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
         }
 
         if sender == self.toggle_button_view.ht_root {
-            self.toggle_button_view.on_release(
-                &mut context.for_view_feedback.composite_tree,
-                context.for_view_feedback.current_sec,
-            );
+            self.toggle_button_view.on_release();
 
             return EventContinueControl::STOP_PROPAGATION;
         }
@@ -1721,9 +1736,8 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
     fn on_click(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
-        ht: &mut HitTestTreeManager<Self::Context>,
-        _args: hittest::PointerActionArgs,
+        _context: &mut Self::Context,
+        _args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         if self.shown.get() && sender == self.view.ht_frame {
             // guard fallback
@@ -1735,31 +1749,12 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
             self.shown.set(show);
 
             if show {
-                self.view.show(
-                    &mut context.for_view_feedback.composite_tree,
-                    ht,
-                    context.for_view_feedback.current_sec,
-                );
-                self.toggle_button_view.place_inner(
-                    &mut context.for_view_feedback.composite_tree,
-                    ht,
-                    context.for_view_feedback.current_sec,
-                );
+                self.view.show();
+                self.toggle_button_view.place_inner();
             } else {
-                self.view.hide(
-                    &mut context.for_view_feedback.composite_tree,
-                    ht,
-                    context.for_view_feedback.current_sec,
-                );
-                self.toggle_button_view.place_outer(
-                    &mut context.for_view_feedback.composite_tree,
-                    ht,
-                    context.for_view_feedback.current_sec,
-                );
+                self.view.hide();
+                self.toggle_button_view.place_outer();
             }
-
-            self.toggle_button_view
-                .flip_icon(!show, &mut context.for_view_feedback.composite_tree);
 
             return EventContinueControl::STOP_PROPAGATION
                 | EventContinueControl::RECOMPUTE_POINTER_ENTER;
@@ -1772,7 +1767,7 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
 pub struct SpriteListPanePresenter {
     view: Rc<SpriteListPaneView>,
     cell_view: SpriteListCellView,
-    _ht_action_handler: Rc<SpriteListPaneActionHandler>,
+    ht_action_handler: Rc<SpriteListPaneActionHandler>,
 }
 impl SpriteListPanePresenter {
     pub fn new(init: &mut PresenterInitContext, header_height: f32) -> Self {
@@ -1787,7 +1782,6 @@ impl SpriteListPanePresenter {
             init.for_view.ht,
             view.ht_frame,
         );
-        toggle_button_view.place_inner(init.for_view.composite_tree, init.for_view.ht, -0.25);
 
         cell_view.mount(view.ct_root, init.for_view.composite_tree);
 
@@ -1812,7 +1806,7 @@ impl SpriteListPanePresenter {
         Self {
             view,
             cell_view,
-            _ht_action_handler: ht_action_handler,
+            ht_action_handler,
         }
     }
 
@@ -1824,6 +1818,18 @@ impl SpriteListPanePresenter {
         ht_parent: HitTestTreeRef,
     ) {
         self.view.mount(ct, ct_parent, ht, ht_parent);
+    }
+
+    pub fn update<ActionContext>(
+        &self,
+        ct: &mut CompositeTree,
+        ht: &mut HitTestTreeManager<ActionContext>,
+        current_sec: f32,
+    ) {
+        self.ht_action_handler.view.update(ct, ht, current_sec);
+        self.ht_action_handler
+            .toggle_button_view
+            .update(ct, ht, current_sec);
     }
 }
 
@@ -1842,9 +1848,12 @@ struct AppMenuButtonView {
     ht_root: HitTestTreeRef,
     left: f32,
     top: f32,
+    show_delay_sec: f32,
     ui_scale_factor: f32,
+    shown: TriggerCell<bool>,
     hovering: Cell<bool>,
     pressing: Cell<bool>,
+    is_dirty: Cell<bool>,
     command_id: AppMenuCommandIdentifier,
 }
 impl AppMenuButtonView {
@@ -1863,6 +1872,7 @@ impl AppMenuButtonView {
         icon_path: impl AsRef<Path>,
         left: f32,
         top: f32,
+        show_delay_sec: f32,
         command_id: AppMenuCommandIdentifier,
     ) -> Self {
         let label_layout = TextLayout::build_simple(label, &mut init.fonts.ui_default);
@@ -2831,9 +2841,12 @@ impl AppMenuButtonView {
             ht_root,
             left,
             top,
+            show_delay_sec,
             ui_scale_factor: init.ui_scale_factor,
+            shown: TriggerCell::new(false),
             hovering: Cell::new(false),
             pressing: Cell::new(false),
+            is_dirty: Cell::new(false),
             command_id,
         }
     }
@@ -2849,157 +2862,173 @@ impl AppMenuButtonView {
         ht.add_child(ht_parent, self.ht_root);
     }
 
-    pub fn show(&self, ct: &mut CompositeTree, current_sec: f32) {
-        ct.parameter_store_mut().set_float(
-            self.ct_bg_alpha_rate_shown,
-            AnimatableFloat::Animated(
-                0.0,
-                AnimationData {
-                    to_value: 1.0,
-                    start_sec: current_sec,
-                    end_sec: current_sec + 0.25,
+    pub fn update<ActionContext>(
+        &self,
+        ct: &mut CompositeTree,
+        ht: &mut HitTestTreeManager<ActionContext>,
+        current_sec: f32,
+    ) {
+        if let Some(shown) = self.shown.get_if_triggered() {
+            if shown {
+                ct.parameter_store_mut().set_float(
+                    self.ct_bg_alpha_rate_shown,
+                    AnimatableFloat::Animated(
+                        0.0,
+                        AnimationData {
+                            to_value: 1.0,
+                            start_sec: current_sec + self.show_delay_sec,
+                            end_sec: current_sec + self.show_delay_sec + 0.25,
+                            curve_p1: (0.5, 0.5),
+                            curve_p2: (0.5, 0.5),
+                            event_on_complete: None,
+                        },
+                    ),
+                );
+                ct.get_mut(self.ct_icon).composite_mode =
+                    CompositeMode::ColorTint(AnimatableColor::Animated(
+                        Self::CONTENT_COLOR_HIDDEN,
+                        AnimationData {
+                            start_sec: current_sec + self.show_delay_sec,
+                            end_sec: current_sec + self.show_delay_sec + 0.25,
+                            to_value: Self::CONTENT_COLOR_SHOWN,
+                            curve_p1: (0.5, 0.5),
+                            curve_p2: (0.5, 0.5),
+                            event_on_complete: None,
+                        },
+                    ));
+                ct.get_mut(self.ct_label).composite_mode =
+                    CompositeMode::ColorTint(AnimatableColor::Animated(
+                        Self::CONTENT_COLOR_HIDDEN,
+                        AnimationData {
+                            start_sec: current_sec + self.show_delay_sec,
+                            end_sec: current_sec + self.show_delay_sec + 0.25,
+                            to_value: Self::CONTENT_COLOR_SHOWN,
+                            curve_p1: (0.5, 0.5),
+                            curve_p2: (0.5, 0.5),
+                            event_on_complete: None,
+                        },
+                    ));
+                // TODO: ここでui_scale_factor適用するとui_scale_factorがかわったときにアニメーションが破綻するので別のところにおいたほうがよさそう(CompositeTreeで位置計算するときに適用する)
+                ct.get_mut(self.ct_root).offset[0] = (self.left + 8.0) * self.ui_scale_factor;
+                ct.get_mut(self.ct_root).animation_data_left = Some(AnimationData {
+                    start_sec: current_sec + self.show_delay_sec,
+                    end_sec: current_sec + self.show_delay_sec + 0.25,
+                    to_value: self.left * self.ui_scale_factor,
                     curve_p1: (0.5, 0.5),
-                    curve_p2: (0.5, 0.5),
+                    curve_p2: (0.5, 1.0),
                     event_on_complete: None,
-                },
-            ),
-        );
-        ct.get_mut(self.ct_icon).composite_mode =
-            CompositeMode::ColorTint(AnimatableColor::Animated(
-                Self::CONTENT_COLOR_HIDDEN,
-                AnimationData {
-                    start_sec: current_sec,
-                    end_sec: current_sec + 0.25,
-                    to_value: Self::CONTENT_COLOR_SHOWN,
-                    curve_p1: (0.5, 0.5),
-                    curve_p2: (0.5, 0.5),
-                    event_on_complete: None,
-                },
-            ));
-        ct.get_mut(self.ct_label).composite_mode =
-            CompositeMode::ColorTint(AnimatableColor::Animated(
-                Self::CONTENT_COLOR_HIDDEN,
-                AnimationData {
-                    start_sec: current_sec,
-                    end_sec: current_sec + 0.25,
-                    to_value: Self::CONTENT_COLOR_SHOWN,
-                    curve_p1: (0.5, 0.5),
-                    curve_p2: (0.5, 0.5),
-                    event_on_complete: None,
-                },
-            ));
-        // TODO: ここでui_scale_factor適用するとui_scale_factorがかわったときにアニメーションが破綻するので別のところにおいたほうがよさそう(CompositeTreeで位置計算するときに適用する)
-        ct.get_mut(self.ct_root).offset[0] = (self.left + 8.0) * self.ui_scale_factor;
-        ct.get_mut(self.ct_root).animation_data_left = Some(AnimationData {
-            start_sec: current_sec,
-            end_sec: current_sec + 0.25,
-            to_value: self.left * self.ui_scale_factor,
-            curve_p1: (0.5, 0.5),
-            curve_p2: (0.5, 1.0),
-            event_on_complete: None,
-        });
+                });
 
-        ct.mark_dirty(self.ct_root);
-        ct.mark_dirty(self.ct_icon);
-        ct.mark_dirty(self.ct_label);
+                ct.mark_dirty(self.ct_root);
+                ct.mark_dirty(self.ct_icon);
+                ct.mark_dirty(self.ct_label);
+            } else {
+                ct.parameter_store_mut().set_float(
+                    self.ct_bg_alpha_rate_shown,
+                    AnimatableFloat::Animated(
+                        1.0,
+                        AnimationData {
+                            to_value: 0.0,
+                            start_sec: current_sec,
+                            end_sec: current_sec + 0.25,
+                            curve_p1: (0.5, 0.5),
+                            curve_p2: (0.5, 0.5),
+                            event_on_complete: None,
+                        },
+                    ),
+                );
+                ct.get_mut(self.ct_icon).composite_mode =
+                    CompositeMode::ColorTint(AnimatableColor::Animated(
+                        Self::CONTENT_COLOR_SHOWN,
+                        AnimationData {
+                            start_sec: current_sec,
+                            end_sec: current_sec + 0.25,
+                            to_value: Self::CONTENT_COLOR_HIDDEN,
+                            curve_p1: (0.5, 0.5),
+                            curve_p2: (0.5, 0.5),
+                            event_on_complete: None,
+                        },
+                    ));
+                ct.get_mut(self.ct_label).composite_mode =
+                    CompositeMode::ColorTint(AnimatableColor::Animated(
+                        Self::CONTENT_COLOR_SHOWN,
+                        AnimationData {
+                            start_sec: current_sec,
+                            end_sec: current_sec + 0.25,
+                            to_value: Self::CONTENT_COLOR_HIDDEN,
+                            curve_p1: (0.5, 0.5),
+                            curve_p2: (0.5, 0.5),
+                            event_on_complete: None,
+                        },
+                    ));
+
+                ct.mark_dirty(self.ct_icon);
+                ct.mark_dirty(self.ct_label);
+            }
+        }
+
+        if self.is_dirty.replace(false) {
+            let current = ct
+                .parameter_store()
+                .evaluate_float(self.ct_bg_alpha_rate_pointer, current_sec);
+            let target = match (self.hovering.get(), self.pressing.get()) {
+                (true, true) => 1.0,
+                (false, _) => 0.0,
+                _ => 0.5,
+            };
+
+            ct.parameter_store_mut().set_float(
+                self.ct_bg_alpha_rate_pointer,
+                AnimatableFloat::Animated(
+                    current,
+                    AnimationData {
+                        to_value: target,
+                        start_sec: current_sec,
+                        end_sec: current_sec + 0.1,
+                        curve_p1: (0.5, 0.5),
+                        curve_p2: (0.5, 0.5),
+                        event_on_complete: None,
+                    },
+                ),
+            );
+        }
     }
 
-    pub fn hide(&self, ct: &mut CompositeTree, current_sec: f32) {
-        ct.parameter_store_mut().set_float(
-            self.ct_bg_alpha_rate_shown,
-            AnimatableFloat::Animated(
-                1.0,
-                AnimationData {
-                    to_value: 0.0,
-                    start_sec: current_sec,
-                    end_sec: current_sec + 0.25,
-                    curve_p1: (0.5, 0.5),
-                    curve_p2: (0.5, 0.5),
-                    event_on_complete: None,
-                },
-            ),
-        );
-        ct.get_mut(self.ct_icon).composite_mode =
-            CompositeMode::ColorTint(AnimatableColor::Animated(
-                Self::CONTENT_COLOR_SHOWN,
-                AnimationData {
-                    start_sec: current_sec,
-                    end_sec: current_sec + 0.25,
-                    to_value: Self::CONTENT_COLOR_HIDDEN,
-                    curve_p1: (0.5, 0.5),
-                    curve_p2: (0.5, 0.5),
-                    event_on_complete: None,
-                },
-            ));
-        ct.get_mut(self.ct_label).composite_mode =
-            CompositeMode::ColorTint(AnimatableColor::Animated(
-                Self::CONTENT_COLOR_SHOWN,
-                AnimationData {
-                    start_sec: current_sec,
-                    end_sec: current_sec + 0.25,
-                    to_value: Self::CONTENT_COLOR_HIDDEN,
-                    curve_p1: (0.5, 0.5),
-                    curve_p2: (0.5, 0.5),
-                    event_on_complete: None,
-                },
-            ));
-
-        ct.mark_dirty(self.ct_icon);
-        ct.mark_dirty(self.ct_label);
+    pub fn show(&self) {
+        self.shown.set(true);
     }
 
-    fn update_pointer_opacity_value_rate(&self, ct: &mut CompositeTree, current_sec: f32) {
-        let current = ct
-            .parameter_store()
-            .evaluate_float(self.ct_bg_alpha_rate_pointer, current_sec);
-        let target = match (self.hovering.get(), self.pressing.get()) {
-            (true, true) => 1.0,
-            (false, _) => 0.0,
-            _ => 0.5,
-        };
-
-        ct.parameter_store_mut().set_float(
-            self.ct_bg_alpha_rate_pointer,
-            AnimatableFloat::Animated(
-                current,
-                AnimationData {
-                    to_value: target,
-                    start_sec: current_sec,
-                    end_sec: current_sec + 0.1,
-                    curve_p1: (0.5, 0.5),
-                    curve_p2: (0.5, 0.5),
-                    event_on_complete: None,
-                },
-            ),
-        );
+    pub fn hide(&self) {
+        self.shown.set(false);
     }
 
-    pub fn on_pointer_enter(&self, ct: &mut CompositeTree, current_sec: f32) {
+    pub fn on_pointer_enter(&self) {
         self.hovering.set(true);
-        self.update_pointer_opacity_value_rate(ct, current_sec);
+        self.is_dirty.set(true);
     }
 
-    pub fn on_pointer_leave(&self, ct: &mut CompositeTree, current_sec: f32) {
+    pub fn on_pointer_leave(&self) {
         // はなれた際はpressingもなかったことにする
         self.hovering.set(false);
         self.pressing.set(false);
-        self.update_pointer_opacity_value_rate(ct, current_sec);
+        self.is_dirty.set(true);
     }
 
-    pub fn on_press(&self, ct: &mut CompositeTree, current_sec: f32) {
+    pub fn on_press(&self) {
         self.pressing.set(true);
-        self.update_pointer_opacity_value_rate(ct, current_sec);
+        self.is_dirty.set(true);
     }
 
-    pub fn on_release(&self, ct: &mut CompositeTree, current_sec: f32) {
+    pub fn on_release(&self) {
         self.pressing.set(false);
-        self.update_pointer_opacity_value_rate(ct, current_sec);
+        self.is_dirty.set(true);
     }
 }
 
 struct AppMenuBaseView {
     ct_root: CompositeTreeRef,
     ht_root: HitTestTreeRef,
+    shown: TriggerCell<bool>,
 }
 impl AppMenuBaseView {
     #[tracing::instrument(name = "AppMenuBaseView::new", skip(init))]
@@ -3017,7 +3046,11 @@ impl AppMenuBaseView {
             ..Default::default()
         });
 
-        Self { ct_root, ht_root }
+        Self {
+            ct_root,
+            ht_root,
+            shown: TriggerCell::new(false),
+        }
     }
 
     pub fn mount(
@@ -3031,60 +3064,75 @@ impl AppMenuBaseView {
         ht.add_child(ht_parent, self.ht_root);
     }
 
-    pub fn show(&self, ct: &mut CompositeTree, current_sec: f32) {
-        ct.get_mut(self.ct_root).composite_mode = CompositeMode::FillColorBackdropBlur(
-            AnimatableColor::Animated(
-                [0.0, 0.0, 0.0, 0.0],
-                AnimationData {
-                    start_sec: current_sec,
-                    end_sec: current_sec + 0.25,
-                    to_value: [0.0, 0.0, 0.0, 0.25],
-                    curve_p1: (0.5, 0.5),
-                    curve_p2: (0.5, 0.5),
-                    event_on_complete: None,
-                },
-            ),
-            AnimatableFloat::Animated(
-                0.0,
-                AnimationData {
-                    to_value: 3.0,
-                    start_sec: current_sec,
-                    end_sec: current_sec + 0.25,
-                    curve_p1: (0.5, 0.5),
-                    curve_p2: (0.5, 0.5),
-                    event_on_complete: None,
-                },
-            ),
-        );
-        ct.mark_dirty(self.ct_root);
+    pub fn update<ActionContext>(
+        &self,
+        ct: &mut CompositeTree,
+        ht: &mut HitTestTreeManager<ActionContext>,
+        current_sec: f32,
+    ) {
+        if let Some(shown) = self.shown.get_if_triggered() {
+            if shown {
+                ct.get_mut(self.ct_root).composite_mode = CompositeMode::FillColorBackdropBlur(
+                    AnimatableColor::Animated(
+                        [0.0, 0.0, 0.0, 0.0],
+                        AnimationData {
+                            start_sec: current_sec,
+                            end_sec: current_sec + 0.25,
+                            to_value: [0.0, 0.0, 0.0, 0.25],
+                            curve_p1: (0.5, 0.5),
+                            curve_p2: (0.5, 0.5),
+                            event_on_complete: None,
+                        },
+                    ),
+                    AnimatableFloat::Animated(
+                        0.0,
+                        AnimationData {
+                            to_value: 3.0,
+                            start_sec: current_sec,
+                            end_sec: current_sec + 0.25,
+                            curve_p1: (0.5, 0.5),
+                            curve_p2: (0.5, 0.5),
+                            event_on_complete: None,
+                        },
+                    ),
+                );
+                ct.mark_dirty(self.ct_root);
+            } else {
+                ct.get_mut(self.ct_root).composite_mode = CompositeMode::FillColorBackdropBlur(
+                    AnimatableColor::Animated(
+                        [0.0, 0.0, 0.0, 0.25],
+                        AnimationData {
+                            start_sec: current_sec,
+                            end_sec: current_sec + 0.25,
+                            to_value: [0.0, 0.0, 0.0, 0.0],
+                            curve_p1: (0.5, 0.5),
+                            curve_p2: (0.5, 0.5),
+                            event_on_complete: None,
+                        },
+                    ),
+                    AnimatableFloat::Animated(
+                        3.0,
+                        AnimationData {
+                            to_value: 0.0,
+                            start_sec: current_sec,
+                            end_sec: current_sec + 0.25,
+                            curve_p1: (0.5, 0.5),
+                            curve_p2: (0.5, 0.5),
+                            event_on_complete: None,
+                        },
+                    ),
+                );
+                ct.mark_dirty(self.ct_root);
+            }
+        }
     }
 
-    pub fn hide(&self, ct: &mut CompositeTree, current_sec: f32) {
-        ct.get_mut(self.ct_root).composite_mode = CompositeMode::FillColorBackdropBlur(
-            AnimatableColor::Animated(
-                [0.0, 0.0, 0.0, 0.25],
-                AnimationData {
-                    start_sec: current_sec,
-                    end_sec: current_sec + 0.25,
-                    to_value: [0.0, 0.0, 0.0, 0.0],
-                    curve_p1: (0.5, 0.5),
-                    curve_p2: (0.5, 0.5),
-                    event_on_complete: None,
-                },
-            ),
-            AnimatableFloat::Animated(
-                3.0,
-                AnimationData {
-                    to_value: 0.0,
-                    start_sec: current_sec,
-                    end_sec: current_sec + 0.25,
-                    curve_p1: (0.5, 0.5),
-                    curve_p2: (0.5, 0.5),
-                    event_on_complete: None,
-                },
-            ),
-        );
-        ct.mark_dirty(self.ct_root);
+    pub fn show(&self) {
+        self.shown.set(true);
+    }
+
+    pub fn hide(&self) {
+        self.shown.set(false);
     }
 }
 
@@ -3103,16 +3151,12 @@ impl<'c> HitTestTreeActionHandler<'c> for AppMenuActionHandler {
     fn on_pointer_enter(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
-        _ht: &mut HitTestTreeManager<Self::Context>,
-        _args: hittest::PointerActionArgs,
+        _context: &mut Self::Context,
+        _args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         for v in self.item_views.iter() {
             if sender == v.ht_root {
-                v.on_pointer_enter(
-                    &mut context.for_view_feedback.composite_tree,
-                    context.for_view_feedback.current_sec,
-                );
+                v.on_pointer_enter();
                 return EventContinueControl::STOP_PROPAGATION;
             }
         }
@@ -3127,16 +3171,12 @@ impl<'c> HitTestTreeActionHandler<'c> for AppMenuActionHandler {
     fn on_pointer_leave(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
-        _ht: &mut HitTestTreeManager<Self::Context>,
-        _args: hittest::PointerActionArgs,
+        _context: &mut Self::Context,
+        _args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         for v in self.item_views.iter() {
             if sender == v.ht_root {
-                v.on_pointer_leave(
-                    &mut context.for_view_feedback.composite_tree,
-                    context.for_view_feedback.current_sec,
-                );
+                v.on_pointer_leave();
                 return EventContinueControl::STOP_PROPAGATION;
             }
         }
@@ -3152,23 +3192,17 @@ impl<'c> HitTestTreeActionHandler<'c> for AppMenuActionHandler {
         &self,
         sender: HitTestTreeRef,
         context: &mut Self::Context,
-        ht: &mut HitTestTreeManager<Self::Context>,
-        _args: hittest::PointerActionArgs,
+        _args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         for v in self.item_views.iter() {
             if sender == v.ht_root {
-                v.on_press(
-                    &mut context.for_view_feedback.composite_tree,
-                    context.for_view_feedback.current_sec,
-                );
+                v.on_press();
                 return EventContinueControl::STOP_PROPAGATION;
             }
         }
 
         if sender == self.base_view.ht_root {
-            context
-                .state
-                .toggle_menu(&mut context.for_view_feedback, ht);
+            context.event_queue.push(AppEvent::AppMenuToggle);
 
             return EventContinueControl::STOP_PROPAGATION
                 | EventContinueControl::RECOMPUTE_POINTER_ENTER;
@@ -3181,8 +3215,7 @@ impl<'c> HitTestTreeActionHandler<'c> for AppMenuActionHandler {
         &self,
         sender: HitTestTreeRef,
         _context: &mut Self::Context,
-        _ht: &mut HitTestTreeManager<Self::Context>,
-        _args: hittest::PointerActionArgs,
+        _args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.base_view.ht_root {
             return EventContinueControl::STOP_PROPAGATION;
@@ -3194,16 +3227,12 @@ impl<'c> HitTestTreeActionHandler<'c> for AppMenuActionHandler {
     fn on_pointer_up(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
-        _ht: &mut HitTestTreeManager<Self::Context>,
-        _args: hittest::PointerActionArgs,
+        _context: &mut Self::Context,
+        _args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         for v in self.item_views.iter() {
             if sender == v.ht_root {
-                v.on_release(
-                    &mut context.for_view_feedback.composite_tree,
-                    context.for_view_feedback.current_sec,
-                );
+                v.on_release();
                 return EventContinueControl::STOP_PROPAGATION;
             }
         }
@@ -3219,8 +3248,7 @@ impl<'c> HitTestTreeActionHandler<'c> for AppMenuActionHandler {
         &self,
         sender: HitTestTreeRef,
         context: &mut Self::Context,
-        _ht: &mut HitTestTreeManager<Self::Context>,
-        _args: hittest::PointerActionArgs,
+        _args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         for v in self.item_views.iter() {
             if sender == v.ht_root {
@@ -3228,60 +3256,7 @@ impl<'c> HitTestTreeActionHandler<'c> for AppMenuActionHandler {
                 match v.command_id {
                     AppMenuCommandIdentifier::AddSprite => {
                         println!("Add Sprite");
-
-                        let mut dbus =
-                            dbus::Connection::connect_bus(dbus::BusType::Session).unwrap();
-                        let mut reply = dbus
-                            .send_with_reply(
-                                &mut dbus::Message::new_method_call(
-                                    Some(c"org.freedesktop.portal.Desktop"),
-                                    c"/org/freedesktop/portal/desktop",
-                                    Some(c"org.freedesktop.DBus.Introspectable"),
-                                    c"Introspect",
-                                )
-                                .unwrap(),
-                                None,
-                            )
-                            .unwrap();
-                        // TODO: これUIだして待つべきか？ローカルだからあんまり待たないような気もするが......
-                        reply.block();
-                        let reply_msg = reply.steal_reply().unwrap();
-                        let mut reply_iter = reply_msg.iter();
-                        assert_eq!(reply_iter.arg_type(), b's' as _);
-                        let mut sp = core::mem::MaybeUninit::<*const core::ffi::c_char>::uninit();
-                        unsafe {
-                            reply_iter.get_value_basic(sp.as_mut_ptr() as _);
-                        }
-                        let doc = unsafe {
-                            core::ffi::CStr::from_ptr(sp.assume_init())
-                                .to_str()
-                                .unwrap()
-                        };
-
-                        let mut has_file_chooser = false;
-                        if let Err(e) = dbus::introspect_document::read_toplevel(
-                            &mut quick_xml::Reader::from_str(doc),
-                            |_, ifname, r| {
-                                has_file_chooser =
-                                    ifname.as_ref() == b"org.freedesktop.portal.FileChooser";
-
-                                dbus::introspect_document::skip_read_interface_tag_contents(r)
-                            },
-                        ) {
-                            tracing::warn!(reason = ?e, "Failed to parse introspection document from portal object");
-                        }
-
-                        if !has_file_chooser {
-                            context.event_queue.push(AppEvent::UIMessageDialogRequest {
-                                content: String::from(
-                                    "org.freedesktop.portal.FileChooser not found",
-                                ),
-                            });
-
-                            return EventContinueControl::STOP_PROPAGATION;
-                        }
-
-                        println!("AddSprite: file chooser found!");
+                        context.event_queue.push(AppEvent::AppMenuRequestAddSprite);
                     }
                     AppMenuCommandIdentifier::Save => {
                         println!("Save");
@@ -3302,7 +3277,7 @@ impl<'c> HitTestTreeActionHandler<'c> for AppMenuActionHandler {
 
 pub struct AppMenuPresenter {
     base_view: Rc<AppMenuBaseView>,
-    _action_handler: Rc<AppMenuActionHandler>,
+    action_handler: Rc<AppMenuActionHandler>,
 }
 impl AppMenuPresenter {
     pub fn new(init: &mut PresenterInitContext, header_height: f32) -> Self {
@@ -3313,6 +3288,7 @@ impl AppMenuPresenter {
             "resources/icons/add.svg",
             64.0,
             header_height + 32.0,
+            0.0,
             AppMenuCommandIdentifier::AddSprite,
         ));
         let save_button = Rc::new(AppMenuButtonView::new(
@@ -3321,6 +3297,7 @@ impl AppMenuPresenter {
             "resources/icons/save.svg",
             64.0,
             header_height + 32.0 + AppMenuButtonView::BUTTON_HEIGHT + 16.0,
+            0.05,
             AppMenuCommandIdentifier::Save,
         ));
 
@@ -3349,7 +3326,7 @@ impl AppMenuPresenter {
             let add_button = Rc::downgrade(&add_button);
             let save_button = Rc::downgrade(&save_button);
 
-            move |update_context, _, visible| {
+            move |visible| {
                 let Some(base_view) = base_view.upgrade() else {
                     // app teardown-ed
                     return;
@@ -3368,31 +3345,13 @@ impl AppMenuPresenter {
                 };
 
                 if visible {
-                    base_view.show(
-                        &mut update_context.composite_tree,
-                        update_context.current_sec,
-                    );
-                    add_button.show(
-                        &mut update_context.composite_tree,
-                        update_context.current_sec,
-                    );
-                    save_button.show(
-                        &mut update_context.composite_tree,
-                        update_context.current_sec + 0.05,
-                    );
+                    base_view.show();
+                    add_button.show();
+                    save_button.show();
                 } else {
-                    base_view.hide(
-                        &mut update_context.composite_tree,
-                        update_context.current_sec,
-                    );
-                    add_button.hide(
-                        &mut update_context.composite_tree,
-                        update_context.current_sec,
-                    );
-                    save_button.hide(
-                        &mut update_context.composite_tree,
-                        update_context.current_sec,
-                    );
+                    base_view.hide();
+                    add_button.hide();
+                    save_button.hide();
                 }
 
                 action_handler.shown.set(visible);
@@ -3410,7 +3369,7 @@ impl AppMenuPresenter {
 
         Self {
             base_view,
-            _action_handler: action_handler,
+            action_handler,
         }
     }
 
@@ -3423,32 +3382,49 @@ impl AppMenuPresenter {
     ) {
         self.base_view.mount(ct_parent, ct, ht_parent, ht);
     }
+
+    pub fn update<ActionContext>(
+        &self,
+        ct: &mut CompositeTree,
+        ht: &mut HitTestTreeManager<ActionContext>,
+        current_sec: f32,
+    ) {
+        self.base_view.update(ct, ht, current_sec);
+        for v in self.action_handler.item_views.iter() {
+            v.update(ct, ht, current_sec);
+        }
+    }
 }
 
-struct HitTestRootTreeActionHandler {
+struct HitTestRootTreeActionHandler<'subsystem> {
+    editing_atlas_renderer: std::rc::Weak<RefCell<EditingAtlasRenderer<'subsystem>>>,
     editing_atlas_dragging: Cell<bool>,
     editing_atlas_drag_start_x: Cell<f32>,
     editing_atlas_drag_start_y: Cell<f32>,
     editing_atlas_drag_start_offset_x: Cell<f32>,
     editing_atlas_drag_start_offset_y: Cell<f32>,
 }
-impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler {
+impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler<'c> {
     type Context = AppUpdateContext<'c>;
 
     fn on_pointer_down(
         &self,
         _sender: HitTestTreeRef,
-        context: &mut Self::Context,
-        _ht: &mut HitTestTreeManager<Self::Context>,
-        args: hittest::PointerActionArgs,
+        _context: &mut Self::Context,
+        args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
+        let Some(ear) = self.editing_atlas_renderer.upgrade() else {
+            // app teardown-ed
+            return EventContinueControl::empty();
+        };
+
         self.editing_atlas_dragging.set(true);
         self.editing_atlas_drag_start_x.set(args.client_x);
         self.editing_atlas_drag_start_y.set(args.client_y);
         self.editing_atlas_drag_start_offset_x
-            .set(context.editing_atlas_renderer.borrow().offset()[0]);
+            .set(ear.borrow().offset()[0]);
         self.editing_atlas_drag_start_offset_y
-            .set(context.editing_atlas_renderer.borrow().offset()[1]);
+            .set(ear.borrow().offset()[1]);
 
         EventContinueControl::CAPTURE_ELEMENT
     }
@@ -3456,16 +3432,20 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler {
     fn on_pointer_move(
         &self,
         _sender: HitTestTreeRef,
-        context: &mut Self::Context,
-        _ht: &mut HitTestTreeManager<Self::Context>,
-        args: hittest::PointerActionArgs,
+        _context: &mut Self::Context,
+        args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
+        let Some(ear) = self.editing_atlas_renderer.upgrade() else {
+            // app teardown-ed
+            return EventContinueControl::empty();
+        };
+
         if self.editing_atlas_dragging.get() {
             let dx = args.client_x - self.editing_atlas_drag_start_x.get();
             let dy = args.client_y - self.editing_atlas_drag_start_y.get();
 
             // TODO: あとでui_scale_factorをみれるようにする
-            context.editing_atlas_renderer.borrow_mut().set_offset(
+            ear.borrow_mut().set_offset(
                 self.editing_atlas_drag_start_offset_x.get() + dx * 2.0,
                 self.editing_atlas_drag_start_offset_y.get() + dy * 2.0,
             );
@@ -3477,16 +3457,20 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler {
     fn on_pointer_up(
         &self,
         _sender: HitTestTreeRef,
-        context: &mut Self::Context,
-        _ht: &mut HitTestTreeManager<Self::Context>,
-        args: hittest::PointerActionArgs,
+        _context: &mut Self::Context,
+        args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
+        let Some(ear) = self.editing_atlas_renderer.upgrade() else {
+            // app teardown-ed
+            return EventContinueControl::empty();
+        };
+
         if self.editing_atlas_dragging.replace(false) {
             let dx = args.client_x - self.editing_atlas_drag_start_x.get();
             let dy = args.client_y - self.editing_atlas_drag_start_y.get();
 
             // TODO: あとでui_scale_factorをみれるようにする
-            context.editing_atlas_renderer.borrow_mut().set_offset(
+            ear.borrow_mut().set_offset(
                 self.editing_atlas_drag_start_offset_x.get() + dx * 2.0,
                 self.editing_atlas_drag_start_offset_y.get() + dy * 2.0,
             );
@@ -4059,13 +4043,6 @@ fn main() {
     let client_size = Cell::new((640.0f32, 480.0));
     let mut pointer_input_manager = PointerInputManager::new();
     let mut ht_manager = HitTestTreeManager::new();
-    let ht_root_fallback_action_handler = Rc::new(HitTestRootTreeActionHandler {
-        editing_atlas_dragging: Cell::new(false),
-        editing_atlas_drag_start_x: Cell::new(0.0),
-        editing_atlas_drag_start_y: Cell::new(0.0),
-        editing_atlas_drag_start_offset_x: Cell::new(0.0),
-        editing_atlas_drag_start_offset_y: Cell::new(0.0),
-    });
     let ht_root = ht_manager.create(HitTestTreeData {
         left: 0.0,
         top: 0.0,
@@ -4075,7 +4052,7 @@ fn main() {
         height: 0.0,
         width_adjustment_factor: 1.0,
         height_adjustment_factor: 1.0,
-        action_handler: Some(Rc::downgrade(&ht_root_fallback_action_handler) as _),
+        action_handler: None,
     });
 
     let mut sc = PrimaryRenderTarget::new(SubsystemBoundSurface {
@@ -4803,6 +4780,8 @@ fn main() {
     let sprite_list_pane = SpriteListPanePresenter::new(&mut init_context, app_header.height());
     let app_menu = AppMenuPresenter::new(&mut init_context, app_header.height());
 
+    drop(init_context);
+
     sprite_list_pane.mount(
         &mut composite_tree,
         CompositeTree::ROOT,
@@ -4825,6 +4804,16 @@ fn main() {
     editing_atlas_renderer
         .borrow_mut()
         .set_offset(0.0, app_header.height() * app_shell.ui_scale_factor());
+
+    let ht_root_fallback_action_handler = Rc::new(HitTestRootTreeActionHandler {
+        editing_atlas_renderer: std::rc::Rc::downgrade(&editing_atlas_renderer),
+        editing_atlas_dragging: Cell::new(false),
+        editing_atlas_drag_start_x: Cell::new(0.0),
+        editing_atlas_drag_start_y: Cell::new(0.0),
+        editing_atlas_drag_start_offset_x: Cell::new(0.0),
+        editing_atlas_drag_start_offset_y: Cell::new(0.0),
+    });
+    ht_manager.set_action_handler(ht_root, &ht_root_fallback_action_handler);
 
     tracing::debug!(
         byte_size = staging_scratch_buffer.total_reserved_amount(),
@@ -4886,29 +4875,113 @@ fn main() {
         .unwrap();
     let mut last_updating = false;
 
-    let mut app_update_context = AppUpdateContext {
-        for_view_feedback: ViewFeedbackContext {
-            composite_tree,
-            current_sec: 0.0,
-        },
-        state: app_state,
-        editing_atlas_renderer,
-        event_queue: &events,
-        dbus: &dbus,
-    };
-    app_update_context
-        .state
-        .synchronize_view(&mut app_update_context.for_view_feedback, &mut ht_manager);
+    app_state.synchronize_view();
+
+    let epoll = Epoll::new(0).unwrap();
+
+    struct DBusWatcher<'e> {
+        epoll: &'e Epoll,
+    }
+    impl dbus::WatchFunction for DBusWatcher<'_> {
+        fn add(&mut self, watch: &mut dbus::WatchRef) -> bool {
+            if watch.enabled() {
+                let mut event_type = 0;
+                let flags = watch.flags();
+                if flags.contains(dbus::WatchFlags::READABLE) {
+                    event_type |= EPOLLIN;
+                }
+                if flags.contains(dbus::WatchFlags::WRITABLE) {
+                    event_type |= EPOLLOUT;
+                }
+
+                self.epoll
+                    .add(
+                        &watch.as_raw_fd(),
+                        event_type,
+                        EpollData::Ptr(watch as *mut _ as _),
+                    )
+                    .unwrap();
+            }
+
+            true
+        }
+
+        fn remove(&mut self, watch: &mut dbus::WatchRef) {
+            let mut event_type = 0;
+            let flags = watch.flags();
+            if flags.contains(dbus::WatchFlags::READABLE) {
+                event_type |= EPOLLIN;
+            }
+            if flags.contains(dbus::WatchFlags::WRITABLE) {
+                event_type |= EPOLLOUT;
+            }
+
+            match self.epoll.del(
+                &watch.as_raw_fd(),
+                event_type,
+                EpollData::Ptr(watch as *mut _ as _),
+            ) {
+                // ENOENTは無視
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                Err(e) => {
+                    tracing::error!(reason = ?e, "Failed to remove dbus watch");
+                }
+                Ok(_) => (),
+            }
+        }
+
+        fn toggled(&mut self, watch: &mut dbus::WatchRef) {
+            let mut event_type = 0;
+            let flags = watch.flags();
+            if flags.contains(dbus::WatchFlags::READABLE) {
+                event_type |= EPOLLIN;
+            }
+            if flags.contains(dbus::WatchFlags::WRITABLE) {
+                event_type |= EPOLLOUT;
+            }
+
+            if watch.enabled() {
+                self.epoll
+                    .add(
+                        &watch.as_raw_fd(),
+                        event_type,
+                        EpollData::Ptr(watch as *mut _ as _),
+                    )
+                    .unwrap();
+            } else {
+                match self.epoll.del(
+                    &watch.as_raw_fd(),
+                    event_type,
+                    EpollData::Ptr(watch as *mut _ as _),
+                ) {
+                    // ENOENTは無視
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                    Err(e) => {
+                        tracing::error!(reason = ?e, "Failed to remove dbus watch");
+                    }
+                    Ok(_) => (),
+                }
+            }
+        }
+    }
+
+    dbus.set_watch_functions(Box::new(DBusWatcher { epoll: &epoll }));
+    let dbus = RefCell::new(dbus);
 
     app_shell.flush();
+
+    unsafe {
+        DBUS_WAIT_FOR_REPLY_WAKERS = &mut HashMap::new() as *mut _;
+        DBUS_WAIT_FOR_SIGNAL_WAKERS = &mut HashMap::new() as *mut _;
+    }
 
     let elapsed = setup_timer.elapsed();
     tracing::info!(?elapsed, "App Setup done!");
 
+    let task_worker = smol::LocalExecutor::new();
+
     // initial post event
-    app_update_context
-        .event_queue
-        .push(AppEvent::ToplevelWindowFrameTiming);
+    events.push(AppEvent::ToplevelWindowFrameTiming);
 
     let t = std::time::Instant::now();
     let mut frame_resize_request = None;
@@ -4920,18 +4993,117 @@ fn main() {
     };
     let mut composite_instance_buffer_dirty = false;
     let mut popups = HashMap::<uuid::Uuid, uikit::message_dialog::Presenter>::new();
+    let mut epoll_events = [const { core::mem::MaybeUninit::<epoll_event>::uninit() }; 8];
+    let mut app_update_context = AppUpdateContext {
+        event_queue: &events,
+    };
     'app: loop {
         app_shell.process_pending_events();
+        let wake_count = epoll.wait(&mut epoll_events, Some(0)).unwrap();
+        for e in &epoll_events[..wake_count] {
+            let e = unsafe { e.assume_init_ref() };
+
+            // いったんDBusWatchのみ前提とする(他のものが入ってきたらそのとき考える)
+            println!("event {:p}", unsafe { e.data.ptr });
+            let watch_ptr = unsafe { &mut *(e.data.ptr as *mut dbus::WatchRef) };
+            let mut flags = dbus::WatchFlags::empty();
+            if (e.events & EPOLLIN) != 0 {
+                flags |= dbus::WatchFlags::READABLE;
+            }
+            if (e.events & EPOLLOUT) != 0 {
+                flags |= dbus::WatchFlags::WRITABLE;
+            }
+            if (e.events & EPOLLERR) != 0 {
+                flags |= dbus::WatchFlags::ERROR;
+            }
+            if (e.events & EPOLLHUP) != 0 {
+                flags |= dbus::WatchFlags::HANGUP;
+            }
+            if !watch_ptr.handle(flags) {
+                tracing::warn!(?flags, "dbus_watch_handle failed");
+            }
+        }
+        // app_update_context.dbus.dispatch();
+        if let Some(m) = dbus.borrow_mut().pop_message() {
+            println!("!! dbus msg recv: {}", m.r#type());
+            if m.r#type() == dbus::MESSAGE_TYPE_METHOD_RETURN {
+                // method return
+                println!(
+                    "!! method return data: {} {:?}",
+                    m.reply_serial(),
+                    m.signature()
+                );
+
+                if let Some(wakers) =
+                    unsafe { &mut *DBUS_WAIT_FOR_REPLY_WAKERS }.remove(&m.reply_serial())
+                {
+                    let wake_count = wakers.len();
+                    for ((sink, w), m) in
+                        wakers.into_iter().zip(core::iter::repeat_n(m, wake_count))
+                    {
+                        let Some(sink1) = sink.upgrade() else {
+                            // abandoned
+                            continue;
+                        };
+
+                        sink1.set(Some(m));
+                        drop(sink); // drop before wake(unchain weak ref)
+                        w.wake();
+                    }
+                }
+            } else if m.r#type() == dbus::MESSAGE_TYPE_SIGNAL {
+                // signal
+                println!(
+                    "!! signal data: {:?} {:?} {:?}",
+                    m.path(),
+                    m.interface(),
+                    m.member()
+                );
+
+                let path = m.path().unwrap();
+                let interface = m.interface().unwrap();
+                let member = m.member().unwrap();
+
+                if let Some(wakers) = unsafe { &mut *DBUS_WAIT_FOR_SIGNAL_WAKERS }.remove(&(
+                    path.into(),
+                    interface.into(),
+                    member.into(),
+                )) {
+                    let wake_count = wakers.len();
+                    for ((sink, w), m) in
+                        wakers.into_iter().zip(core::iter::repeat_n(m, wake_count))
+                    {
+                        let Some(sink1) = sink.upgrade() else {
+                            // abandoned
+                            continue;
+                        };
+
+                        sink1.set(Some(m));
+                        drop(sink); // drop before wake(unchain weak ref)
+                        w.wake();
+                    }
+                }
+            }
+        }
+        task_worker.try_tick();
         while let Some(e) = app_update_context.event_queue.pop() {
             match e {
                 AppEvent::ToplevelWindowClose => break 'app,
                 AppEvent::ToplevelWindowFrameTiming => {
                     let current_t = t.elapsed();
+                    let current_sec = current_t.as_secs_f32();
 
                     if last_rendering {
                         last_render_command_fence.wait().unwrap();
                         last_render_command_fence.reset().unwrap();
                         last_rendering = false;
+                    }
+
+                    app_header.update(&mut composite_tree, &mut ht_manager, current_sec);
+                    app_menu.update(&mut composite_tree, &mut ht_manager, current_sec);
+                    sprite_list_pane.update(&mut composite_tree, &mut ht_manager, current_sec);
+                    for p in popups.values() {
+                        p.update(&mut composite_tree, &mut ht_manager, current_sec);
                     }
 
                     {
@@ -4945,12 +5117,12 @@ fn main() {
                             .map(r.clone())
                             .unwrap();
                         let composite_render_instructions = unsafe {
-                            app_update_context.for_view_feedback.composite_tree.update(
+                            composite_tree.update(
                                 sc.size,
                                 current_t.as_secs_f32(),
                                 composition_alphamask_surface_atlas.vk_extent(),
                                 &ptr,
-                                &app_update_context.event_queue,
+                                &events,
                             )
                         };
                         if flush_required {
@@ -5035,10 +5207,7 @@ fn main() {
                     let composite_instance_buffer_dirty =
                         core::mem::replace(&mut composite_instance_buffer_dirty, false);
                     let mut needs_update = composite_instance_buffer_dirty
-                        || app_update_context
-                            .editing_atlas_renderer
-                            .borrow()
-                            .is_dirty();
+                        || editing_atlas_renderer.borrow().is_dirty();
 
                     if composite_backdrop_buffers_invalidated {
                         composite_backdrop_buffers_invalidated = false;
@@ -5177,12 +5346,7 @@ fn main() {
                             )
                             .transit_to(br::ImageLayout::ShaderReadOnlyOpt.from_undefined())],
                         ))
-                        .inject(|r| {
-                            app_update_context
-                                .editing_atlas_renderer
-                                .borrow_mut()
-                                .process_dirty_data(r)
-                        })
+                        .inject(|r| editing_atlas_renderer.borrow_mut().process_dirty_data(r))
                         .end()
                         .unwrap();
                     }
@@ -5235,23 +5399,20 @@ fn main() {
                         {
                             editing_atlas_current_bound_pipeline =
                                 last_composite_render_instructions.render_pass_types[0];
-                            app_update_context
-                                .editing_atlas_renderer
-                                .borrow_mut()
-                                .recreate(
-                                    &subsystem,
-                                    match editing_atlas_current_bound_pipeline {
-                                        RenderPassType::Grabbed => main_rp_grabbed.subpass(0),
-                                        RenderPassType::Final => main_rp_final.subpass(0),
-                                        RenderPassType::ContinueGrabbed => {
-                                            main_rp_continue_grabbed.subpass(0)
-                                        }
-                                        RenderPassType::ContinueFinal => {
-                                            main_rp_continue_final.subpass(0)
-                                        }
-                                    },
-                                    sc.size,
-                                );
+                            editing_atlas_renderer.borrow_mut().recreate(
+                                &subsystem,
+                                match editing_atlas_current_bound_pipeline {
+                                    RenderPassType::Grabbed => main_rp_grabbed.subpass(0),
+                                    RenderPassType::Final => main_rp_final.subpass(0),
+                                    RenderPassType::ContinueGrabbed => {
+                                        main_rp_continue_grabbed.subpass(0)
+                                    }
+                                    RenderPassType::ContinueFinal => {
+                                        main_rp_continue_final.subpass(0)
+                                    }
+                                },
+                                sc.size,
+                            );
                         }
 
                         for (n, cb) in main_cbs.iter_mut().enumerate() {
@@ -5277,8 +5438,7 @@ fn main() {
                                 &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
                             )
                             .inject(|r| {
-                                app_update_context
-                                    .editing_atlas_renderer
+                                editing_atlas_renderer
                                     .borrow()
                                     .render_commands(sc.size, r)
                             })
@@ -5971,23 +6131,20 @@ fn main() {
                                 )
                                 .unwrap();
 
-                            app_update_context
-                                .editing_atlas_renderer
-                                .borrow_mut()
-                                .recreate(
-                                    &subsystem,
-                                    match editing_atlas_current_bound_pipeline {
-                                        RenderPassType::Grabbed => main_rp_grabbed.subpass(0),
-                                        RenderPassType::Final => main_rp_final.subpass(0),
-                                        RenderPassType::ContinueGrabbed => {
-                                            main_rp_continue_grabbed.subpass(0)
-                                        }
-                                        RenderPassType::ContinueFinal => {
-                                            main_rp_continue_final.subpass(0)
-                                        }
-                                    },
-                                    sc.size,
-                                );
+                            editing_atlas_renderer.borrow_mut().recreate(
+                                &subsystem,
+                                match editing_atlas_current_bound_pipeline {
+                                    RenderPassType::Grabbed => main_rp_grabbed.subpass(0),
+                                    RenderPassType::Final => main_rp_final.subpass(0),
+                                    RenderPassType::ContinueGrabbed => {
+                                        main_rp_continue_grabbed.subpass(0)
+                                    }
+                                    RenderPassType::ContinueFinal => {
+                                        main_rp_continue_final.subpass(0)
+                                    }
+                                },
+                                sc.size,
+                            );
                         }
                     }
 
@@ -5998,8 +6155,8 @@ fn main() {
                     surface_x,
                     surface_y,
                 } => {
-                    app_update_context.for_view_feedback.current_sec = t.elapsed().as_secs_f32();
                     let (cw, ch) = client_size.get();
+
                     pointer_input_manager.handle_mouse_move(
                         surface_x,
                         surface_y,
@@ -6018,8 +6175,8 @@ fn main() {
                     last_pointer_pos = (surface_x, surface_y);
                 }
                 AppEvent::MainWindowPointerLeftDown { enter_serial } => {
-                    app_update_context.for_view_feedback.current_sec = t.elapsed().as_secs_f32();
                     let (cw, ch) = client_size.get();
+
                     pointer_input_manager.handle_mouse_left_down(
                         last_pointer_pos.0,
                         last_pointer_pos.1,
@@ -6029,7 +6186,6 @@ fn main() {
                         &mut app_update_context,
                         ht_root,
                     );
-
                     app_shell.set_cursor_shape(
                         enter_serial,
                         pointer_input_manager
@@ -6037,8 +6193,8 @@ fn main() {
                     );
                 }
                 AppEvent::MainWindowPointerLeftUp { enter_serial } => {
-                    app_update_context.for_view_feedback.current_sec = t.elapsed().as_secs_f32();
                     let (cw, ch) = client_size.get();
+
                     pointer_input_manager.handle_mouse_left_up(
                         last_pointer_pos.0,
                         last_pointer_pos.1,
@@ -6048,7 +6204,6 @@ fn main() {
                         &mut app_update_context,
                         ht_root,
                     );
-
                     app_shell.set_cursor_shape(
                         enter_serial,
                         pointer_input_manager
@@ -6065,20 +6220,18 @@ fn main() {
                                 atlas: &mut composition_alphamask_surface_atlas,
                                 ui_scale_factor: app_shell.ui_scale_factor(),
                                 fonts: &mut font_set,
-                                composite_tree: &mut app_update_context
-                                    .for_view_feedback
-                                    .composite_tree,
+                                composite_tree: &mut composite_tree,
                                 composite_instance_manager: &mut composite_instance_buffer,
                                 ht: &mut ht_manager,
                             },
-                            app_state: &mut app_update_context.state,
+                            app_state: &mut app_state,
                         },
                         id,
                         &content,
                     );
                     p.show(
                         CompositeTree::ROOT,
-                        &mut app_update_context.for_view_feedback.composite_tree,
+                        &mut composite_tree,
                         ht_root,
                         &mut ht_manager,
                         t.elapsed().as_secs_f32(),
@@ -6098,7 +6251,7 @@ fn main() {
                 AppEvent::UIPopupClose { id } => {
                     if let Some(inst) = popups.get(&id) {
                         inst.hide(
-                            &mut app_update_context.for_view_feedback.composite_tree,
+                            &mut composite_tree,
                             &mut ht_manager,
                             t.elapsed().as_secs_f32(),
                         );
@@ -6106,8 +6259,16 @@ fn main() {
                 }
                 AppEvent::UIPopupUnmount { id } => {
                     if let Some(inst) = popups.remove(&id) {
-                        inst.unmount(&mut app_update_context.for_view_feedback.composite_tree);
+                        inst.unmount(&mut composite_tree);
                     }
+                }
+                AppEvent::AppMenuToggle => {
+                    app_state.toggle_menu();
+                }
+                AppEvent::AppMenuRequestAddSprite => {
+                    task_worker
+                        .spawn(app_menu_on_add_sprite(&dbus, &events))
+                        .detach();
                 }
             }
         }
@@ -6115,5 +6276,356 @@ fn main() {
 
     if let Err(e) = unsafe { subsystem.wait() } {
         tracing::warn!(reason = ?e, "Error in waiting pending works before shutdown");
+    }
+}
+
+async fn app_menu_on_add_sprite(dbus: &RefCell<dbus::Connection>, events: &AppEventBus) {
+    let serial = dbus
+        .borrow_mut()
+        .send_with_serial(
+            &mut dbus::Message::new_method_call(
+                Some(c"org.freedesktop.portal.Desktop"),
+                c"/org/freedesktop/portal/desktop",
+                Some(c"org.freedesktop.DBus.Introspectable"),
+                c"Introspect",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    // TODO: これUIだして待つべきか？ローカルだからあんまり待たないような気もするが......
+    let reply_msg = DBusWaitForReplyFuture::new(serial).await;
+    let mut reply_iter = reply_msg.iter();
+    assert_eq!(reply_iter.arg_type(), b's' as _);
+    let mut sp = core::mem::MaybeUninit::<*const core::ffi::c_char>::uninit();
+    unsafe {
+        reply_iter.get_value_basic(sp.as_mut_ptr() as _);
+    }
+    let doc = unsafe {
+        core::ffi::CStr::from_ptr(sp.assume_init())
+            .to_str()
+            .unwrap()
+    };
+
+    let mut has_file_chooser = false;
+    if let Err(e) = dbus::introspect_document::read_toplevel(
+        &mut quick_xml::Reader::from_str(doc),
+        |_, ifname, r| {
+            has_file_chooser = ifname.as_ref() == b"org.freedesktop.portal.FileChooser";
+
+            dbus::introspect_document::skip_read_interface_tag_contents(r)
+        },
+    ) {
+        tracing::warn!(reason = ?e, "Failed to parse introspection document from portal object");
+    }
+
+    if !has_file_chooser {
+        // FileChooserなし
+
+        events.push(AppEvent::UIMessageDialogRequest {
+            content: String::from("org.freedesktop.portal.FileChooser not found"),
+        });
+
+        return;
+    }
+
+    let mut msg = dbus::Message::new_method_call(
+        Some(c"org.freedesktop.portal.Desktop"),
+        c"/org/freedesktop/portal/desktop",
+        Some(c"org.freedesktop.DBus.Properties"),
+        c"Get",
+    )
+    .unwrap();
+    let mut msg_args_appender = msg.iter_append();
+    msg_args_appender.append_cstr(c"org.freedesktop.portal.FileChooser");
+    msg_args_appender.append_cstr(c"version");
+    drop(msg_args_appender);
+    let serial = dbus.borrow_mut().send_with_serial(&mut msg).unwrap();
+    let reply_msg = DBusWaitForReplyFuture::new(serial).await;
+    if let Some(error) = reply_msg.try_get_error() {
+        tracing::error!(reason = ?error, "FileChooser version get failed");
+
+        return;
+    }
+
+    let mut reply_iter = reply_msg.iter();
+    assert_eq!(reply_iter.arg_type(), b'v' as _);
+    let mut content_iter = reply_iter.recurse();
+    assert_eq!(content_iter.arg_type(), b'u' as _);
+    let mut v = core::mem::MaybeUninit::<u32>::uninit();
+    unsafe {
+        content_iter.get_value_basic(v.as_mut_ptr() as _);
+    }
+
+    println!("AddSprite: file chooser found! version = {}", unsafe {
+        v.assume_init()
+    });
+
+    let unique_name = dbus.borrow_mut().unique_name().unwrap().to_owned();
+    println!("unique name: {unique_name:?}");
+    let unique_name_portal_request_path = unique_name
+        .to_str()
+        .unwrap()
+        .strip_prefix(':')
+        .unwrap()
+        .replace('.', "_");
+    let dialog_token = uuid::Uuid::new_v4().as_simple().to_string();
+    let request_object_path = std::ffi::CString::new(format!(
+        "/org/freedesktop/portal/desktop/request/{unique_name_portal_request_path}/{dialog_token}"
+    ))
+    .unwrap();
+    let mut signal_awaiter = DBusWaitForSignalFuture::new(
+        request_object_path.clone(),
+        c"org.freedesktop.portal.Request".into(),
+        c"Response".into(),
+    );
+
+    let mut msg = dbus::Message::new_method_call(
+        Some(c"org.freedesktop.portal.Desktop"),
+        c"/org/freedesktop/portal/desktop",
+        Some(c"org.freedesktop.portal.FileChooser"),
+        c"OpenFile",
+    )
+    .unwrap();
+    let mut msg_args_appender = msg.iter_append();
+    // TODO: parent_window(if available Hyprlandにはxdg_foreignの実装がなかった)
+    msg_args_appender.append_cstr(c"");
+    msg_args_appender.append_cstr(c"Add Sprite");
+    let mut options_appender = msg_args_appender
+        .open_container(dbus::TYPE_ARRAY, c"{sv}")
+        .unwrap();
+    let mut dict_appender = options_appender
+        .open_container(dbus::TYPE_DICT_ENTRY, c"sv")
+        .unwrap();
+    dict_appender.append_cstr(c"handle_token");
+    let mut handle_token_option_variant_appender = dict_appender
+        .open_container(dbus::TYPE_VARIANT, c"s")
+        .unwrap();
+    handle_token_option_variant_appender
+        .append_cstr(&std::ffi::CString::new(dialog_token.clone()).unwrap());
+    handle_token_option_variant_appender.close();
+    dict_appender.close();
+    let mut dict_appender = options_appender
+        .open_container(dbus::TYPE_DICT_ENTRY, c"sv")
+        .unwrap();
+    dict_appender.append_cstr(c"multiple");
+    let mut multiple_option_variant_appender = dict_appender
+        .open_container(dbus::TYPE_VARIANT, c"b")
+        .unwrap();
+    multiple_option_variant_appender.append_bool(true);
+    multiple_option_variant_appender.close();
+    dict_appender.close();
+    options_appender.close();
+    drop(msg_args_appender);
+    let serial = dbus.borrow_mut().send_with_serial(&mut msg).unwrap();
+    let reply_msg = DBusWaitForReplyFuture::new(serial).await;
+    if let Some(error) = reply_msg.try_get_error() {
+        tracing::error!(reason = ?error, "FileChooser.OpenFile failed");
+
+        return;
+    }
+
+    let mut reply_iter = reply_msg.iter();
+    assert_eq!(reply_iter.arg_type(), b'o' as _);
+    let mut sp = core::mem::MaybeUninit::<*const core::ffi::c_char>::uninit();
+    unsafe {
+        reply_iter.get_value_basic(sp.as_mut_ptr() as _);
+    }
+    let open_file_dialog_handle = unsafe { core::ffi::CStr::from_ptr(sp.assume_init()) };
+    println!("OpenFile dialog handle: {open_file_dialog_handle:?}");
+
+    if open_file_dialog_handle != &request_object_path as &core::ffi::CStr {
+        tracing::debug!(
+            ?open_file_dialog_handle,
+            ?request_object_path,
+            "returned object_path did not match with the expected, switching request object..."
+        );
+        signal_awaiter = DBusWaitForSignalFuture::new(
+            open_file_dialog_handle.into(),
+            c"org.freedesktop.portal.Request".into(),
+            c"Response".into(),
+        );
+    }
+
+    let resp = signal_awaiter.await;
+
+    println!("open file response! {:?}", resp.signature());
+    let mut resp_iter = resp.iter();
+    assert_eq!(resp_iter.arg_type(), dbus::TYPE_UINT);
+    let response = unsafe { resp_iter.get_u32_unchecked() };
+    if response != 0 {
+        tracing::warn!(code = response, "FileChooser.OpenFile has cancelled");
+        return;
+    }
+
+    resp_iter.next();
+    assert_eq!(resp_iter.arg_type(), dbus::TYPE_ARRAY);
+    let mut resp_results_iter = resp_iter.recurse();
+    let mut uris = Vec::new();
+    while resp_results_iter.arg_type() != dbus::TYPE_INVALID {
+        assert_eq!(resp_results_iter.arg_type(), dbus::TYPE_DICT_ENTRY);
+        let mut kv_iter = resp_results_iter.recurse();
+
+        assert_eq!(kv_iter.arg_type(), dbus::TYPE_STRING);
+        match unsafe { kv_iter.get_cstr_unchecked() } {
+            x if x == c"uris" => {
+                kv_iter.next();
+
+                let mut value_iter = kv_iter.begin_iter_variant_content().unwrap();
+                let mut iter = value_iter.begin_iter_array_content().unwrap();
+                while iter.arg_type() != dbus::TYPE_INVALID {
+                    assert_eq!(iter.arg_type(), dbus::TYPE_STRING);
+                    uris.push(std::ffi::CString::from(unsafe {
+                        iter.get_cstr_unchecked()
+                    }));
+                    iter.next();
+                }
+            }
+            x if x == c"choices" => {
+                kv_iter.next();
+
+                let mut value_iter = kv_iter.begin_iter_variant_content().unwrap();
+                let mut iter = value_iter.begin_iter_array_content().unwrap();
+                while iter.arg_type() != dbus::TYPE_INVALID {
+                    assert_eq!(iter.arg_type(), dbus::TYPE_STRUCT);
+                    let mut elements_iter = iter.recurse();
+                    assert_eq!(elements_iter.arg_type(), dbus::TYPE_STRING);
+                    let key =
+                        unsafe { std::ffi::CString::from(elements_iter.get_cstr_unchecked()) };
+                    elements_iter.next();
+                    assert_eq!(elements_iter.arg_type(), dbus::TYPE_STRING);
+                    let value =
+                        unsafe { std::ffi::CString::from(elements_iter.get_cstr_unchecked()) };
+                    println!("choices {key:?} -> {value:?}");
+                    drop(elements_iter);
+                    iter.next();
+                }
+            }
+            x if x == c"current_filter" => {
+                kv_iter.next();
+
+                assert_eq!(kv_iter.arg_type(), dbus::TYPE_STRUCT);
+                let mut struct_iter = kv_iter.recurse();
+                assert_eq!(struct_iter.arg_type(), dbus::TYPE_STRING);
+                let filter_name =
+                    unsafe { std::ffi::CString::from(struct_iter.get_cstr_unchecked()) };
+                struct_iter.next();
+                assert_eq!(struct_iter.arg_type(), dbus::TYPE_ARRAY);
+                let mut array_iter = struct_iter.recurse();
+                while array_iter.arg_type() != dbus::TYPE_INVALID {
+                    assert_eq!(array_iter.arg_type(), dbus::TYPE_STRUCT);
+                    let mut struct_iter = array_iter.recurse();
+                    assert_eq!(struct_iter.arg_type(), dbus::TYPE_UINT);
+                    let v = unsafe { struct_iter.get_u32_unchecked() };
+                    struct_iter.next();
+                    assert_eq!(struct_iter.arg_type(), dbus::TYPE_STRING);
+                    let f = unsafe { struct_iter.get_cstr_unchecked() };
+                    println!("filter {filter_name:?}: {v} {f:?}");
+                    array_iter.next();
+                }
+            }
+            c => unreachable!("unexpected result entry: {c:?}"),
+        }
+
+        resp_results_iter.next();
+    }
+
+    println!("selected: {uris:?}");
+}
+
+static mut DBUS_WAIT_FOR_REPLY_WAKERS: *mut HashMap<
+    u32,
+    Vec<(
+        std::rc::Weak<std::cell::Cell<Option<dbus::Message>>>,
+        core::task::Waker,
+    )>,
+> = core::ptr::null_mut();
+
+static mut DBUS_WAIT_FOR_SIGNAL_WAKERS: *mut HashMap<
+    (std::ffi::CString, std::ffi::CString, std::ffi::CString),
+    Vec<(
+        std::rc::Weak<std::cell::Cell<Option<dbus::Message>>>,
+        core::task::Waker,
+    )>,
+> = core::ptr::null_mut();
+
+pub struct DBusWaitForReplyFuture {
+    serial: u32,
+    reply: std::rc::Rc<std::cell::Cell<Option<dbus::Message>>>,
+}
+impl DBusWaitForReplyFuture {
+    pub fn new(serial: u32) -> Self {
+        Self {
+            serial,
+            reply: std::rc::Rc::new(std::cell::Cell::new(None)),
+        }
+    }
+}
+impl core::future::Future for DBusWaitForReplyFuture {
+    type Output = dbus::Message;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        let Some(reply_mut_ref) = std::rc::Rc::get_mut(&mut this.reply) else {
+            // still waiting(already registered)
+            return core::task::Poll::Pending;
+        };
+
+        match reply_mut_ref.take() {
+            None => {
+                unsafe { &mut *DBUS_WAIT_FOR_REPLY_WAKERS }
+                    .entry(this.serial)
+                    .or_insert_with(Vec::new)
+                    .push((std::rc::Rc::downgrade(&this.reply), cx.waker().clone()));
+
+                core::task::Poll::Pending
+            }
+            Some(x) => core::task::Poll::Ready(x),
+        }
+    }
+}
+
+pub struct DBusWaitForSignalFuture {
+    key: Option<(std::ffi::CString, std::ffi::CString, std::ffi::CString)>,
+    message: std::rc::Rc<std::cell::Cell<Option<dbus::Message>>>,
+}
+impl DBusWaitForSignalFuture {
+    pub fn new(
+        object_path: std::ffi::CString,
+        interface: std::ffi::CString,
+        member: std::ffi::CString,
+    ) -> Self {
+        Self {
+            key: Some((object_path, interface, member)),
+            message: std::rc::Rc::new(std::cell::Cell::new(None)),
+        }
+    }
+}
+impl core::future::Future for DBusWaitForSignalFuture {
+    type Output = dbus::Message;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        let Some(msg_mut_ref) = std::rc::Rc::get_mut(&mut this.message) else {
+            // still waiting(already registered)
+            return core::task::Poll::Pending;
+        };
+
+        match msg_mut_ref.take() {
+            None => {
+                unsafe { &mut *DBUS_WAIT_FOR_SIGNAL_WAKERS }
+                    .entry(this.key.take().expect("polled twice"))
+                    .or_insert_with(Vec::new)
+                    .push((std::rc::Rc::downgrade(&this.message), cx.waker().clone()));
+
+                core::task::Poll::Pending
+            }
+            Some(x) => core::task::Poll::Ready(x),
+        }
     }
 }

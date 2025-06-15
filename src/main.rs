@@ -3855,161 +3855,6 @@ fn main() {
     let setup_timer = std::time::Instant::now();
 
     let mut dbus = dbus::Connection::connect_bus(dbus::BusType::Session).unwrap();
-    let mut pc = dbus
-        .send_with_reply(
-            &mut dbus::Message::new_method_call(
-                Some(c"org.freedesktop.portal.Desktop"),
-                c"/org/freedesktop/portal/desktop",
-                Some(c"org.freedesktop.DBus.Introspectable"),
-                c"Introspect",
-            )
-            .unwrap(),
-            None,
-        )
-        .expect("no reply or out of memory");
-    pc.block();
-    let reply = pc.steal_reply().unwrap();
-    assert_eq!(reply.r#type(), dbus::MESSAGE_TYPE_METHOD_RETURN);
-
-    let mut reply_iter = reply.iter();
-    assert_eq!(reply_iter.arg_type(), b's' as _);
-    let mut strptr = core::mem::MaybeUninit::<*const core::ffi::c_char>::uninit();
-    unsafe {
-        reply_iter.get_value_basic(strptr.as_mut_ptr() as _);
-    }
-    let resp = unsafe {
-        core::ffi::CStr::from_ptr(strptr.assume_init())
-            .to_str()
-            .unwrap()
-    };
-    println!("introspect return: {resp}");
-
-    dbus::introspect_document::read_toplevel(
-        &mut quick_xml::Reader::from_str(resp),
-        |nodes, ifname, r| {
-            let ifname =
-                quick_xml::escape::unescape(unsafe { core::str::from_utf8_unchecked(&ifname) });
-            println!("nodes: {nodes:?} interface: {ifname:?}");
-
-            dbus::introspect_document::read_interface_tag_content(r, |e, r| match e {
-                dbus::introspect_document::InterfaceElementContent::Method { name, empty } => {
-                    let name = quick_xml::escape::unescape(unsafe {
-                        core::str::from_utf8_unchecked(&name)
-                    });
-                    println!("    method: {name:?}");
-
-                    if !empty {
-                        dbus::introspect_document::read_method_tag_content(r, |e, _| match e {
-                            dbus::introspect_document::MethodSignalElementContent::Arg {
-                                name,
-                                r#type,
-                                direction,
-                            } => {
-                                let name = quick_xml::escape::unescape(unsafe {
-                                    core::str::from_utf8_unchecked(&name)
-                                });
-                                let r#type = quick_xml::escape::unescape(unsafe {
-                                    core::str::from_utf8_unchecked(&r#type)
-                                });
-                                let direction = direction.as_ref().map(|x| {
-                                    quick_xml::escape::unescape(unsafe {
-                                        core::str::from_utf8_unchecked(x)
-                                    })
-                                });
-                                println!("      arg: {type:?} {name:?} ({direction:?})");
-
-                                Ok(())
-                            }
-                            dbus::introspect_document::MethodSignalElementContent::Annotation {
-                                name,
-                                value,
-                            } => {
-                                let name = quick_xml::escape::unescape(unsafe {
-                                    core::str::from_utf8_unchecked(&name)
-                                });
-                                let value = quick_xml::escape::unescape(unsafe {
-                                    core::str::from_utf8_unchecked(&value)
-                                });
-                                println!("      annotation: {name:?} = {value:?}");
-
-                                Ok(())
-                            }
-                        })
-                    } else {
-                        Ok(())
-                    }
-                }
-                dbus::introspect_document::InterfaceElementContent::Signal { name, empty } => {
-                    let name = quick_xml::escape::unescape(unsafe {
-                        core::str::from_utf8_unchecked(&name)
-                    });
-                    println!("    signal: {name:?}");
-
-                    if !empty {
-                        dbus::introspect_document::read_signal_tag_content(r, |e, _| match e {
-                            dbus::introspect_document::MethodSignalElementContent::Arg {
-                                name,
-                                r#type,
-                                direction,
-                            } => {
-                                let name = quick_xml::escape::unescape(unsafe {
-                                    core::str::from_utf8_unchecked(&name)
-                                });
-                                let r#type = quick_xml::escape::unescape(unsafe {
-                                    core::str::from_utf8_unchecked(&r#type)
-                                });
-                                let direction = direction.as_deref().map(|x| {
-                                    quick_xml::escape::unescape(unsafe {
-                                        core::str::from_utf8_unchecked(x)
-                                    })
-                                });
-                                println!("      arg: {type:?} {name:?} ({direction:?})");
-
-                                Ok(())
-                            }
-                            dbus::introspect_document::MethodSignalElementContent::Annotation {
-                                name,
-                                value,
-                            } => {
-                                let name = quick_xml::escape::unescape(unsafe {
-                                    core::str::from_utf8_unchecked(&name)
-                                });
-                                let value = quick_xml::escape::unescape(unsafe {
-                                    core::str::from_utf8_unchecked(&value)
-                                });
-                                println!("      annotation: {name:?} = {value:?}");
-
-                                Ok(())
-                            }
-                        })
-                    } else {
-                        Ok(())
-                    }
-                }
-                dbus::introspect_document::InterfaceElementContent::Property {
-                    name,
-                    r#type,
-                    access,
-                } => {
-                    let name = quick_xml::escape::unescape(unsafe {
-                        core::str::from_utf8_unchecked(&name)
-                    });
-                    let r#type = quick_xml::escape::unescape(unsafe {
-                        core::str::from_utf8_unchecked(&r#type)
-                    });
-                    let access = quick_xml::escape::unescape(unsafe {
-                        core::str::from_utf8_unchecked(&access)
-                    });
-                    println!("    property: {type:?} {name:?} ({access:?})");
-
-                    Ok(())
-                }
-            })
-        },
-    )
-    .unwrap();
-
-    assert_eq!(reply_iter.has_next(), false);
 
     let events = AppEventBus {
         queue: UnsafeCell::new(VecDeque::new()),
@@ -4966,7 +4811,9 @@ fn main() {
     }
 
     dbus.set_watch_functions(Box::new(DBusWatcher { epoll: &epoll }));
-    let dbus = RefCell::new(dbus);
+    let dbus = DBusLink {
+        con: RefCell::new(dbus),
+    };
 
     app_shell.flush();
 
@@ -5024,7 +4871,7 @@ fn main() {
             }
         }
         // app_update_context.dbus.dispatch();
-        if let Some(m) = dbus.borrow_mut().pop_message() {
+        if let Some(m) = dbus.underlying_mut().pop_message() {
             println!("!! dbus msg recv: {}", m.r#type());
             if m.r#type() == dbus::MESSAGE_TYPE_METHOD_RETURN {
                 // method return
@@ -6279,11 +6126,29 @@ fn main() {
     }
 }
 
-async fn app_menu_on_add_sprite(dbus: &RefCell<dbus::Connection>, events: &AppEventBus) {
-    let serial = dbus
-        .borrow_mut()
-        .send_with_serial(
-            &mut dbus::Message::new_method_call(
+struct DBusLink {
+    con: RefCell<dbus::Connection>,
+}
+impl DBusLink {
+    #[inline(always)]
+    pub fn underlying_mut(&self) -> std::cell::RefMut<dbus::Connection> {
+        self.con.borrow_mut()
+    }
+
+    pub async fn send(&self, mut msg: dbus::Message) -> Option<dbus::Message> {
+        let Some(serial) = self.con.borrow_mut().send_with_serial(&mut msg) else {
+            return None;
+        };
+
+        Some(DBusWaitForReplyFuture::new(serial).await)
+    }
+}
+
+async fn app_menu_on_add_sprite(dbus: &DBusLink, events: &AppEventBus) {
+    // TODO: これUIだして待つべきか？ローカルだからあんまり待たないような気もするが......
+    let reply_msg = dbus
+        .send(
+            dbus::Message::new_method_call(
                 Some(c"org.freedesktop.portal.Desktop"),
                 c"/org/freedesktop/portal/desktop",
                 Some(c"org.freedesktop.DBus.Introspectable"),
@@ -6291,9 +6156,8 @@ async fn app_menu_on_add_sprite(dbus: &RefCell<dbus::Connection>, events: &AppEv
             )
             .unwrap(),
         )
+        .await
         .unwrap();
-    // TODO: これUIだして待つべきか？ローカルだからあんまり待たないような気もするが......
-    let reply_msg = DBusWaitForReplyFuture::new(serial).await;
     let mut reply_iter = reply_msg.iter();
     assert_eq!(reply_iter.arg_type(), b's' as _);
     let mut sp = core::mem::MaybeUninit::<*const core::ffi::c_char>::uninit();
@@ -6328,19 +6192,24 @@ async fn app_menu_on_add_sprite(dbus: &RefCell<dbus::Connection>, events: &AppEv
         return;
     }
 
-    let mut msg = dbus::Message::new_method_call(
-        Some(c"org.freedesktop.portal.Desktop"),
-        c"/org/freedesktop/portal/desktop",
-        Some(c"org.freedesktop.DBus.Properties"),
-        c"Get",
-    )
-    .unwrap();
-    let mut msg_args_appender = msg.iter_append();
-    msg_args_appender.append_cstr(c"org.freedesktop.portal.FileChooser");
-    msg_args_appender.append_cstr(c"version");
-    drop(msg_args_appender);
-    let serial = dbus.borrow_mut().send_with_serial(&mut msg).unwrap();
-    let reply_msg = DBusWaitForReplyFuture::new(serial).await;
+    let reply_msg = dbus
+        .send({
+            let mut msg = dbus::Message::new_method_call(
+                Some(c"org.freedesktop.portal.Desktop"),
+                c"/org/freedesktop/portal/desktop",
+                Some(c"org.freedesktop.DBus.Properties"),
+                c"Get",
+            )
+            .unwrap();
+            let mut msg_args_appender = msg.iter_append();
+            msg_args_appender.append_cstr(c"org.freedesktop.portal.FileChooser");
+            msg_args_appender.append_cstr(c"version");
+            drop(msg_args_appender);
+
+            msg
+        })
+        .await
+        .unwrap();
     if let Some(error) = reply_msg.try_get_error() {
         tracing::error!(reason = ?error, "FileChooser version get failed");
 
@@ -6360,7 +6229,7 @@ async fn app_menu_on_add_sprite(dbus: &RefCell<dbus::Connection>, events: &AppEv
         v.assume_init()
     });
 
-    let unique_name = dbus.borrow_mut().unique_name().unwrap().to_owned();
+    let unique_name = dbus.underlying_mut().unique_name().unwrap().to_owned();
     println!("unique name: {unique_name:?}");
     let unique_name_portal_request_path = unique_name
         .to_str()
@@ -6379,45 +6248,49 @@ async fn app_menu_on_add_sprite(dbus: &RefCell<dbus::Connection>, events: &AppEv
         c"Response".into(),
     );
 
-    let mut msg = dbus::Message::new_method_call(
-        Some(c"org.freedesktop.portal.Desktop"),
-        c"/org/freedesktop/portal/desktop",
-        Some(c"org.freedesktop.portal.FileChooser"),
-        c"OpenFile",
-    )
-    .unwrap();
-    let mut msg_args_appender = msg.iter_append();
-    // TODO: parent_window(if available Hyprlandにはxdg_foreignの実装がなかった)
-    msg_args_appender.append_cstr(c"");
-    msg_args_appender.append_cstr(c"Add Sprite");
-    let mut options_appender = msg_args_appender
-        .open_container(dbus::TYPE_ARRAY, c"{sv}")
+    let reply_msg = dbus
+        .send({
+            let mut msg = dbus::Message::new_method_call(
+                Some(c"org.freedesktop.portal.Desktop"),
+                c"/org/freedesktop/portal/desktop",
+                Some(c"org.freedesktop.portal.FileChooser"),
+                c"OpenFile",
+            )
+            .unwrap();
+            let mut msg_args_appender = msg.iter_append();
+            // TODO: parent_window(if available Hyprlandにはxdg_foreignの実装がなかった)
+            msg_args_appender.append_cstr(c"");
+            msg_args_appender.append_cstr(c"Add Sprite");
+            let mut options_appender = msg_args_appender
+                .open_container(dbus::TYPE_ARRAY, c"{sv}")
+                .unwrap();
+            let mut dict_appender = options_appender
+                .open_container(dbus::TYPE_DICT_ENTRY, c"sv")
+                .unwrap();
+            dict_appender.append_cstr(c"handle_token");
+            let mut handle_token_option_variant_appender = dict_appender
+                .open_container(dbus::TYPE_VARIANT, c"s")
+                .unwrap();
+            handle_token_option_variant_appender
+                .append_cstr(&std::ffi::CString::new(dialog_token.clone()).unwrap());
+            handle_token_option_variant_appender.close();
+            dict_appender.close();
+            let mut dict_appender = options_appender
+                .open_container(dbus::TYPE_DICT_ENTRY, c"sv")
+                .unwrap();
+            dict_appender.append_cstr(c"multiple");
+            let mut multiple_option_variant_appender = dict_appender
+                .open_container(dbus::TYPE_VARIANT, c"b")
+                .unwrap();
+            multiple_option_variant_appender.append_bool(true);
+            multiple_option_variant_appender.close();
+            dict_appender.close();
+            options_appender.close();
+
+            msg
+        })
+        .await
         .unwrap();
-    let mut dict_appender = options_appender
-        .open_container(dbus::TYPE_DICT_ENTRY, c"sv")
-        .unwrap();
-    dict_appender.append_cstr(c"handle_token");
-    let mut handle_token_option_variant_appender = dict_appender
-        .open_container(dbus::TYPE_VARIANT, c"s")
-        .unwrap();
-    handle_token_option_variant_appender
-        .append_cstr(&std::ffi::CString::new(dialog_token.clone()).unwrap());
-    handle_token_option_variant_appender.close();
-    dict_appender.close();
-    let mut dict_appender = options_appender
-        .open_container(dbus::TYPE_DICT_ENTRY, c"sv")
-        .unwrap();
-    dict_appender.append_cstr(c"multiple");
-    let mut multiple_option_variant_appender = dict_appender
-        .open_container(dbus::TYPE_VARIANT, c"b")
-        .unwrap();
-    multiple_option_variant_appender.append_bool(true);
-    multiple_option_variant_appender.close();
-    dict_appender.close();
-    options_appender.close();
-    drop(msg_args_appender);
-    let serial = dbus.borrow_mut().send_with_serial(&mut msg).unwrap();
-    let reply_msg = DBusWaitForReplyFuture::new(serial).await;
     if let Some(error) = reply_msg.try_get_error() {
         tracing::error!(reason = ?error, "FileChooser.OpenFile failed");
 

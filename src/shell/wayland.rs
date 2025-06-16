@@ -1,4 +1,8 @@
-use std::{cell::Cell, rc::Rc};
+use std::{
+    cell::Cell,
+    os::fd::{AsRawFd, RawFd},
+    rc::Rc,
+};
 
 use bedrock::{self as br, SurfaceCreateInfo};
 
@@ -487,6 +491,55 @@ impl<'a> AppShell<'a> {
         if let Err(e) = self.display.dispatch() {
             tracing::warn!(reason = ?e, "Failed to dispatch display events");
         }
+    }
+
+    #[tracing::instrument(skip(self))]
+    pub fn prepare_read_events(&mut self) -> std::io::Result<()> {
+        loop {
+            match self.display.prepare_read() {
+                Ok(_) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if let Err(e) = self.display.dispatch_pending() {
+                        tracing::error!(reason = ?e, "Failed to dispatch pending events");
+                        return Err(e);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(reason = ?e, "Failed to prepare reading events");
+                    return Err(e);
+                }
+            }
+        }
+
+        if let Err(e) = self.display.flush() {
+            tracing::error!(reason = ?e, "Failed to flush outgoing events");
+            return Err(e);
+        }
+
+        Ok(())
+    }
+
+    #[inline(always)]
+    pub fn display_fd(&self) -> RawFd {
+        self.display.as_raw_fd()
+    }
+
+    pub fn cancel_read_events(&mut self) {
+        self.display.cancel_read();
+    }
+
+    #[tracing::instrument(skip(self))]
+    pub fn read_and_process_events(&mut self) -> std::io::Result<()> {
+        if let Err(e) = self.display.read_events() {
+            tracing::error!(reason = ?e, "Failed to read events");
+            return Err(e);
+        }
+
+        if let Err(e) = self.display.dispatch_pending() {
+            tracing::warn!(reason = ?e, "Failed to dispatch incoming events");
+        }
+
+        Ok(())
     }
 
     #[tracing::instrument(skip(self))]

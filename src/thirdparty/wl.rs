@@ -254,6 +254,35 @@ impl Display {
             Ok(r)
         }
     }
+
+    #[inline]
+    pub fn dispatch_pending(&mut self) -> std::io::Result<core::ffi::c_int> {
+        match unsafe { ffi::wl_display_dispatch_pending(self.ffi.as_ptr()) } {
+            -1 => Err(std::io::Error::last_os_error()),
+            r => Ok(r),
+        }
+    }
+
+    #[inline]
+    pub fn prepare_read(&mut self) -> std::io::Result<()> {
+        match unsafe { ffi::wl_display_prepare_read(self.ffi.as_ptr()) } {
+            -1 => Err(std::io::Error::last_os_error()),
+            _ => Ok(()),
+        }
+    }
+
+    #[inline]
+    pub fn cancel_read(&mut self) {
+        unsafe { ffi::wl_display_cancel_read(self.ffi.as_ptr()) }
+    }
+
+    #[inline]
+    pub fn read_events(&mut self) -> std::io::Result<()> {
+        match unsafe { ffi::wl_display_read_events(self.ffi.as_ptr()) } {
+            -1 => Err(std::io::Error::last_os_error()),
+            _ => Ok(()),
+        }
+    }
 }
 
 #[repr(transparent)]

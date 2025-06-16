@@ -87,7 +87,7 @@ pub const MARSHAL_FLAG_DESTROY: u32 = 1 << 0;
 
 #[link(name = "wayland-client")]
 unsafe extern "C" {
-    pub unsafe fn wl_proxy_marshal_flags(
+    pub fn wl_proxy_marshal_flags(
         proxy: *mut Proxy,
         opcode: u32,
         interface: *const Interface,
@@ -95,7 +95,7 @@ unsafe extern "C" {
         flags: u32,
         ...
     ) -> *mut Proxy;
-    pub unsafe fn wl_proxy_marshal_array_flags(
+    pub fn wl_proxy_marshal_array_flags(
         proxy: *mut Proxy,
         opcode: u32,
         interface: *const Interface,
@@ -103,25 +103,29 @@ unsafe extern "C" {
         flags: u32,
         args: *mut Argument,
     ) -> *mut Proxy;
-    pub unsafe fn wl_proxy_destroy(p: *mut Proxy);
-    pub unsafe fn wl_proxy_add_listener(
+    pub fn wl_proxy_destroy(p: *mut Proxy);
+    pub fn wl_proxy_add_listener(
         proxy: *mut Proxy,
         implementation: *const core::ffi::c_void,
         data: *mut core::ffi::c_void,
     ) -> core::ffi::c_int;
-    pub unsafe fn wl_proxy_get_version(proxy: *const Proxy) -> u32;
-    pub unsafe fn wl_proxy_get_display(proxy: *mut Proxy) -> *mut Display;
+    pub fn wl_proxy_get_version(proxy: *const Proxy) -> u32;
+    pub fn wl_proxy_get_display(proxy: *mut Proxy) -> *mut Display;
 
-    pub unsafe fn wl_display_connect(name: *const core::ffi::c_char) -> *mut Display;
-    pub unsafe fn wl_display_disconnect(name: *mut Display);
-    pub unsafe fn wl_display_get_error(display: *mut Display) -> core::ffi::c_int;
-    pub unsafe fn wl_display_get_protocol_error(
+    pub fn wl_display_connect(name: *const core::ffi::c_char) -> *mut Display;
+    pub fn wl_display_disconnect(name: *mut Display);
+    pub fn wl_display_get_error(display: *mut Display) -> core::ffi::c_int;
+    pub fn wl_display_get_protocol_error(
         display: *mut Display,
         interface: *const *mut Interface,
         id: *mut u32,
     ) -> u32;
-    pub unsafe fn wl_display_flush(display: *mut Display) -> core::ffi::c_int;
-    pub unsafe fn wl_display_dispatch(display: *mut Display) -> core::ffi::c_int;
-    pub unsafe fn wl_display_roundtrip(display: *mut Display) -> core::ffi::c_int;
-    pub unsafe fn wl_display_get_fd(display: *const Display) -> core::ffi::c_int;
+    pub fn wl_display_flush(display: *mut Display) -> core::ffi::c_int;
+    pub fn wl_display_dispatch(display: *mut Display) -> core::ffi::c_int;
+    pub fn wl_display_roundtrip(display: *mut Display) -> core::ffi::c_int;
+    pub fn wl_display_get_fd(display: *const Display) -> core::ffi::c_int;
+    pub fn wl_display_prepare_read(display: *mut Display) -> core::ffi::c_int;
+    pub fn wl_display_cancel_read(display: *mut Display);
+    pub fn wl_display_dispatch_pending(display: *mut Display) -> core::ffi::c_int;
+    pub fn wl_display_read_events(display: *mut Display) -> core::ffi::c_int;
 }

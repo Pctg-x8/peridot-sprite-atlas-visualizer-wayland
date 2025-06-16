@@ -41,13 +41,13 @@ use hittest::{
     CursorShape, HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef,
 };
 use input::{EventContinueControl, PointerInputManager};
-use platform::linux::{EventFD, EventFDOptions};
+use platform::linux::{
+    EPOLLERR, EPOLLHUP, EPOLLIN, EPOLLOUT, Epoll, EpollData, EventFD, EventFDOptions, epoll_event,
+};
 use subsystem::{StagingScratchBufferManager, Subsystem};
 use text::TextLayout;
 use thirdparty::{
-    dbus,
-    epoll::{EPOLLERR, EPOLLHUP, EPOLLIN, EPOLLOUT, Epoll, EpollData, epoll_event},
-    fontconfig,
+    dbus, fontconfig,
     freetype::{self, FreeType},
 };
 use trigger_cell::TriggerCell;
@@ -4736,7 +4736,11 @@ fn main() {
     app_state.synchronize_view();
 
     let epoll = Epoll::new(0).unwrap();
+    // TODO: PtrとU32まぜるのなんか危なそうなのであとでちゃんと仕組みをととのえたい
     epoll.add(&events.efd, EPOLLIN, EpollData::U32(0)).unwrap();
+    epoll
+        .add(&app_shell.display_fd(), EPOLLIN, EpollData::U32(1))
+        .unwrap();
 
     struct DBusWatcher<'e> {
         epoll: &'e Epoll,
@@ -4858,13 +4862,18 @@ fn main() {
         event_queue: &events,
     };
     'app: loop {
-        app_shell.process_pending_events();
-        let wake_count = epoll.wait(&mut epoll_events, Some(0)).unwrap();
+        app_shell.prepare_read_events().unwrap();
+        let wake_count = epoll.wait(&mut epoll_events, None).unwrap();
+        let mut shell_event_processed = false;
         for e in &epoll_events[..wake_count] {
             let e = unsafe { e.assume_init_ref() };
 
             if unsafe { e.data.u32 } == 0 {
                 // app event
+            } else if unsafe { e.data.u32 } == 1 {
+                // display event
+                app_shell.read_and_process_events().unwrap();
+                shell_event_processed = true;
             } else {
                 // いったんDBusWatchのみ前提とする(他のものが入ってきたらそのとき考える)
                 println!("event {:p}", unsafe { e.data.ptr });
@@ -4887,7 +4896,10 @@ fn main() {
                 }
             }
         }
-        if let Some(m) = dbus.underlying_mut().pop_message() {
+        if !shell_event_processed {
+            app_shell.cancel_read_events();
+        }
+        while let Some(m) = dbus.underlying_mut().pop_message() {
             println!("!! dbus msg recv: {}", m.r#type());
             if m.r#type() == dbus::MESSAGE_TYPE_METHOD_RETURN {
                 // method return
@@ -5623,7 +5635,7 @@ fn main() {
                 AppEvent::ToplevelWindowSurfaceConfigure { serial } => {
                     if let Some((w, h)) = frame_resize_request.take() {
                         if w != sc.size.width || h != sc.size.height {
-                            tracing::trace!(w, h, "frame resize");
+                            tracing::trace!(w, h, last_rendering, "frame resize");
 
                             client_size.set((w as f32, h as f32));
 

@@ -5,7 +5,7 @@ use bedrock::{self as br, SurfaceCreateInfo};
 use crate::{
     AppEvent, AppEventBus,
     hittest::CursorShape,
-    platform::linux_input_event_codes::BTN_LEFT,
+    platform::linux::input_event_codes::BTN_LEFT,
     thirdparty::wl::{self, WpCursorShapeDeviceV1Shape, WpCursorShapeManagerV1},
 };
 

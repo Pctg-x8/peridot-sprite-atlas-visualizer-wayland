@@ -2,6 +2,7 @@ use core::{
     ops::{Deref, DerefMut},
     ptr::NonNull,
 };
+use std::os::fd::AsRawFd;
 
 mod cursor_shape;
 mod ffi;
@@ -183,6 +184,12 @@ pub struct Display {
 impl Drop for Display {
     fn drop(&mut self) {
         unsafe { ffi::wl_display_disconnect(self.ffi.as_ptr()) }
+    }
+}
+impl AsRawFd for Display {
+    #[inline(always)]
+    fn as_raw_fd(&self) -> std::os::unix::prelude::RawFd {
+        unsafe { ffi::wl_display_get_fd(self.ffi.as_ptr()) }
     }
 }
 impl Display {

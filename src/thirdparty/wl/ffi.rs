@@ -123,4 +123,5 @@ unsafe extern "C" {
     pub unsafe fn wl_display_flush(display: *mut Display) -> core::ffi::c_int;
     pub unsafe fn wl_display_dispatch(display: *mut Display) -> core::ffi::c_int;
     pub unsafe fn wl_display_roundtrip(display: *mut Display) -> core::ffi::c_int;
+    pub unsafe fn wl_display_get_fd(display: *const Display) -> core::ffi::c_int;
 }

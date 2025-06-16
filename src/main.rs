@@ -41,6 +41,7 @@ use hittest::{
     CursorShape, HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef,
 };
 use input::{EventContinueControl, PointerInputManager};
+use platform::linux::{EventFD, EventFDOptions};
 use subsystem::{StagingScratchBufferManager, Subsystem};
 use text::TextLayout;
 use thirdparty::{
@@ -87,14 +88,25 @@ pub enum AppEvent {
 
 pub struct AppEventBus {
     queue: UnsafeCell<VecDeque<AppEvent>>,
+    efd: EventFD,
 }
 impl AppEventBus {
     pub fn push(&self, e: AppEvent) {
         unsafe { &mut *self.queue.get() }.push_back(e);
+        self.efd.add(1).unwrap();
     }
 
     fn pop(&self) -> Option<AppEvent> {
         unsafe { &mut *self.queue.get() }.pop_front()
+    }
+
+    fn notify_clear(&self) -> std::io::Result<()> {
+        match self.efd.take() {
+            // WouldBlock(EAGAIN)はでてきてもOK
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+            Err(e) => Err(e),
+            Ok(_) => Ok(()),
+        }
     }
 }
 
@@ -3858,6 +3870,7 @@ fn main() {
 
     let events = AppEventBus {
         queue: UnsafeCell::new(VecDeque::new()),
+        efd: EventFD::new(0, EventFDOptions::NONBLOCK).unwrap(),
     };
 
     // initialize font systems
@@ -4723,6 +4736,7 @@ fn main() {
     app_state.synchronize_view();
 
     let epoll = Epoll::new(0).unwrap();
+    epoll.add(&events.efd, EPOLLIN, EpollData::U32(0)).unwrap();
 
     struct DBusWatcher<'e> {
         epoll: &'e Epoll,
@@ -4821,11 +4835,10 @@ fn main() {
         DBUS_WAIT_FOR_REPLY_WAKERS = &mut HashMap::new() as *mut _;
         DBUS_WAIT_FOR_SIGNAL_WAKERS = &mut HashMap::new() as *mut _;
     }
+    let task_worker = smol::LocalExecutor::new();
 
     let elapsed = setup_timer.elapsed();
     tracing::info!(?elapsed, "App Setup done!");
-
-    let task_worker = smol::LocalExecutor::new();
 
     // initial post event
     events.push(AppEvent::ToplevelWindowFrameTiming);
@@ -4850,27 +4863,30 @@ fn main() {
         for e in &epoll_events[..wake_count] {
             let e = unsafe { e.assume_init_ref() };
 
-            // いったんDBusWatchのみ前提とする(他のものが入ってきたらそのとき考える)
-            println!("event {:p}", unsafe { e.data.ptr });
-            let watch_ptr = unsafe { &mut *(e.data.ptr as *mut dbus::WatchRef) };
-            let mut flags = dbus::WatchFlags::empty();
-            if (e.events & EPOLLIN) != 0 {
-                flags |= dbus::WatchFlags::READABLE;
-            }
-            if (e.events & EPOLLOUT) != 0 {
-                flags |= dbus::WatchFlags::WRITABLE;
-            }
-            if (e.events & EPOLLERR) != 0 {
-                flags |= dbus::WatchFlags::ERROR;
-            }
-            if (e.events & EPOLLHUP) != 0 {
-                flags |= dbus::WatchFlags::HANGUP;
-            }
-            if !watch_ptr.handle(flags) {
-                tracing::warn!(?flags, "dbus_watch_handle failed");
+            if unsafe { e.data.u32 } == 0 {
+                // app event
+            } else {
+                // いったんDBusWatchのみ前提とする(他のものが入ってきたらそのとき考える)
+                println!("event {:p}", unsafe { e.data.ptr });
+                let watch_ptr = unsafe { &mut *(e.data.ptr as *mut dbus::WatchRef) };
+                let mut flags = dbus::WatchFlags::empty();
+                if (e.events & EPOLLIN) != 0 {
+                    flags |= dbus::WatchFlags::READABLE;
+                }
+                if (e.events & EPOLLOUT) != 0 {
+                    flags |= dbus::WatchFlags::WRITABLE;
+                }
+                if (e.events & EPOLLERR) != 0 {
+                    flags |= dbus::WatchFlags::ERROR;
+                }
+                if (e.events & EPOLLHUP) != 0 {
+                    flags |= dbus::WatchFlags::HANGUP;
+                }
+                if !watch_ptr.handle(flags) {
+                    tracing::warn!(?flags, "dbus_watch_handle failed");
+                }
             }
         }
-        // app_update_context.dbus.dispatch();
         if let Some(m) = dbus.underlying_mut().pop_message() {
             println!("!! dbus msg recv: {}", m.r#type());
             if m.r#type() == dbus::MESSAGE_TYPE_METHOD_RETURN {
@@ -6118,6 +6134,7 @@ fn main() {
                         .detach();
                 }
             }
+            app_update_context.event_queue.notify_clear().unwrap();
         }
     }
 

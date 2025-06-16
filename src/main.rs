@@ -17,7 +17,7 @@ mod uikit;
 
 use std::{
     cell::{Cell, RefCell, UnsafeCell},
-    collections::{HashMap, VecDeque},
+    collections::{BTreeSet, HashMap, VecDeque},
     os::fd::AsRawFd,
     path::Path,
     rc::Rc,
@@ -4735,15 +4735,66 @@ fn main() {
 
     app_state.synchronize_view();
 
+    pub enum PollFDType {
+        AppEventBus,
+        AppShellDisplay,
+        DBusWatch(*mut dbus::WatchRef),
+    }
+    struct PollFDPool {
+        types: Vec<PollFDType>,
+        freelist: BTreeSet<u64>,
+    }
+    impl PollFDPool {
+        pub fn new() -> Self {
+            Self {
+                types: Vec::new(),
+                freelist: BTreeSet::new(),
+            }
+        }
+
+        pub fn alloc(&mut self, t: PollFDType) -> u64 {
+            if let Some(x) = self.freelist.pop_first() {
+                // use preallocated
+                self.types[x as usize] = t;
+                return x;
+            }
+
+            // allocate new one
+            self.types.push(t);
+            (self.types.len() - 1) as _
+        }
+
+        pub fn free(&mut self, x: u64) {
+            self.freelist.insert(x);
+        }
+
+        pub fn get(&self, x: u64) -> Option<&PollFDType> {
+            self.types.get(x as usize)
+        }
+    }
+
+    let poll_fd_pool = RefCell::new(PollFDPool::new());
     let epoll = Epoll::new(0).unwrap();
     // TODO: PtrとU32まぜるのなんか危なそうなのであとでちゃんと仕組みをととのえたい
-    epoll.add(&events.efd, EPOLLIN, EpollData::U32(0)).unwrap();
     epoll
-        .add(&app_shell.display_fd(), EPOLLIN, EpollData::U32(1))
+        .add(
+            &events.efd,
+            EPOLLIN,
+            EpollData::U64(poll_fd_pool.borrow_mut().alloc(PollFDType::AppEventBus)),
+        )
+        .unwrap();
+    epoll
+        .add(
+            &app_shell.display_fd(),
+            EPOLLIN,
+            EpollData::U64(poll_fd_pool.borrow_mut().alloc(PollFDType::AppShellDisplay)),
+        )
         .unwrap();
 
     struct DBusWatcher<'e> {
         epoll: &'e Epoll,
+        fd_pool: &'e RefCell<PollFDPool>,
+        fd_to_pool_index: HashMap<core::ffi::c_int, u64>,
     }
     impl dbus::WatchFunction for DBusWatcher<'_> {
         fn add(&mut self, watch: &mut dbus::WatchRef) -> bool {
@@ -4757,33 +4808,27 @@ fn main() {
                     event_type |= EPOLLOUT;
                 }
 
+                let pool_index = self
+                    .fd_pool
+                    .borrow_mut()
+                    .alloc(PollFDType::DBusWatch(watch as *mut _));
+
                 self.epoll
-                    .add(
-                        &watch.as_raw_fd(),
-                        event_type,
-                        EpollData::Ptr(watch as *mut _ as _),
-                    )
+                    .add(&watch.as_raw_fd(), event_type, EpollData::U64(pool_index))
                     .unwrap();
+                self.fd_to_pool_index.insert(watch.as_raw_fd(), pool_index);
             }
 
             true
         }
 
         fn remove(&mut self, watch: &mut dbus::WatchRef) {
-            let mut event_type = 0;
-            let flags = watch.flags();
-            if flags.contains(dbus::WatchFlags::READABLE) {
-                event_type |= EPOLLIN;
-            }
-            if flags.contains(dbus::WatchFlags::WRITABLE) {
-                event_type |= EPOLLOUT;
-            }
+            let Some(pool_index) = self.fd_to_pool_index.remove(&watch.as_raw_fd()) else {
+                // not bound
+                return;
+            };
 
-            match self.epoll.del(
-                &watch.as_raw_fd(),
-                event_type,
-                EpollData::Ptr(watch as *mut _ as _),
-            ) {
+            match self.epoll.del(&watch.as_raw_fd()) {
                 // ENOENTは無視
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
                 Err(e) => {
@@ -4791,6 +4836,8 @@ fn main() {
                 }
                 Ok(_) => (),
             }
+
+            self.fd_pool.borrow_mut().free(pool_index);
         }
 
         fn toggled(&mut self, watch: &mut dbus::WatchRef) {
@@ -4804,19 +4851,22 @@ fn main() {
             }
 
             if watch.enabled() {
+                let pool_index = self
+                    .fd_pool
+                    .borrow_mut()
+                    .alloc(PollFDType::DBusWatch(watch as *mut _));
+
                 self.epoll
-                    .add(
-                        &watch.as_raw_fd(),
-                        event_type,
-                        EpollData::Ptr(watch as *mut _ as _),
-                    )
+                    .add(&watch.as_raw_fd(), event_type, EpollData::U64(pool_index))
                     .unwrap();
+                self.fd_to_pool_index.insert(watch.as_raw_fd(), pool_index);
             } else {
-                match self.epoll.del(
-                    &watch.as_raw_fd(),
-                    event_type,
-                    EpollData::Ptr(watch as *mut _ as _),
-                ) {
+                let Some(pool_index) = self.fd_to_pool_index.remove(&watch.as_raw_fd()) else {
+                    // not bound
+                    return;
+                };
+
+                match self.epoll.del(&watch.as_raw_fd()) {
                     // ENOENTは無視
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
                     Err(e) => {
@@ -4824,11 +4874,17 @@ fn main() {
                     }
                     Ok(_) => (),
                 }
+
+                self.fd_pool.borrow_mut().free(pool_index);
             }
         }
     }
 
-    dbus.set_watch_functions(Box::new(DBusWatcher { epoll: &epoll }));
+    dbus.set_watch_functions(Box::new(DBusWatcher {
+        epoll: &epoll,
+        fd_pool: &poll_fd_pool,
+        fd_to_pool_index: HashMap::new(),
+    }));
     let dbus = DBusLink {
         con: RefCell::new(dbus),
     };
@@ -4868,32 +4924,36 @@ fn main() {
         for e in &epoll_events[..wake_count] {
             let e = unsafe { e.assume_init_ref() };
 
-            if unsafe { e.data.u32 } == 0 {
-                // app event
-            } else if unsafe { e.data.u32 } == 1 {
-                // display event
-                app_shell.read_and_process_events().unwrap();
-                shell_event_processed = true;
-            } else {
-                // いったんDBusWatchのみ前提とする(他のものが入ってきたらそのとき考える)
-                println!("event {:p}", unsafe { e.data.ptr });
-                let watch_ptr = unsafe { &mut *(e.data.ptr as *mut dbus::WatchRef) };
-                let mut flags = dbus::WatchFlags::empty();
-                if (e.events & EPOLLIN) != 0 {
-                    flags |= dbus::WatchFlags::READABLE;
+            match poll_fd_pool.borrow().get(unsafe { e.data.u64 }) {
+                Some(&PollFDType::AppEventBus) => {
+                    // app event
                 }
-                if (e.events & EPOLLOUT) != 0 {
-                    flags |= dbus::WatchFlags::WRITABLE;
+                Some(&PollFDType::AppShellDisplay) => {
+                    // display event
+                    app_shell.read_and_process_events().unwrap();
+                    shell_event_processed = true;
                 }
-                if (e.events & EPOLLERR) != 0 {
-                    flags |= dbus::WatchFlags::ERROR;
+                Some(&PollFDType::DBusWatch(watch_ptr)) => {
+                    let watch_ptr = unsafe { &mut *watch_ptr };
+                    let mut flags = dbus::WatchFlags::empty();
+                    if (e.events & EPOLLIN) != 0 {
+                        flags |= dbus::WatchFlags::READABLE;
+                    }
+                    if (e.events & EPOLLOUT) != 0 {
+                        flags |= dbus::WatchFlags::WRITABLE;
+                    }
+                    if (e.events & EPOLLERR) != 0 {
+                        flags |= dbus::WatchFlags::ERROR;
+                    }
+                    if (e.events & EPOLLHUP) != 0 {
+                        flags |= dbus::WatchFlags::HANGUP;
+                    }
+                    if !watch_ptr.handle(flags) {
+                        tracing::warn!(?flags, "dbus_watch_handle failed");
+                    }
                 }
-                if (e.events & EPOLLHUP) != 0 {
-                    flags |= dbus::WatchFlags::HANGUP;
-                }
-                if !watch_ptr.handle(flags) {
-                    tracing::warn!(?flags, "dbus_watch_handle failed");
-                }
+                // ignore
+                None => (),
             }
         }
         if !shell_event_processed {

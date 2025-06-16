@@ -103,11 +103,11 @@ impl Epoll {
     }
 
     #[inline]
-    pub fn ctl(
+    pub unsafe fn ctl(
         &self,
         op: core::ffi::c_int,
         fd: &(impl AsRawFd + ?Sized),
-        event: &mut epoll_event,
+        event: *mut epoll_event,
     ) -> std::io::Result<()> {
         match unsafe { epoll_ctl(self.0, op, fd.as_raw_fd(), event) } {
             0 => Ok(()),
@@ -122,31 +122,21 @@ impl Epoll {
         events: u32,
         data: EpollData,
     ) -> std::io::Result<()> {
-        self.ctl(
-            EPOLL_CTL_ADD,
-            fd,
-            &mut epoll_event {
-                events,
-                data: data.sys(),
-            },
-        )
+        unsafe {
+            self.ctl(
+                EPOLL_CTL_ADD,
+                fd,
+                &mut epoll_event {
+                    events,
+                    data: data.sys(),
+                },
+            )
+        }
     }
 
     #[inline(always)]
-    pub fn del(
-        &self,
-        fd: &(impl AsRawFd + ?Sized),
-        events: u32,
-        data: EpollData,
-    ) -> std::io::Result<()> {
-        self.ctl(
-            EPOLL_CTL_DEL,
-            fd,
-            &mut epoll_event {
-                events,
-                data: data.sys(),
-            },
-        )
+    pub fn del(&self, fd: &(impl AsRawFd + ?Sized)) -> std::io::Result<()> {
+        unsafe { self.ctl(EPOLL_CTL_DEL, fd, core::ptr::null_mut()) }
     }
 
     #[inline(always)]
@@ -156,14 +146,16 @@ impl Epoll {
         events: u32,
         data: EpollData,
     ) -> std::io::Result<()> {
-        self.ctl(
-            EPOLL_CTL_MOD,
-            fd,
-            &mut epoll_event {
-                events,
-                data: data.sys(),
-            },
-        )
+        unsafe {
+            self.ctl(
+                EPOLL_CTL_MOD,
+                fd,
+                &mut epoll_event {
+                    events,
+                    data: data.sys(),
+                },
+            )
+        }
     }
 
     #[inline]

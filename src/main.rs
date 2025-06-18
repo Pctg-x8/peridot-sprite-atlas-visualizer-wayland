@@ -1486,7 +1486,7 @@ impl SpriteListPaneView {
             texatlas_rect: frame_image_atlas_rect.clone(),
             slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
             composite_mode: CompositeMode::ColorTintBackdropBlur(
-                AnimatableColor::Value([1.0, 1.0, 1.0, 0.25]),
+                AnimatableColor::Value([1.0, 1.0, 1.0, 0.0625]),
                 AnimatableFloat::Value(3.0),
             ),
             ..Default::default()
@@ -1503,7 +1503,7 @@ impl SpriteListPaneView {
                 title_blurred_atlas_rect.height() as f32,
             ],
             texatlas_rect: title_blurred_atlas_rect.clone(),
-            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.1, 0.1, 0.1, 1.0])),
             ..Default::default()
         });
         let ct_title = init.composite_tree.register(CompositeRect {
@@ -1518,7 +1518,7 @@ impl SpriteListPaneView {
                 title_atlas_rect.height() as f32,
             ],
             texatlas_rect: title_atlas_rect.clone(),
-            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.1, 0.1, 0.1, 1.0])),
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
             ..Default::default()
         });
 
@@ -5380,13 +5380,7 @@ fn main() {
                         .unwrap();
 
                         // TODO: ここでリセットするのまずい気がする(まだコピー完了してない)
-                        // if staging_scratch_buffer_locked.total_reserved_amount() > 0 {
-                        //     tracing::debug!(
-                        //         byte_size = staging_scratch_buffer_locked.total_reserved_amount(),
-                        //         "Reserved Staging Buffers",
-                        //     );
-                        // }
-                        // staging_scratch_buffer_locked.reset();
+                        staging_scratch_buffer_locked.reset();
                     }
 
                     let n = composite_instance_buffer

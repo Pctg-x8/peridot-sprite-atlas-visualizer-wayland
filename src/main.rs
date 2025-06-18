@@ -9,6 +9,7 @@ mod mathext;
 mod peridot;
 mod platform;
 mod shell;
+mod source_reader;
 mod subsystem;
 mod svg;
 mod text;
@@ -22,9 +23,10 @@ use std::{
     os::fd::AsRawFd,
     path::Path,
     rc::Rc,
+    sync::Arc,
 };
 
-use app_state::AppState;
+use app_state::{AppState, SpriteInfo};
 use bedrock::{
     self as br, CommandBufferMut, CommandPoolMut, DescriptorPoolMut, Device, DeviceMemoryMut,
     Fence, FenceMut, Image, ImageChild, InstanceChild, MemoryBound, PhysicalDevice, RenderPass,
@@ -42,7 +44,9 @@ use feature::editing_atlas_renderer::EditingAtlasRenderer;
 use hittest::{
     CursorShape, HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef,
 };
+use image::DynamicImage;
 use input::{EventContinueControl, PointerInputManager};
+use parking_lot::RwLock;
 use platform::linux::{
     EPOLLERR, EPOLLHUP, EPOLLIN, EPOLLOUT, Epoll, EpollData, EventFD, EventFDOptions, epoll_event,
 };
@@ -125,6 +129,10 @@ const BLEND_STATE_SINGLE_NONE: &'static br::PipelineColorBlendStateCreateInfo<'s
     &br::PipelineColorBlendStateCreateInfo::new(&[
         br::vk::VkPipelineColorBlendAttachmentState::NOBLEND,
     ]);
+const BLEND_STATE_SINGLE_PREMULTIPLIED: &'static br::PipelineColorBlendStateCreateInfo<'static> =
+    &br::PipelineColorBlendStateCreateInfo::new(&[
+        br::vk::VkPipelineColorBlendAttachmentState::PREMULTIPLIED,
+    ]);
 const RASTER_STATE_DEFAULT_FILL_NOCULL: &'static br::PipelineRasterizationStateCreateInfo =
     &br::PipelineRasterizationStateCreateInfo::new(
         br::PolygonMode::Fill,
@@ -191,7 +199,7 @@ pub struct FontSet {
 
 pub struct ViewInitContext<'d, 'r, 'subsystem> {
     pub subsystem: &'subsystem Subsystem,
-    pub staging_scratch_buffer: &'r mut StagingScratchBufferManager<'d>,
+    pub staging_scratch_buffer: &'r mut StagingScratchBufferManager<'subsystem>,
     pub atlas: &'r mut CompositionSurfaceAtlas<'d>,
     pub ui_scale_factor: f32,
     pub composite_tree: &'r mut CompositeTree,
@@ -3904,7 +3912,7 @@ fn main() {
         br::vk::VK_FORMAT_R8_UNORM,
     );
 
-    let mut app_state = AppState::new();
+    let mut app_state = RefCell::new(AppState::new());
 
     let mut app_shell = shell::wayland::AppShell::new(&events);
     let client_size = Cell::new((640.0f32, 480.0));
@@ -4606,10 +4614,23 @@ fn main() {
         )
         .unwrap();
 
+    let mut dbus = DBusLink {
+        con: RefCell::new(dbus),
+    };
+
+    unsafe {
+        DBUS_WAIT_FOR_REPLY_WAKERS = &mut HashMap::new() as *mut _;
+        DBUS_WAIT_FOR_SIGNAL_WAKERS = &mut HashMap::new() as *mut _;
+    }
+    let task_worker = smol::LocalExecutor::new();
+    let bg_worker = BackgroundWorker::new();
+    let staging_scratch_buffer = Arc::new(RwLock::new(staging_scratch_buffer));
+
+    let mut staging_scratch_buffer_locked = staging_scratch_buffer.write();
     let mut init_context = PresenterInitContext {
         for_view: ViewInitContext {
             subsystem: &subsystem,
-            staging_scratch_buffer: &mut staging_scratch_buffer,
+            staging_scratch_buffer: &mut staging_scratch_buffer_locked,
             atlas: &mut composition_alphamask_surface_atlas,
             ui_scale_factor: app_shell.ui_scale_factor(),
             fonts: &mut font_set,
@@ -4617,10 +4638,11 @@ fn main() {
             composite_instance_manager: &mut composite_instance_buffer,
             ht: &mut ht_manager,
         },
-        app_state: &mut app_state,
+        app_state: app_state.get_mut(),
     };
 
     let editing_atlas_renderer = Rc::new(RefCell::new(EditingAtlasRenderer::new(
+        &events,
         &init_context.for_view.subsystem,
         main_rp_final.subpass(0),
         sc.size,
@@ -4642,12 +4664,35 @@ fn main() {
             editing_atlas_renderer.borrow_mut().set_atlas_size(*size);
         }
     });
+    init_context.app_state.register_sprites_view_feedback({
+        let editing_atlas_renderer = Rc::downgrade(&editing_atlas_renderer);
+        let bg_worker = bg_worker.enqueue_access().downgrade();
+        let staging_scratch_buffer = Arc::downgrade(&staging_scratch_buffer);
+
+        move |sprites| {
+            let Some(editing_atlas_renderer) = editing_atlas_renderer.upgrade() else {
+                // app teardown-ed
+                return;
+            };
+            let Some(bg_worker) = bg_worker.upgrade() else {
+                // app teardown-ed
+                return;
+            };
+
+            editing_atlas_renderer.borrow().update_sprites(
+                sprites,
+                &bg_worker,
+                &staging_scratch_buffer,
+            );
+        }
+    });
 
     let app_header = feature::app_header::Presenter::new(&mut init_context);
     let sprite_list_pane = SpriteListPanePresenter::new(&mut init_context, app_header.height());
     let app_menu = AppMenuPresenter::new(&mut init_context, app_header.height());
 
     drop(init_context);
+    drop(staging_scratch_buffer_locked);
 
     sprite_list_pane.mount(
         &mut composite_tree,
@@ -4682,12 +4727,15 @@ fn main() {
     });
     ht_manager.set_action_handler(ht_root, &ht_root_fallback_action_handler);
 
-    tracing::debug!(
-        byte_size = staging_scratch_buffer.total_reserved_amount(),
-        "Reserved Staging Buffers during UI initialization",
-    );
-    staging_scratch_buffer.reset();
-    ht_manager.dump(ht_root);
+    {
+        let mut staging_scratch_buffer_locked = staging_scratch_buffer.write();
+        tracing::debug!(
+            byte_size = staging_scratch_buffer_locked.total_reserved_amount(),
+            "Reserved Staging Buffers during UI initialization",
+        );
+        staging_scratch_buffer_locked.reset();
+        ht_manager.dump(ht_root);
+    }
 
     let mut main_cp = br::CommandPoolObject::new(
         &subsystem,
@@ -4742,19 +4790,8 @@ fn main() {
         .unwrap();
     let mut last_updating = false;
 
-    app_state.synchronize_view();
+    app_state.get_mut().synchronize_view();
     app_shell.flush();
-
-    let mut dbus = DBusLink {
-        con: RefCell::new(dbus),
-    };
-
-    unsafe {
-        DBUS_WAIT_FOR_REPLY_WAKERS = &mut HashMap::new() as *mut _;
-        DBUS_WAIT_FOR_SIGNAL_WAKERS = &mut HashMap::new() as *mut _;
-    }
-    let task_worker = smol::LocalExecutor::new();
-    let bg_worker = BackgroundWorker::new();
 
     pub enum PollFDType {
         AppEventBus,
@@ -5301,6 +5338,8 @@ fn main() {
                             last_updating = false;
                         }
 
+                        let mut staging_scratch_buffer_locked = staging_scratch_buffer.write();
+
                         last_update_command_fence.reset().unwrap();
                         unsafe {
                             update_cp.reset(br::CommandPoolResetFlags::EMPTY).unwrap();
@@ -5332,9 +5371,22 @@ fn main() {
                             )
                             .transit_to(br::ImageLayout::ShaderReadOnlyOpt.from_undefined())],
                         ))
-                        .inject(|r| editing_atlas_renderer.borrow_mut().process_dirty_data(r))
+                        .inject(|r| {
+                            editing_atlas_renderer
+                                .borrow_mut()
+                                .process_dirty_data(&staging_scratch_buffer_locked, r)
+                        })
                         .end()
                         .unwrap();
+
+                        // TODO: ここでリセットするのまずい気がする(まだコピー完了してない)
+                        // if staging_scratch_buffer_locked.total_reserved_amount() > 0 {
+                        //     tracing::debug!(
+                        //         byte_size = staging_scratch_buffer_locked.total_reserved_amount(),
+                        //         "Reserved Staging Buffers",
+                        //     );
+                        // }
+                        // staging_scratch_buffer_locked.reset();
                     }
 
                     let n = composite_instance_buffer
@@ -6197,12 +6249,13 @@ fn main() {
                     );
                 }
                 AppEvent::UIMessageDialogRequest { content } => {
+                    let mut staging_scratch_buffer_locked = staging_scratch_buffer.write();
                     let id = uuid::Uuid::new_v4();
                     let p = uikit::message_dialog::Presenter::new(
                         &mut PresenterInitContext {
                             for_view: ViewInitContext {
                                 subsystem: &subsystem,
-                                staging_scratch_buffer: &mut staging_scratch_buffer,
+                                staging_scratch_buffer: &mut staging_scratch_buffer_locked,
                                 atlas: &mut composition_alphamask_surface_atlas,
                                 ui_scale_factor: app_shell.ui_scale_factor(),
                                 fonts: &mut font_set,
@@ -6210,7 +6263,7 @@ fn main() {
                                 composite_instance_manager: &mut composite_instance_buffer,
                                 ht: &mut ht_manager,
                             },
-                            app_state: &mut app_state,
+                            app_state: &mut *app_state.borrow_mut(),
                         },
                         id,
                         &content,
@@ -6227,10 +6280,10 @@ fn main() {
                     // クローズしたときも同じ
 
                     tracing::debug!(
-                        byte_size = staging_scratch_buffer.total_reserved_amount(),
+                        byte_size = staging_scratch_buffer_locked.total_reserved_amount(),
                         "Reserved Staging Buffers during Popup UI",
                     );
-                    staging_scratch_buffer.reset();
+                    staging_scratch_buffer_locked.reset();
 
                     popups.insert(id, p);
                 }
@@ -6249,11 +6302,11 @@ fn main() {
                     }
                 }
                 AppEvent::AppMenuToggle => {
-                    app_state.toggle_menu();
+                    app_state.borrow_mut().toggle_menu();
                 }
                 AppEvent::AppMenuRequestAddSprite => {
                     task_worker
-                        .spawn(app_menu_on_add_sprite(&dbus, &events))
+                        .spawn(app_menu_on_add_sprite(&dbus, &events, &app_state))
                         .detach();
                 }
                 AppEvent::BeginBackgroundWork {
@@ -6293,7 +6346,11 @@ impl DBusLink {
     }
 }
 
-async fn app_menu_on_add_sprite(dbus: &DBusLink, events: &AppEventBus) {
+async fn app_menu_on_add_sprite<'subsystem>(
+    dbus: &DBusLink,
+    events: &AppEventBus,
+    app_state: &RefCell<AppState<'subsystem>>,
+) {
     // TODO: これUIだして待つべきか？ローカルだからあんまり待たないような気もするが......
     let reply_msg = dbus
         .send(
@@ -6552,6 +6609,61 @@ async fn app_menu_on_add_sprite(dbus: &DBusLink, events: &AppEventBus) {
     }
 
     println!("selected: {uris:?}");
+
+    let mut added_sprites = Vec::with_capacity(uris.len());
+    for x in uris {
+        let path = std::path::PathBuf::from(match x.to_str() {
+            Ok(x) => x.strip_prefix("file://").unwrap(),
+            Err(e) => {
+                tracing::warn!(reason = ?e, "invalid path");
+                continue;
+            }
+        });
+        if path.is_dir() {
+            // process all files in directory(rec)
+            for entry in walkdir::WalkDir::new(&path)
+                .into_iter()
+                .filter_map(|e| e.ok())
+            {
+                let path = entry.path();
+                if !path.is_file() {
+                    // 自分自身を含むみたいなのでその場合は見逃す
+                    continue;
+                }
+
+                let mut fs = std::fs::File::open(&path).unwrap();
+                let Some(png_meta) = source_reader::png::Metadata::try_read(&mut fs) else {
+                    // PNGじゃないのは一旦見逃す
+                    continue;
+                };
+
+                added_sprites.push(SpriteInfo::new(
+                    path.file_stem().unwrap().to_str().unwrap().into(),
+                    path.to_path_buf(),
+                    png_meta.width,
+                    png_meta.height,
+                ));
+            }
+        } else {
+            let mut fs = std::fs::File::open(&path).unwrap();
+            let png_meta = match source_reader::png::Metadata::try_read(&mut fs) {
+                Some(x) => x,
+                None => {
+                    tracing::warn!(?path, "not a png?");
+                    continue;
+                }
+            };
+
+            added_sprites.push(SpriteInfo::new(
+                path.file_stem().unwrap().to_str().unwrap().into(),
+                path.to_path_buf(),
+                png_meta.width,
+                png_meta.height,
+            ));
+        }
+    }
+
+    app_state.borrow_mut().add_sprites(added_sprites);
 }
 
 static mut DBUS_WAIT_FOR_REPLY_WAKERS: *mut HashMap<

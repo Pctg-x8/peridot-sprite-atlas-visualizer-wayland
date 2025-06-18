@@ -654,6 +654,8 @@ pub struct StagingScratchBuffer<'g> {
     size: br::DeviceSize,
     top: br::DeviceSize,
 }
+unsafe impl Sync for StagingScratchBuffer<'_> {}
+unsafe impl Send for StagingScratchBuffer<'_> {}
 impl Drop for StagingScratchBuffer<'_> {
     fn drop(&mut self) {
         unsafe {
@@ -821,7 +823,7 @@ impl<'g> StagingScratchBufferManager<'g> {
         self.chain_free_block(f, s, 0);
     }
 
-    #[tracing::instrument(ret(level = tracing::Level::DEBUG))]
+    // #[tracing::instrument(ret(level = tracing::Level::DEBUG))]
     fn level_indices(size: br::DeviceSize) -> (u8, u8) {
         const fn const_min_u32(a: u32, b: u32) -> u32 {
             if a < b { a } else { b }
@@ -965,6 +967,20 @@ impl<'g> StagingScratchBufferManager<'g> {
             &self.buffer_blocks[reservation.block_index],
             reservation.offset,
         )
+    }
+
+    pub fn of_index(
+        &self,
+        reservation: &StagingScratchBufferReservation,
+    ) -> (usize, br::DeviceSize) {
+        (reservation.block_index, reservation.offset)
+    }
+
+    pub fn buffer_of<'s>(
+        &'s self,
+        index: usize,
+    ) -> &'s (impl br::VkHandle<Handle = br::vk::VkBuffer> + use<'g>) {
+        &self.buffer_blocks[index]
     }
 
     pub fn map<'s>(

@@ -14,8 +14,11 @@ use crossbeam::{
 
 use crate::platform::linux::{EventFD, EventFDOptions};
 
-pub enum BackgroundWork {
-    LoadSpriteSource(PathBuf, Box<dyn FnMut(PathBuf, image::DynamicImage) + Send>),
+pub enum BackgroundWork<'subsystem> {
+    LoadSpriteSource(
+        PathBuf,
+        Box<dyn FnMut(PathBuf, image::DynamicImage) + Send + 'subsystem>,
+    ),
 }
 
 pub enum BackgroundWorkerViewFeedback {
@@ -24,36 +27,38 @@ pub enum BackgroundWorkerViewFeedback {
 }
 
 #[derive(Clone)]
-pub struct BackgroundWorkerEnqueueAccess(Arc<Injector<BackgroundWork>>);
-impl BackgroundWorkerEnqueueAccess {
+pub struct BackgroundWorkerEnqueueAccess<'subsystem>(Arc<Injector<BackgroundWork<'subsystem>>>);
+impl<'subsystem> BackgroundWorkerEnqueueAccess<'subsystem> {
     #[inline]
-    pub fn enqueue(&self, work: BackgroundWork) {
+    pub fn enqueue(&self, work: BackgroundWork<'subsystem>) {
         self.0.push(work);
     }
 
     #[inline]
-    pub fn downgrade(&self) -> BackgroundWorkerEnqueueWeakAccess {
+    pub fn downgrade(&self) -> BackgroundWorkerEnqueueWeakAccess<'subsystem> {
         BackgroundWorkerEnqueueWeakAccess(Arc::downgrade(&self.0))
     }
 }
 
 #[derive(Clone)]
-pub struct BackgroundWorkerEnqueueWeakAccess(std::sync::Weak<Injector<BackgroundWork>>);
-impl BackgroundWorkerEnqueueWeakAccess {
+pub struct BackgroundWorkerEnqueueWeakAccess<'subsystem>(
+    std::sync::Weak<Injector<BackgroundWork<'subsystem>>>,
+);
+impl<'subsystem> BackgroundWorkerEnqueueWeakAccess<'subsystem> {
     #[inline]
-    pub fn upgrade(&self) -> Option<BackgroundWorkerEnqueueAccess> {
+    pub fn upgrade(&self) -> Option<BackgroundWorkerEnqueueAccess<'subsystem>> {
         self.0.upgrade().map(BackgroundWorkerEnqueueAccess)
     }
 }
 
-pub struct BackgroundWorker {
+pub struct BackgroundWorker<'subsystem> {
     join_handles: Vec<JoinHandle<()>>,
-    work_queue: Arc<Injector<BackgroundWork>>,
+    work_queue: Arc<Injector<BackgroundWork<'subsystem>>>,
     teardown_signal: Arc<AtomicBool>,
     view_feedback_receiver: crossbeam::channel::Receiver<BackgroundWorkerViewFeedback>,
     view_feedback_notifier: Arc<EventFD>,
 }
-impl BackgroundWorker {
+impl<'subsystem> BackgroundWorker<'subsystem> {
     pub fn new() -> Self {
         let worker_count = std::thread::available_parallelism().map_or(4, core::num::NonZero::get);
         let work_queue = Injector::new();
@@ -75,9 +80,9 @@ impl BackgroundWorker {
             Arc::new(EventFD::new(0, EventFDOptions::CLOEXEC | EventFDOptions::NONBLOCK).unwrap());
         for (n, local_queue) in local_queues.into_iter().enumerate() {
             join_handles.push(
-                std::thread::Builder::new()
+                unsafe {std::thread::Builder::new()
                     .name(format!("Background Worker #{}", n + 1))
-                    .spawn({
+                    .spawn_unchecked({
                         let stealers = stealers.clone();
                         let work_queue = work_queue.clone();
                         let teardown_signal = teardown_signal.clone();
@@ -136,7 +141,7 @@ impl BackgroundWorker {
                             }
                         }
                     })
-                    .unwrap(),
+                    .unwrap()},
             );
         }
 
@@ -180,7 +185,7 @@ impl BackgroundWorker {
     }
 
     #[inline(always)]
-    pub fn enqueue_access(&self) -> BackgroundWorkerEnqueueAccess {
+    pub fn enqueue_access(&self) -> BackgroundWorkerEnqueueAccess<'subsystem> {
         BackgroundWorkerEnqueueAccess(self.work_queue.clone())
     }
 

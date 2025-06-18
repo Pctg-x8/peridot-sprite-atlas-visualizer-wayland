@@ -1,4 +1,5 @@
 mod app_state;
+mod bg_worker;
 mod composite;
 mod coordinate;
 mod feature;
@@ -29,6 +30,7 @@ use bedrock::{
     Fence, FenceMut, Image, ImageChild, InstanceChild, MemoryBound, PhysicalDevice, RenderPass,
     ShaderModule, Swapchain, VkHandle, VkHandleMut, VkObject, VkRawHandle,
 };
+use bg_worker::{BackgroundWorker, BackgroundWorkerViewFeedback};
 use composite::{
     AnimatableColor, AnimatableFloat, AnimationData, AtlasRect, CompositeInstanceData,
     CompositeInstanceManager, CompositeMode, CompositeRect, CompositeRenderingData,
@@ -84,6 +86,13 @@ pub enum AppEvent {
     },
     AppMenuToggle,
     AppMenuRequestAddSprite,
+    BeginBackgroundWork {
+        thread_number: usize,
+        message: String,
+    },
+    EndBackgroundWork {
+        thread_number: usize,
+    },
 }
 
 pub struct AppEventBus {
@@ -4734,10 +4743,23 @@ fn main() {
     let mut last_updating = false;
 
     app_state.synchronize_view();
+    app_shell.flush();
+
+    let mut dbus = DBusLink {
+        con: RefCell::new(dbus),
+    };
+
+    unsafe {
+        DBUS_WAIT_FOR_REPLY_WAKERS = &mut HashMap::new() as *mut _;
+        DBUS_WAIT_FOR_SIGNAL_WAKERS = &mut HashMap::new() as *mut _;
+    }
+    let task_worker = smol::LocalExecutor::new();
+    let bg_worker = BackgroundWorker::new();
 
     pub enum PollFDType {
         AppEventBus,
         AppShellDisplay,
+        BackgroundWorkerViewFeedback,
         DBusWatch(*mut dbus::WatchRef),
     }
     struct PollFDPool {
@@ -4775,7 +4797,6 @@ fn main() {
 
     let poll_fd_pool = RefCell::new(PollFDPool::new());
     let epoll = Epoll::new(0).unwrap();
-    // TODO: PtrとU32まぜるのなんか危なそうなのであとでちゃんと仕組みをととのえたい
     epoll
         .add(
             &events.efd,
@@ -4788,6 +4809,17 @@ fn main() {
             &app_shell.display_fd(),
             EPOLLIN,
             EpollData::U64(poll_fd_pool.borrow_mut().alloc(PollFDType::AppShellDisplay)),
+        )
+        .unwrap();
+    epoll
+        .add(
+            bg_worker.view_feedback_notifier(),
+            EPOLLIN,
+            EpollData::U64(
+                poll_fd_pool
+                    .borrow_mut()
+                    .alloc(PollFDType::BackgroundWorkerViewFeedback),
+            ),
         )
         .unwrap();
 
@@ -4880,22 +4912,13 @@ fn main() {
         }
     }
 
-    dbus.set_watch_functions(Box::new(DBusWatcher {
-        epoll: &epoll,
-        fd_pool: &poll_fd_pool,
-        fd_to_pool_index: HashMap::new(),
-    }));
-    let dbus = DBusLink {
-        con: RefCell::new(dbus),
-    };
-
-    app_shell.flush();
-
-    unsafe {
-        DBUS_WAIT_FOR_REPLY_WAKERS = &mut HashMap::new() as *mut _;
-        DBUS_WAIT_FOR_SIGNAL_WAKERS = &mut HashMap::new() as *mut _;
-    }
-    let task_worker = smol::LocalExecutor::new();
+    dbus.con
+        .get_mut()
+        .set_watch_functions(Box::new(DBusWatcher {
+            epoll: &epoll,
+            fd_pool: &poll_fd_pool,
+            fd_to_pool_index: HashMap::new(),
+        }));
 
     let elapsed = setup_timer.elapsed();
     tracing::info!(?elapsed, "App Setup done!");
@@ -4932,6 +4955,34 @@ fn main() {
                     // display event
                     app_shell.read_and_process_events().unwrap();
                     shell_event_processed = true;
+                }
+                Some(&PollFDType::BackgroundWorkerViewFeedback) => {
+                    while let Some(vf) = bg_worker.try_pop_view_feedback() {
+                        match vf {
+                            BackgroundWorkerViewFeedback::BeginWork(thread_number, message) => {
+                                app_update_context
+                                    .event_queue
+                                    .push(AppEvent::BeginBackgroundWork {
+                                        thread_number,
+                                        message,
+                                    })
+                            }
+                            BackgroundWorkerViewFeedback::EndWork(thread_number) => {
+                                app_update_context
+                                    .event_queue
+                                    .push(AppEvent::EndBackgroundWork { thread_number })
+                            }
+                        }
+                    }
+
+                    // TODO: これロックとかとってあげないと僅差で状態がずれる可能性があるかも？
+                    match bg_worker.clear_view_feedback_notification() {
+                        Ok(_) => (),
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => (),
+                        Err(e) => {
+                            tracing::warn!(reason = ?e, "Failed to clear bg worker view feedback notification signal")
+                        }
+                    }
                 }
                 Some(&PollFDType::DBusWatch(watch_ptr)) => {
                     let watch_ptr = unsafe { &mut *watch_ptr };
@@ -6204,6 +6255,15 @@ fn main() {
                     task_worker
                         .spawn(app_menu_on_add_sprite(&dbus, &events))
                         .detach();
+                }
+                AppEvent::BeginBackgroundWork {
+                    thread_number,
+                    message,
+                } => {
+                    tracing::trace!(thread_number, message, "TODO: BeginBackgroundWork");
+                }
+                AppEvent::EndBackgroundWork { thread_number } => {
+                    tracing::trace!(thread_number, "TODO: EndBackgroundWork");
                 }
             }
             app_update_context.event_queue.notify_clear().unwrap();

@@ -4778,11 +4778,16 @@ fn main() {
     acquire_completion
         .set_name(Some(c"acquire_completion"))
         .unwrap();
-    let render_completion =
-        br::SemaphoreObject::new(&subsystem, &br::SemaphoreCreateInfo::new()).unwrap();
-    render_completion
-        .set_name(Some(c"render_completion"))
-        .unwrap();
+    let render_completion_per_backbuffer = (0..sc.backbuffer_count())
+        .map(|n| {
+            let o = br::SemaphoreObject::new(&subsystem, &br::SemaphoreCreateInfo::new()).unwrap();
+            o.set_name(Some(&unsafe {
+                std::ffi::CString::from_vec_unchecked(format!("render_completion#{n}").into_bytes())
+            }))
+            .unwrap();
+            o
+        })
+        .collect::<Vec<_>>();
     let mut last_render_command_fence =
         br::FenceObject::new(&subsystem, &br::FenceCreateInfo::new(0)).unwrap();
     last_render_command_fence
@@ -5787,8 +5792,10 @@ fn main() {
                                 &[br::SemaphoreSubmitInfo::new(&acquire_completion)
                                     .on_color_attachment_output()],
                                 &[br::CommandBufferSubmitInfo::new(&main_cbs[next as usize])],
-                                &[br::SemaphoreSubmitInfo::new(&render_completion)
-                                    .on_color_attachment_output()],
+                                &[br::SemaphoreSubmitInfo::new(
+                                    &render_completion_per_backbuffer[next as usize],
+                                )
+                                .on_color_attachment_output()],
                             )],
                             Some(last_render_command_fence.as_transparent_ref_mut()),
                         )
@@ -5796,7 +5803,10 @@ fn main() {
                     last_rendering = true;
                     subsystem
                         .queue_present(&br::PresentInfo::new(
-                            &[render_completion.as_transparent_ref()],
+                            &[
+                                render_completion_per_backbuffer[next as usize]
+                                    .as_transparent_ref(),
+                            ],
                             &[sc.as_transparent_ref()],
                             &[next],
                             &mut [br::vk::VkResult(0)],

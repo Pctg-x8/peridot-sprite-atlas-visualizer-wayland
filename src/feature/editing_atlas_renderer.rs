@@ -592,122 +592,126 @@ impl<'d> EditingAtlasRenderer<'d> {
         let mut atlas_mref = self.loaded_sprite_source_atlas.borrow_mut();
 
         buffers_mref.require_capacity(sprites.len() as _);
-        let h = buffers_mref.stg_memory.native_ptr();
-        let p = buffers_mref
-            .stg_memory
-            .map(0..sprites.len() * core::mem::size_of::<SpriteInstance>())
-            .unwrap();
-        self.sprite_image_copies.write().clear();
-        for (n, x) in sprites.iter().enumerate() {
-            let (ox, oy) = match rects_mref.entry(x.source_path.clone()) {
-                std::collections::hash_map::Entry::Occupied(o) => {
-                    let &(ox, oy, _, _) = o.get();
+        if !sprites.is_empty() {
+            let h = buffers_mref.stg_memory.native_ptr();
+            let p = buffers_mref
+                .stg_memory
+                .map(0..sprites.len() * core::mem::size_of::<SpriteInstance>())
+                .unwrap();
+            self.sprite_image_copies.write().clear();
+            for (n, x) in sprites.iter().enumerate() {
+                let (ox, oy) = match rects_mref.entry(x.source_path.clone()) {
+                    std::collections::hash_map::Entry::Occupied(o) => {
+                        let &(ox, oy, _, _) = o.get();
 
-                    (ox, oy)
-                }
-                std::collections::hash_map::Entry::Vacant(v) => {
-                    let Some((ox, oy)) = atlas_mref.alloc(x.width, x.height) else {
-                        tracing::error!(path = ?x.source_path, width = x.width, height = x.height, "no space for sprite(TODO: add page or resize atlas...)");
-                        continue;
-                    };
-                    v.insert((ox, oy, x.width, x.height));
+                        (ox, oy)
+                    }
+                    std::collections::hash_map::Entry::Vacant(v) => {
+                        let Some((ox, oy)) = atlas_mref.alloc(x.width, x.height) else {
+                            tracing::error!(path = ?x.source_path, width = x.width, height = x.height, "no space for sprite(TODO: add page or resize atlas...)");
+                            continue;
+                        };
+                        v.insert((ox, oy, x.width, x.height));
 
-                    bg_worker_access.enqueue(BackgroundWork::LoadSpriteSource(
-                        x.source_path.clone(),
-                        Box::new({
-                            let sprite_image_copies = Arc::downgrade(&self.sprite_image_copies);
-                            let staging_scratch_buffer = staging_scratch_buffer.clone();
-                            let &SpriteInfo { width, height, .. } = x;
+                        bg_worker_access.enqueue(BackgroundWork::LoadSpriteSource(
+                            x.source_path.clone(),
+                            Box::new({
+                                let sprite_image_copies = Arc::downgrade(&self.sprite_image_copies);
+                                let staging_scratch_buffer = staging_scratch_buffer.clone();
+                                let &SpriteInfo { width, height, .. } = x;
 
-                            move |path, di| {
-                                let Some(sprite_image_copies) = sprite_image_copies.upgrade()
-                                else {
-                                    // component teardown-ed
-                                    return;
-                                };
-                                let Some(staging_scratch_buffer) = staging_scratch_buffer.upgrade()
-                                else {
-                                    // app teardown-ed
-                                    return;
-                                };
+                                move |path, di| {
+                                    let Some(sprite_image_copies) = sprite_image_copies.upgrade()
+                                    else {
+                                        // component teardown-ed
+                                        return;
+                                    };
+                                    let Some(staging_scratch_buffer) =
+                                        staging_scratch_buffer.upgrade()
+                                    else {
+                                        // app teardown-ed
+                                        return;
+                                    };
 
-                                // TODO: hdr
-                                let img_formatted = di.to_rgba8();
-                                let img_bytes = img_formatted.as_bytes();
+                                    // TODO: hdr
+                                    let img_formatted = di.to_rgba8();
+                                    let img_bytes = img_formatted.as_bytes();
 
-                                let mut staging_scratch_buffer = staging_scratch_buffer.write();
-                                let mut copies_locked = sprite_image_copies.write();
-                                let r = staging_scratch_buffer.reserve(img_bytes.len() as _);
-                                let p = staging_scratch_buffer
-                                    .map(&r, StagingScratchBufferMapMode::Write)
-                                    .unwrap();
-                                unsafe {
-                                    p.addr_of_mut::<u8>(0).copy_from_nonoverlapping(
-                                        img_bytes.as_ptr(),
-                                        img_bytes.len(),
+                                    let mut staging_scratch_buffer = staging_scratch_buffer.write();
+                                    let mut copies_locked = sprite_image_copies.write();
+                                    let r = staging_scratch_buffer.reserve(img_bytes.len() as _);
+                                    let p = staging_scratch_buffer
+                                        .map(&r, StagingScratchBufferMapMode::Write)
+                                        .unwrap();
+                                    unsafe {
+                                        p.addr_of_mut::<u8>(0).copy_from_nonoverlapping(
+                                            img_bytes.as_ptr(),
+                                            img_bytes.len(),
+                                        );
+                                    }
+                                    drop(p);
+                                    let (bx, o) = staging_scratch_buffer.of_index(&r);
+                                    copies_locked.entry(bx).or_insert_with(Vec::new).push(
+                                        br::vk::VkBufferImageCopy {
+                                            bufferOffset: o,
+                                            bufferRowLength: img_formatted.width(),
+                                            bufferImageHeight: img_formatted.height(),
+                                            imageSubresource: br::ImageSubresourceLayers::new(
+                                                br::AspectMask::COLOR,
+                                                0,
+                                                0..1,
+                                            ),
+                                            imageOffset: br::Offset3D::new(ox as _, oy as _, 0),
+                                            imageExtent: br::Extent3D::new(width, height, 1),
+                                        },
                                     );
+
+                                    tracing::info!(?path, ox, oy, "LoadSpriteComplete");
                                 }
-                                drop(p);
-                                let (bx, o) = staging_scratch_buffer.of_index(&r);
-                                copies_locked.entry(bx).or_insert_with(Vec::new).push(
-                                    br::vk::VkBufferImageCopy {
-                                        bufferOffset: o,
-                                        bufferRowLength: img_formatted.width(),
-                                        bufferImageHeight: img_formatted.height(),
-                                        imageSubresource: br::ImageSubresourceLayers::new(
-                                            br::AspectMask::COLOR,
-                                            0,
-                                            0..1,
-                                        ),
-                                        imageOffset: br::Offset3D::new(ox as _, oy as _, 0),
-                                        imageExtent: br::Extent3D::new(width, height, 1),
-                                    },
-                                );
+                            }),
+                        ));
 
-                                tracing::info!(?path, ox, oy, "LoadSpriteComplete");
-                            }
-                        }),
-                    ));
+                        (ox, oy)
+                    }
+                };
 
-                    (ox, oy)
+                unsafe {
+                    let instance_ptr =
+                        p.addr_of_mut::<SpriteInstance>(n * core::mem::size_of::<SpriteInstance>());
+                    core::ptr::addr_of_mut!((*instance_ptr).pos_st).write([
+                        x.width as f32,
+                        x.height as f32,
+                        x.left as f32,
+                        x.top as f32,
+                    ]);
+                    core::ptr::addr_of_mut!((*instance_ptr).uv_st).write([
+                        x.width as f32 / LoadedSpriteSourceAtlas::SIZE as f32,
+                        x.height as f32 / LoadedSpriteSourceAtlas::SIZE as f32,
+                        ox as f32 / LoadedSpriteSourceAtlas::SIZE as f32,
+                        oy as f32 / LoadedSpriteSourceAtlas::SIZE as f32,
+                    ]);
                 }
-            };
+            }
+            if buffers_mref.stg_requires_flush {
+                unsafe {
+                    buffers_mref
+                        .subsystem
+                        .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(
+                            h,
+                            0,
+                            (sprites.len() * core::mem::size_of::<SpriteInstance>()) as _,
+                        )])
+                        .unwrap();
+                }
+            }
+            unsafe {
+                buffers_mref.stg_memory.unmap();
+            }
 
-            unsafe {
-                let instance_ptr =
-                    p.addr_of_mut::<SpriteInstance>(n * core::mem::size_of::<SpriteInstance>());
-                core::ptr::addr_of_mut!((*instance_ptr).pos_st).write([
-                    x.width as f32,
-                    x.height as f32,
-                    x.left as f32,
-                    x.top as f32,
-                ]);
-                core::ptr::addr_of_mut!((*instance_ptr).uv_st).write([
-                    x.width as f32 / LoadedSpriteSourceAtlas::SIZE as f32,
-                    x.height as f32 / LoadedSpriteSourceAtlas::SIZE as f32,
-                    ox as f32 / LoadedSpriteSourceAtlas::SIZE as f32,
-                    oy as f32 / LoadedSpriteSourceAtlas::SIZE as f32,
-                ]);
-            }
-        }
-        if buffers_mref.stg_requires_flush {
-            unsafe {
-                buffers_mref
-                    .subsystem
-                    .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(
-                        h,
-                        0,
-                        (sprites.len() * core::mem::size_of::<SpriteInstance>()) as _,
-                    )])
-                    .unwrap();
-            }
-        }
-        unsafe {
-            buffers_mref.stg_memory.unmap();
+            buffers_mref.is_dirty = true;
         }
 
         self.sprite_count.set(sprites.len());
-        buffers_mref.is_dirty = true;
     }
 
     pub const fn offset(&self) -> [f32; 2] {

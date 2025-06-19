@@ -37,14 +37,14 @@ use composite::{
     AnimatableColor, AnimatableFloat, AnimationData, AtlasRect, CompositeInstanceData,
     CompositeInstanceManager, CompositeMode, CompositeRect, CompositeRenderingData,
     CompositeRenderingInstruction, CompositeStreamingData, CompositeTree,
-    CompositeTreeFloatParameterRef, CompositeTreeRef, CompositionSurfaceAtlas, RenderPassType,
+    CompositeTreeFloatParameterRef, CompositeTreeRef, CompositionSurfaceAtlas,
+    RenderPassAfterOperation, RenderPassRequirements,
 };
 use coordinate::SizePixels;
 use feature::editing_atlas_renderer::EditingAtlasRenderer;
 use hittest::{
     CursorShape, HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef,
 };
-use image::DynamicImage;
 use input::{EventContinueControl, PointerInputManager};
 use parking_lot::RwLock;
 use platform::linux::{
@@ -3289,6 +3289,9 @@ impl<'c> HitTestTreeActionHandler<'c> for AppMenuActionHandler {
                     }
                     AppMenuCommandIdentifier::Save => {
                         println!("Save");
+                        context.event_queue.push(AppEvent::UIMessageDialogRequest {
+                            content: "Save not implemented".into(),
+                        });
                     }
                 }
 
@@ -4651,7 +4654,10 @@ fn main() {
             height: 32,
         },
     )));
-    let mut editing_atlas_current_bound_pipeline = RenderPassType::Final;
+    let mut editing_atlas_current_bound_pipeline = RenderPassRequirements {
+        after_operation: RenderPassAfterOperation::None,
+        continued: false,
+    };
     init_context.app_state.register_atlas_size_view_feedback({
         let editing_atlas_renderer = Rc::downgrade(&editing_atlas_renderer);
 
@@ -4968,7 +4974,7 @@ fn main() {
     let mut last_pointer_pos = (0.0f32, 0.0f32);
     let mut last_composite_render_instructions = CompositeRenderingData {
         instructions: Vec::new(),
-        render_pass_types: Vec::new(),
+        render_passes: Vec::new(),
         required_backdrop_buffer_count: 0,
     };
     let mut composite_instance_buffer_dirty = false;
@@ -5426,21 +5432,28 @@ fn main() {
                     }
 
                     if main_cb_invalid {
-                        if last_composite_render_instructions.render_pass_types[0]
+                        if last_composite_render_instructions.render_passes[0]
                             != editing_atlas_current_bound_pipeline
                         {
                             editing_atlas_current_bound_pipeline =
-                                last_composite_render_instructions.render_pass_types[0];
+                                last_composite_render_instructions.render_passes[0];
                             editing_atlas_renderer.borrow_mut().recreate(
                                 &subsystem,
-                                match editing_atlas_current_bound_pipeline {
-                                    RenderPassType::Grabbed => main_rp_grabbed.subpass(0),
-                                    RenderPassType::Final => main_rp_final.subpass(0),
-                                    RenderPassType::ContinueGrabbed => {
-                                        main_rp_continue_grabbed.subpass(0)
+                                match (
+                                    editing_atlas_current_bound_pipeline.after_operation,
+                                    editing_atlas_current_bound_pipeline.continued,
+                                ) {
+                                    (RenderPassAfterOperation::None, false) => {
+                                        main_rp_final.subpass(0)
                                     }
-                                    RenderPassType::ContinueFinal => {
+                                    (RenderPassAfterOperation::None, true) => {
                                         main_rp_continue_final.subpass(0)
+                                    }
+                                    (RenderPassAfterOperation::Grab, false) => {
+                                        main_rp_grabbed.subpass(0)
+                                    }
+                                    (RenderPassAfterOperation::Grab, true) => {
+                                        main_rp_continue_grabbed.subpass(0)
                                     }
                                 },
                                 sc.size,
@@ -5448,13 +5461,20 @@ fn main() {
                         }
 
                         for (n, cb) in main_cbs.iter_mut().enumerate() {
-                            let (first_rp, first_fb) = match last_composite_render_instructions
-                                .render_pass_types[0]
-                            {
-                                RenderPassType::Grabbed => (&main_rp_grabbed, &main_grabbed_fbs[n]),
-                                RenderPassType::Final => (&main_rp_final, &main_final_fbs[n]),
-                                _ => unreachable!("cannot continue at first"),
-                            };
+                            let (first_rp, first_fb) =
+                                match last_composite_render_instructions.render_passes[0] {
+                                    RenderPassRequirements {
+                                        continued: true, ..
+                                    } => unreachable!("cannot continue at first"),
+                                    RenderPassRequirements {
+                                        after_operation: RenderPassAfterOperation::Grab,
+                                        continued: false,
+                                    } => (&main_rp_grabbed, &main_grabbed_fbs[n]),
+                                    RenderPassRequirements {
+                                        after_operation: RenderPassAfterOperation::None,
+                                        continued: false,
+                                    } => (&main_rp_final, &main_final_fbs[n]),
+                                };
 
                             unsafe {
                                 cb.begin(&br::CommandBufferBeginInfo::new(), &subsystem)
@@ -5488,14 +5508,14 @@ fn main() {
                                             if !in_render_pass {
                                                 in_render_pass = true;
 
-                                                let (rp, fb) = match last_composite_render_instructions.render_pass_types[rpt_pointer] {
-                                                    RenderPassType::ContinueGrabbed => {
+                                                let (rp, fb) = match last_composite_render_instructions.render_passes[rpt_pointer] {
+                                                    RenderPassRequirements { continued: false, .. } => unreachable!("not at first(must be continued)"),
+                                                    RenderPassRequirements { continued: true, after_operation: RenderPassAfterOperation::Grab } => {
                                                         (&main_rp_continue_grabbed, &main_continue_grabbed_fbs[n])
                                                     }
-                                                    RenderPassType::ContinueFinal => {
+                                                    RenderPassRequirements { continued: true, after_operation: RenderPassAfterOperation::None } => {
                                                         (&main_rp_continue_final, &main_continue_final_fbs[n])
                                                     }
-                                                    _ => unreachable!("not at first"),
                                                 };
 
                                                 r = r.begin_render_pass2(
@@ -5518,17 +5538,17 @@ fn main() {
                                                 r = r
                                                     .bind_pipeline(
                                                         br::PipelineBindPoint::Graphics,
-                                                        match last_composite_render_instructions.render_pass_types[rpt_pointer] {
-                                                            RenderPassType::Grabbed => {
+                                                        match last_composite_render_instructions.render_passes[rpt_pointer] {
+                                                            RenderPassRequirements { continued: false, after_operation: RenderPassAfterOperation::Grab } => {
                                                                 &composite_pipeline_grabbed
                                                             }
-                                                            RenderPassType::Final => {
+                                                            RenderPassRequirements { continued: false, after_operation: RenderPassAfterOperation::None } => {
                                                                 &composite_pipeline_final
                                                             }
-                                                            RenderPassType::ContinueGrabbed => {
+                                                            RenderPassRequirements { continued: true, after_operation: RenderPassAfterOperation::Grab } => {
                                                                 &composite_pipeline_continue_grabbed
                                                             }
-                                                            RenderPassType::ContinueFinal => {
+                                                            RenderPassRequirements { continued: true, after_operation: RenderPassAfterOperation::None } => {
                                                                 &composite_pipeline_continue_final
                                                             }
                                                         },
@@ -6166,14 +6186,22 @@ fn main() {
                             editing_atlas_renderer.borrow_mut().recreate(
                                 &subsystem,
                                 match editing_atlas_current_bound_pipeline {
-                                    RenderPassType::Grabbed => main_rp_grabbed.subpass(0),
-                                    RenderPassType::Final => main_rp_final.subpass(0),
-                                    RenderPassType::ContinueGrabbed => {
-                                        main_rp_continue_grabbed.subpass(0)
-                                    }
-                                    RenderPassType::ContinueFinal => {
-                                        main_rp_continue_final.subpass(0)
-                                    }
+                                    RenderPassRequirements {
+                                        continued: false,
+                                        after_operation: RenderPassAfterOperation::Grab,
+                                    } => main_rp_grabbed.subpass(0),
+                                    RenderPassRequirements {
+                                        continued: false,
+                                        after_operation: RenderPassAfterOperation::None,
+                                    } => main_rp_final.subpass(0),
+                                    RenderPassRequirements {
+                                        continued: true,
+                                        after_operation: RenderPassAfterOperation::Grab,
+                                    } => main_rp_continue_grabbed.subpass(0),
+                                    RenderPassRequirements {
+                                        continued: true,
+                                        after_operation: RenderPassAfterOperation::None,
+                                    } => main_rp_continue_final.subpass(0),
                                 },
                                 sc.size,
                             );

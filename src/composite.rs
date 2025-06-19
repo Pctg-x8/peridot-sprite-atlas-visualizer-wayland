@@ -363,6 +363,7 @@ pub struct CompositeInstanceManager<'d> {
 impl<'d> CompositeInstanceManager<'d> {
     const INIT_CAP: usize = 1024;
 
+    #[tracing::instrument(skip(subsystem))]
     pub fn new(subsystem: &'d Subsystem) -> Self {
         let mut buffer = br::BufferObject::new(
             subsystem,
@@ -372,14 +373,15 @@ impl<'d> CompositeInstanceManager<'d> {
             ),
         )
         .expect("Failed to create composite instance buffer");
-        let buffer_mreq = buffer.requirements();
-        let memory_index = subsystem
-            .adapter_memory_info
-            .find_device_local_index(buffer_mreq.memoryTypeBits)
-            .expect("no suitable memory");
+        let req = buffer.requirements();
+        let Some(memory_index) = subsystem.find_device_local_memory_index(req.memoryTypeBits)
+        else {
+            tracing::error!(memory_index_mask = req.memoryTypeBits, "no suitable memory");
+            std::process::exit(1);
+        };
         let memory = br::DeviceMemoryObject::new(
             subsystem,
-            &br::MemoryAllocateInfo::new(buffer_mreq.size, memory_index),
+            &br::MemoryAllocateInfo::new(req.size, memory_index),
         )
         .expect("Failed to allocate composite instance data memory");
         buffer
@@ -394,20 +396,13 @@ impl<'d> CompositeInstanceManager<'d> {
         )
         .unwrap();
         let mreq = streaming_buffer.requirements();
-        let memory_index = subsystem
-            .adapter_memory_info
-            .types()
-            .iter()
-            .enumerate()
-            .find(|(n, t)| {
-                (mreq.memoryTypeBits & (1 << n)) != 0
-                    && t.property_flags().has_all(
-                        br::MemoryPropertyFlags::DEVICE_LOCAL
-                            | br::MemoryPropertyFlags::HOST_VISIBLE,
-                    )
-            })
-            .expect("no suitable memory for streaming")
-            .0 as u32;
+        let Some(memory_index) = subsystem.find_direct_memory_index(mreq.memoryTypeBits) else {
+            tracing::error!(
+                memory_index_mask = mreq.memoryTypeBits,
+                "no suitable memory for streaming"
+            );
+            std::process::exit(1);
+        };
         let streaming_memory = br::DeviceMemoryObject::new(
             subsystem,
             &br::MemoryAllocateInfo::new(mreq.size, memory_index),
@@ -481,7 +476,7 @@ impl<'d> CompositeInstanceManager<'d> {
         )
     }
 
-    pub const fn buffer_stg(&self) -> &impl br::Buffer {
+    pub const fn buffer_stg<'b>(&'b self) -> &'b (impl br::Buffer + use<'d>) {
         &self.buffer_stg
     }
 
@@ -598,17 +593,29 @@ impl SafeF32 {
         Self(v)
     }
 
+    pub const fn new(v: f32) -> Option<Self> {
+        if v.is_nan() {
+            None
+        } else {
+            Some(unsafe { Self::new_unchecked(v) })
+        }
+    }
+
     pub const fn value(&self) -> f32 {
         self.0
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RenderPassType {
-    Grabbed,
-    Final,
-    ContinueGrabbed,
-    ContinueFinal,
+pub enum RenderPassAfterOperation {
+    None,
+    Grab,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderPassRequirements {
+    pub after_operation: RenderPassAfterOperation,
+    pub continued: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -628,7 +635,7 @@ pub enum CompositeRenderingInstruction {
 #[derive(Debug, PartialEq, Eq)]
 pub struct CompositeRenderingData {
     pub instructions: Vec<CompositeRenderingInstruction>,
-    pub render_pass_types: Vec<RenderPassType>,
+    pub render_passes: Vec<RenderPassRequirements>,
     pub required_backdrop_buffer_count: usize,
 }
 
@@ -641,7 +648,7 @@ const fn rect_overlaps(a: &br::Rect2D, b: &br::Rect2D) -> bool {
 
 struct CompositeRenderingInstructionBuilder {
     insts: Vec<CompositeRenderingInstruction>,
-    render_pass_types: Vec<RenderPassType>,
+    render_passes: Vec<RenderPassRequirements>,
     last_free_backdrop_buffer: usize,
     active_backdrop_blur_index_for_stdev: HashMap<SafeF32, usize>,
     current_backdrop_overlap_rects: Vec<br::Rect2D>,
@@ -653,7 +660,7 @@ impl CompositeRenderingInstructionBuilder {
     fn new(screen_size: br::Extent2D) -> Self {
         Self {
             insts: Vec::new(),
-            render_pass_types: Vec::new(),
+            render_passes: Vec::new(),
             last_free_backdrop_buffer: 0,
             active_backdrop_blur_index_for_stdev: HashMap::new(),
             current_backdrop_overlap_rects: Vec::new(),
@@ -668,15 +675,15 @@ impl CompositeRenderingInstructionBuilder {
         self.max_backdrop_buffer_count = self
             .max_backdrop_buffer_count
             .max(self.last_free_backdrop_buffer);
-        if self.render_pass_types.is_empty() {
-            self.render_pass_types.push(RenderPassType::Final);
-        } else {
-            self.render_pass_types.push(RenderPassType::ContinueFinal);
-        }
+        let rpr = RenderPassRequirements {
+            after_operation: RenderPassAfterOperation::None,
+            continued: !self.render_passes.is_empty(),
+        };
+        self.render_passes.push(rpr);
 
         CompositeRenderingData {
             instructions: self.insts,
-            render_pass_types: self.render_pass_types,
+            render_passes: self.render_passes,
             required_backdrop_buffer_count: self.max_backdrop_buffer_count,
         }
     }
@@ -719,11 +726,11 @@ impl CompositeRenderingInstructionBuilder {
                     rects: vec![rect],
                 },
             ]);
-            if self.render_pass_types.is_empty() {
-                self.render_pass_types.push(RenderPassType::Grabbed);
-            } else {
-                self.render_pass_types.push(RenderPassType::ContinueGrabbed);
-            }
+            let rpr = RenderPassRequirements {
+                after_operation: RenderPassAfterOperation::Grab,
+                continued: !self.render_passes.is_empty(),
+            };
+            self.render_passes.push(rpr);
             self.max_backdrop_buffer_count = self
                 .max_backdrop_buffer_count
                 .max(self.last_free_backdrop_buffer);
@@ -752,11 +759,11 @@ impl CompositeRenderingInstructionBuilder {
                     rects: vec![rect],
                 },
             ]);
-            if self.render_pass_types.is_empty() {
-                self.render_pass_types.push(RenderPassType::Grabbed);
-            } else {
-                self.render_pass_types.push(RenderPassType::ContinueGrabbed);
-            }
+            let rpr = RenderPassRequirements {
+                after_operation: RenderPassAfterOperation::Grab,
+                continued: !self.render_passes.is_empty(),
+            };
+            self.render_passes.push(rpr);
             self.max_backdrop_buffer_count = self
                 .max_backdrop_buffer_count
                 .max(self.last_free_backdrop_buffer);

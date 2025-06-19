@@ -7,20 +7,20 @@ use std::{
 
 use bedrock::{
     self as br, DescriptorPoolMut, Device, DeviceMemoryMut, ImageChild, MemoryBound, ShaderModule,
-    VkHandle,
+    VkHandle, VkObject,
 };
 use image::EncodableLayout;
 use parking_lot::RwLock;
 
 use crate::{
-    AppEventBus, BLEND_STATE_SINGLE_NONE, BLEND_STATE_SINGLE_PREMULTIPLIED, IA_STATE_TRILIST,
-    IA_STATE_TRISTRIP, MS_STATE_EMPTY, RASTER_STATE_DEFAULT_FILL_NOCULL, VI_STATE_EMPTY,
-    VI_STATE_FLOAT4_ONLY,
+    AppEventBus, BLEND_STATE_SINGLE_NONE, BLEND_STATE_SINGLE_PREMULTIPLIED,
+    BufferedStagingScratchBuffer, IA_STATE_TRILIST, IA_STATE_TRISTRIP, MS_STATE_EMPTY,
+    RASTER_STATE_DEFAULT_FILL_NOCULL, VI_STATE_EMPTY, VI_STATE_FLOAT4_ONLY,
     app_state::SpriteInfo,
     bg_worker::{BackgroundWork, BackgroundWorkerEnqueueAccess},
     coordinate::SizePixels,
     subsystem::{
-        StagingScratchBuffer, StagingScratchBufferManager, StagingScratchBufferMapMode, Subsystem,
+        StagingScratchBufferManager, StagingScratchBufferMapMode, Subsystem,
         SubsystemShaderModuleRef,
     },
 };
@@ -51,6 +51,9 @@ impl<'subsystem> LoadedSpriteSourceAtlas<'subsystem> {
                 .usage_with(br::ImageUsageFlags::TRANSFER_SRC),
         )
         .unwrap();
+        resource
+            .set_name(Some(c"Loaded Sprite Source Atlas"))
+            .unwrap();
         let req = resource.requirements();
         let memindex = subsystem
             .find_device_local_memory_index(req.memoryTypeBits)
@@ -580,12 +583,12 @@ impl<'d> EditingAtlasRenderer<'d> {
         }
     }
 
-    #[tracing::instrument(skip(self, sprites, bg_worker_access, staging_scratch_buffer))]
+    #[tracing::instrument(skip(self, sprites, bg_worker_access, staging_scratch_buffers))]
     pub fn update_sprites(
         &self,
         sprites: &[SpriteInfo],
         bg_worker_access: &BackgroundWorkerEnqueueAccess<'d>,
-        staging_scratch_buffer: &std::sync::Weak<RwLock<StagingScratchBufferManager<'d>>>,
+        staging_scratch_buffers: &std::sync::Weak<RwLock<BufferedStagingScratchBuffer<'d>>>,
     ) {
         let mut buffers_mref = self.sprite_instance_buffers.borrow_mut();
         let mut rects_mref = self.sprite_atlas_rect_by_path.borrow_mut();
@@ -617,7 +620,7 @@ impl<'d> EditingAtlasRenderer<'d> {
                             x.source_path.clone(),
                             Box::new({
                                 let sprite_image_copies = Arc::downgrade(&self.sprite_image_copies);
-                                let staging_scratch_buffer = staging_scratch_buffer.clone();
+                                let staging_scratch_buffers = staging_scratch_buffers.clone();
                                 let &SpriteInfo { width, height, .. } = x;
 
                                 move |path, di| {
@@ -626,8 +629,8 @@ impl<'d> EditingAtlasRenderer<'d> {
                                         // component teardown-ed
                                         return;
                                     };
-                                    let Some(staging_scratch_buffer) =
-                                        staging_scratch_buffer.upgrade()
+                                    let Some(staging_scratch_buffers) =
+                                        staging_scratch_buffers.upgrade()
                                     else {
                                         // app teardown-ed
                                         return;
@@ -637,7 +640,11 @@ impl<'d> EditingAtlasRenderer<'d> {
                                     let img_formatted = di.to_rgba8();
                                     let img_bytes = img_formatted.as_bytes();
 
-                                    let mut staging_scratch_buffer = staging_scratch_buffer.write();
+                                    let mut staging_scratch_buffer =
+                                        parking_lot::RwLockWriteGuard::map(
+                                            staging_scratch_buffers.write(),
+                                            |x| x.active_buffer_mut(),
+                                        );
                                     let mut copies_locked = sprite_image_copies.write();
                                     let r = staging_scratch_buffer.reserve(img_bytes.len() as _);
                                     let p = staging_scratch_buffer

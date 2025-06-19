@@ -222,6 +222,44 @@ pub struct AppUpdateContext<'d> {
     pub event_queue: &'d AppEventBus,
 }
 
+pub struct BufferedStagingScratchBuffer<'subsystem> {
+    buffers: Vec<RwLock<StagingScratchBufferManager<'subsystem>>>,
+    active_index: usize,
+}
+impl<'subsystem> BufferedStagingScratchBuffer<'subsystem> {
+    pub fn new(subsystem: &'subsystem Subsystem, count: usize) -> Self {
+        Self {
+            buffers: core::iter::repeat_with(|| {
+                RwLock::new(StagingScratchBufferManager::new(subsystem))
+            })
+            .take(count)
+            .collect(),
+            active_index: 0,
+        }
+    }
+
+    pub fn flip_next_and_ready(&mut self) {
+        self.active_index = (self.active_index + 1) % self.buffers.len();
+        self.buffers[self.active_index].get_mut().reset();
+    }
+
+    pub fn active_buffer<'s>(
+        &'s self,
+    ) -> parking_lot::RwLockReadGuard<'s, StagingScratchBufferManager<'subsystem>> {
+        self.buffers[self.active_index].read()
+    }
+
+    pub fn active_buffer_mut<'s>(&'s mut self) -> &'s mut StagingScratchBufferManager<'subsystem> {
+        self.buffers[self.active_index].get_mut()
+    }
+
+    pub fn active_buffer_locked<'s>(
+        &'s self,
+    ) -> parking_lot::RwLockWriteGuard<'s, StagingScratchBufferManager<'subsystem>> {
+        self.buffers[self.active_index].write()
+    }
+}
+
 pub struct SpriteListToggleButtonView {
     icon_atlas_rect: AtlasRect,
     ct_root: CompositeTreeRef,
@@ -3886,7 +3924,7 @@ fn main() {
     tracing::info!("Initializing Peridot SpriteAtlas Visualizer/Editor");
     let setup_timer = std::time::Instant::now();
 
-    let mut dbus = dbus::Connection::connect_bus(dbus::BusType::Session).unwrap();
+    let dbus = dbus::Connection::connect_bus(dbus::BusType::Session).unwrap();
 
     let events = AppEventBus {
         queue: UnsafeCell::new(VecDeque::new()),
@@ -3908,7 +3946,9 @@ fn main() {
     }
 
     let subsystem = Subsystem::init();
-    let mut staging_scratch_buffer = StagingScratchBufferManager::new(&subsystem);
+    let staging_scratch_buffers = Arc::new(RwLock::new(BufferedStagingScratchBuffer::new(
+        &subsystem, 2,
+    )));
     let mut composition_alphamask_surface_atlas = CompositionSurfaceAtlas::new(
         &subsystem,
         subsystem.adapter_properties.limits.maxImageDimension2D,
@@ -4627,9 +4667,11 @@ fn main() {
     }
     let task_worker = smol::LocalExecutor::new();
     let bg_worker = BackgroundWorker::new();
-    let staging_scratch_buffer = Arc::new(RwLock::new(staging_scratch_buffer));
 
-    let mut staging_scratch_buffer_locked = staging_scratch_buffer.write();
+    let mut staging_scratch_buffer_locked =
+        parking_lot::RwLockWriteGuard::map(staging_scratch_buffers.write(), |x| {
+            x.active_buffer_mut()
+        });
     let mut init_context = PresenterInitContext {
         for_view: ViewInitContext {
             subsystem: &subsystem,
@@ -4673,7 +4715,7 @@ fn main() {
     init_context.app_state.register_sprites_view_feedback({
         let editing_atlas_renderer = Rc::downgrade(&editing_atlas_renderer);
         let bg_worker = bg_worker.enqueue_access().downgrade();
-        let staging_scratch_buffer = Arc::downgrade(&staging_scratch_buffer);
+        let staging_scratch_buffers = Arc::downgrade(&staging_scratch_buffers);
 
         move |sprites| {
             let Some(editing_atlas_renderer) = editing_atlas_renderer.upgrade() else {
@@ -4688,7 +4730,7 @@ fn main() {
             editing_atlas_renderer.borrow().update_sprites(
                 sprites,
                 &bg_worker,
-                &staging_scratch_buffer,
+                &staging_scratch_buffers,
             );
         }
     });
@@ -4734,7 +4776,11 @@ fn main() {
     ht_manager.set_action_handler(ht_root, &ht_root_fallback_action_handler);
 
     {
-        let mut staging_scratch_buffer_locked = staging_scratch_buffer.write();
+        let mut staging_scratch_buffer_locked =
+            parking_lot::RwLockWriteGuard::map(staging_scratch_buffers.write(), |x| {
+                x.active_buffer_mut()
+            });
+
         tracing::debug!(
             byte_size = staging_scratch_buffer_locked.total_reserved_amount(),
             "Reserved Staging Buffers during UI initialization",
@@ -5349,7 +5395,7 @@ fn main() {
                             last_updating = false;
                         }
 
-                        let mut staging_scratch_buffer_locked = staging_scratch_buffer.write();
+                        let mut staging_scratch_buffers_locked = staging_scratch_buffers.write();
 
                         last_update_command_fence.reset().unwrap();
                         unsafe {
@@ -5383,15 +5429,15 @@ fn main() {
                             .transit_to(br::ImageLayout::ShaderReadOnlyOpt.from_undefined())],
                         ))
                         .inject(|r| {
-                            editing_atlas_renderer
-                                .borrow_mut()
-                                .process_dirty_data(&staging_scratch_buffer_locked, r)
+                            editing_atlas_renderer.borrow_mut().process_dirty_data(
+                                &staging_scratch_buffers_locked.active_buffer(),
+                                r,
+                            )
                         })
                         .end()
                         .unwrap();
 
-                        // TODO: ここでリセットするのまずい気がする(まだコピー完了してない)
-                        staging_scratch_buffer_locked.reset();
+                        staging_scratch_buffers_locked.flip_next_and_ready();
                     }
 
                     let n = composite_instance_buffer
@@ -6281,7 +6327,10 @@ fn main() {
                     );
                 }
                 AppEvent::UIMessageDialogRequest { content } => {
-                    let mut staging_scratch_buffer_locked = staging_scratch_buffer.write();
+                    let mut staging_scratch_buffer_locked =
+                        parking_lot::RwLockWriteGuard::map(staging_scratch_buffers.write(), |x| {
+                            x.active_buffer_mut()
+                        });
                     let id = uuid::Uuid::new_v4();
                     let p = uikit::message_dialog::Presenter::new(
                         &mut PresenterInitContext {

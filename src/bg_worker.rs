@@ -12,8 +12,6 @@ use crossbeam::{
     deque::{Injector, Worker},
 };
 
-use crate::platform::linux::{EventFD, EventFDOptions};
-
 pub enum BackgroundWork<'subsystem> {
     LoadSpriteSource(
         PathBuf,
@@ -56,7 +54,10 @@ pub struct BackgroundWorker<'subsystem> {
     work_queue: Arc<Injector<BackgroundWork<'subsystem>>>,
     teardown_signal: Arc<AtomicBool>,
     view_feedback_receiver: crossbeam::channel::Receiver<BackgroundWorkerViewFeedback>,
-    view_feedback_notifier: Arc<EventFD>,
+    #[cfg(target_os = "linux")]
+    main_thread_waker: Arc<crate::platform::linux::EventFD>,
+    #[cfg(windows)]
+    main_thread_waker: Arc<crate::platform::win32::event::EventObject>,
 }
 impl<'subsystem> BackgroundWorker<'subsystem> {
     pub fn new() -> Self {
@@ -76,8 +77,18 @@ impl<'subsystem> BackgroundWorker<'subsystem> {
         let work_queue = Arc::new(work_queue);
         let teardown_signal = Arc::new(AtomicBool::new(false));
         let (view_feedback_sender, view_feedback_receiver) = crossbeam::channel::unbounded();
-        let view_feedback_notifier =
-            Arc::new(EventFD::new(0, EventFDOptions::CLOEXEC | EventFDOptions::NONBLOCK).unwrap());
+        #[cfg(target_os = "linux")]
+        let main_thread_waker = Arc::new(
+            crate::platform::linux::EventFD::new(
+                0,
+                crate::platform::linux::EventFDOptions::CLOEXEC
+                    | crate::platform::linux::EventFDOptions::NONBLOCK,
+            )
+            .unwrap(),
+        );
+        #[cfg(windows)]
+        let main_thread_waker =
+            Arc::new(crate::platform::win32::event::EventObject::new(None, true, false).unwrap());
         for (n, local_queue) in local_queues.into_iter().enumerate() {
             join_handles.push(
                 unsafe {std::thread::Builder::new()
@@ -87,7 +98,7 @@ impl<'subsystem> BackgroundWorker<'subsystem> {
                         let work_queue = work_queue.clone();
                         let teardown_signal = teardown_signal.clone();
                         let view_feedback_sender = view_feedback_sender.clone();
-                        let view_feedback_notifier = view_feedback_notifier.clone();
+                        let main_thread_waker = main_thread_waker.clone();
 
                         move || {
                             while !teardown_signal.load(Ordering::Acquire) {
@@ -109,10 +120,18 @@ impl<'subsystem> BackgroundWorker<'subsystem> {
                                                 tracing::warn!(reason = ?e, "sending view feedback failed");
                                             }
                                         }
-                                        match view_feedback_notifier.add(1) {
+                                        #[cfg(target_os = "linux")]
+                                        match main_thread_waker.add(1) {
                                             Ok(_) => (),
                                             Err(e) => {
-                                                tracing::warn!(reason = ?e, "notifying view feedback failed");
+                                                tracing::warn!(reason = ?e, "waking main thread failed");
+                                            }
+                                        }
+                                        #[cfg(windows)]
+                                        match main_thread_waker.set() {
+                                            Ok(_) => (),
+                                            Err(e) => {
+                                                tracing::warn!(reason = ?e, "waking main thread failed");
                                             }
                                         }
 
@@ -125,10 +144,18 @@ impl<'subsystem> BackgroundWorker<'subsystem> {
                                                 tracing::warn!(reason = ?e, "sending view feedback failed");
                                             }
                                         }
-                                        match view_feedback_notifier.add(1) {
+                                        #[cfg(target_os = "linux")]
+                                        match main_thread_waker.add(1) {
                                             Ok(_) => (),
                                             Err(e) => {
-                                                tracing::warn!(reason = ?e, "notifying view feedback failed");
+                                                tracing::warn!(reason = ?e, "waking main thread failed");
+                                            }
+                                        }
+                                        #[cfg(windows)]
+                                        match main_thread_waker.set() {
+                                            Ok(_) => (),
+                                            Err(e) => {
+                                                tracing::warn!(reason = ?e, "waking main thread failed");
                                             }
                                         }
                                     }
@@ -152,7 +179,7 @@ impl<'subsystem> BackgroundWorker<'subsystem> {
             work_queue,
             teardown_signal,
             view_feedback_receiver,
-            view_feedback_notifier,
+            main_thread_waker,
         }
     }
 
@@ -161,14 +188,28 @@ impl<'subsystem> BackgroundWorker<'subsystem> {
         self.join_handles.len()
     }
 
+    #[cfg(target_os = "linux")]
     #[inline(always)]
-    pub fn view_feedback_notifier(&self) -> &EventFD {
-        &self.view_feedback_notifier
+    pub fn main_thread_waker(&self) -> &crate::platform::liunx::EventFD {
+        &self.main_thread_waker
+    }
+
+    #[cfg(windows)]
+    #[inline(always)]
+    pub fn main_thread_waker(&self) -> &crate::platform::win32::event::EventObject {
+        &self.main_thread_waker
     }
 
     #[inline(always)]
     pub fn clear_view_feedback_notification(&self) -> std::io::Result<()> {
-        self.view_feedback_notifier.take().map(drop)
+        #[cfg(target_os = "linux")]
+        {
+            self.view_feedback_notifier.take().map(drop)
+        }
+        #[cfg(windows)]
+        {
+            self.main_thread_waker.reset().map_err(From::from)
+        }
     }
 
     #[inline]

@@ -9,6 +9,7 @@ use core::{
     ops::{Deref, DerefMut},
     ptr::NonNull,
 };
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
 
 use bitflags::bitflags;
@@ -642,6 +643,7 @@ impl PendingCall {
 
 #[repr(transparent)]
 pub struct WatchRef(ffi::DBusWatch);
+#[cfg(unix)]
 impl AsRawFd for WatchRef {
     #[inline(always)]
     fn as_raw_fd(&self) -> std::os::unix::prelude::RawFd {

@@ -2,12 +2,16 @@
 name = "peridot-sprite-atlas-visualizer-wayland"
 version = "0.1.0"
 edition = "2024"
+build = "build.rs"
+
+[features]
+platform-linux-wayland = ["bedrock/VK_KHR_wayland_surface"]
+platform-windows = ["bedrock/VK_KHR_win32_surface"]
 
 [dependencies]
 bedrock = { git = "https://github.com/Pctg-x8/bedrock", branch = "peridot", features = [
     "Implements",
     "Presentation",
-    "VK_KHR_wayland_surface",
     "Allow1_4APIs",
     "VK_EXT_debug_utils",
 ] }
@@ -28,3 +32,14 @@ image = "0.25.6"
 crossbeam = "0.8.4"
 walkdir = "2.5.0"
 parking_lot = "0.12.4"
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.61"
+features = [
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_HiDpi",
+    "Win32_Security",
+    "Win32_System_Threading",
+]

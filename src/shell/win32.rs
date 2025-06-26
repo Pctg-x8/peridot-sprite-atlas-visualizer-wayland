@@ -13,12 +13,12 @@ use windows::{
             },
             WindowsAndMessaging::{
                 CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA,
-                GetWindowLongPtrW, IDC_ARROW, IDC_SIZEWE, IDI_APPLICATION, LoadCursorW, LoadIconW,
-                MSG, PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassExW, SW_SHOWNORMAL,
-                SetCursor, SetWindowLongPtrW, ShowWindow, TranslateMessage, WINDOW_LONG_PTR_INDEX,
-                WM_DESTROY, WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_SIZE,
-                WNDCLASS_STYLES, WNDCLASSEXW, WS_EX_APPWINDOW, WS_EX_NOREDIRECTIONBITMAP,
-                WS_OVERLAPPEDWINDOW,
+                GetClientRect, GetWindowLongPtrW, IDC_ARROW, IDC_SIZEWE, IDI_APPLICATION,
+                LoadCursorW, LoadIconW, MSG, PM_REMOVE, PeekMessageW, PostQuitMessage,
+                RegisterClassExW, SW_SHOWNORMAL, SetCursor, SetWindowLongPtrW, ShowWindow,
+                TranslateMessage, WINDOW_LONG_PTR_INDEX, WM_DESTROY, WM_DPICHANGED, WM_LBUTTONDOWN,
+                WM_LBUTTONUP, WM_MOUSEMOVE, WM_SIZE, WNDCLASS_STYLES, WNDCLASSEXW, WS_EX_APPWINDOW,
+                WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
             },
         },
     },
@@ -141,11 +141,17 @@ impl<'a> AppShell<'a> {
                     GWLP_USERDATA,
                 ) as _))
             };
+            let ui_scale_factor = unsafe {
+                &*(core::ptr::with_exposed_provenance::<Cell<f32>>(GetWindowLongPtrW(
+                    hwnd,
+                    WINDOW_LONG_PTR_INDEX(0),
+                ) as _))
+            };
 
             // この順番で送ればok(Wayland側の仕様 あれに依存するのやめたいがどうしよう)
             app_event_bus.push(AppEvent::ToplevelWindowConfigure {
-                width: (lparam.0 & 0xffff) as u16 as _,
-                height: ((lparam.0 >> 16) & 0xffff) as u16 as _,
+                width: ((lparam.0 & 0xffff) as u16 as f32 / ui_scale_factor.get()) as _,
+                height: (((lparam.0 >> 16) & 0xffff) as u16 as f32 / ui_scale_factor.get()) as _,
             });
             app_event_bus.push(AppEvent::ToplevelWindowSurfaceConfigure { serial: 0 });
             return LRESULT(0);
@@ -210,6 +216,23 @@ impl<'a> AppShell<'a> {
                 core::mem::transmute(self.hwnd),
             )
             .execute(instance, None)
+        }
+    }
+
+    pub fn client_size(&self) -> (f32, f32) {
+        let ui_scale_factor = self.ui_scale_factor.get();
+
+        let mut rc = core::mem::MaybeUninit::uninit();
+        unsafe {
+            GetClientRect(self.hwnd, rc.as_mut_ptr()).unwrap();
+        }
+        unsafe {
+            let r = rc.assume_init_ref();
+
+            (
+                (r.right - r.left) as f32 / ui_scale_factor,
+                (r.bottom - r.top) as f32 / ui_scale_factor,
+            )
         }
     }
 

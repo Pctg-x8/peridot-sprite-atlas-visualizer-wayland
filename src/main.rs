@@ -3978,7 +3978,7 @@ fn main() {
     let mut app_state = RefCell::new(AppState::new());
 
     let mut app_shell = shell::AppShell::new(&events);
-    let client_size = Cell::new((640.0f32, 480.0));
+    let client_size = Cell::new(app_shell.client_size());
     let mut pointer_input_manager = PointerInputManager::new();
     let mut ht_manager = HitTestTreeManager::new();
     let ht_root = ht_manager.create(HitTestTreeData {

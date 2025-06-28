@@ -466,6 +466,11 @@ impl<'a> AppShell<'a> {
         }
     }
 
+    pub const fn is_floating_window(&self) -> bool {
+        // TODO: detect floating/tiling window system
+        false
+    }
+
     pub unsafe fn create_vulkan_surface(
         &mut self,
         instance: &impl br::Instance,

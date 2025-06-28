@@ -5165,7 +5165,7 @@ fn main() {
             app_shell.process_pending_events();
         }
 
-        #[cfg(targeT_os = "linux")]
+        #[cfg(target_os = "linux")]
         while let Some(m) = dbus.underlying_mut().pop_message() {
             println!("!! dbus msg recv: {}", m.r#type());
             if m.r#type() == dbus::MESSAGE_TYPE_METHOD_RETURN {

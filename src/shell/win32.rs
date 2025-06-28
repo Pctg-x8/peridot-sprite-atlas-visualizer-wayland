@@ -4,21 +4,24 @@ use bedrock::{self as br, SurfaceCreateInfo};
 use windows::{
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
-        Graphics::Gdi::HBRUSH,
+        Graphics::{Dwm::DwmExtendFrameIntoClientArea, Gdi::HBRUSH},
         System::LibraryLoader::GetModuleHandleW,
         UI::{
+            Controls::MARGINS,
             HiDpi::{
                 DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow,
                 SetProcessDpiAwarenessContext,
             },
             WindowsAndMessaging::{
                 CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA,
-                GetClientRect, GetWindowLongPtrW, IDC_ARROW, IDC_SIZEWE, IDI_APPLICATION,
-                LoadCursorW, LoadIconW, MSG, PM_REMOVE, PeekMessageW, PostQuitMessage,
-                RegisterClassExW, SW_SHOWNORMAL, SetCursor, SetWindowLongPtrW, ShowWindow,
-                TranslateMessage, WINDOW_LONG_PTR_INDEX, WM_DESTROY, WM_DPICHANGED, WM_LBUTTONDOWN,
-                WM_LBUTTONUP, WM_MOUSEMOVE, WM_SIZE, WNDCLASS_STYLES, WNDCLASSEXW, WS_EX_APPWINDOW,
-                WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
+                GetClientRect, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, IDC_ARROW,
+                IDC_SIZEWE, IDI_APPLICATION, LoadCursorW, LoadIconW, MSG, NCCALCSIZE_PARAMS,
+                PM_REMOVE, PeekMessageW, RegisterClassExW, SM_CXSIZEFRAME, SM_CYSIZEFRAME,
+                SW_SHOWNORMAL, SWP_FRAMECHANGED, SetCursor, SetWindowLongPtrW, SetWindowPos,
+                ShowWindow, TranslateMessage, WINDOW_LONG_PTR_INDEX, WM_ACTIVATE, WM_DESTROY,
+                WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE,
+                WM_NCHITTEST, WM_SIZE, WNDCLASS_STYLES, WNDCLASSEXW, WS_EX_APPWINDOW,
+                WS_OVERLAPPEDWINDOW,
             },
         },
     },
@@ -27,15 +30,15 @@ use windows::{
 
 use crate::{AppEvent, AppEventBus, hittest::CursorShape};
 
-pub struct AppShell<'a> {
+pub struct AppShell<'sys> {
     hinstance: HINSTANCE,
     hwnd: HWND,
     ui_scale_factor: core::pin::Pin<Box<Cell<f32>>>,
-    app_event_queue: &'a AppEventBus,
+    app_event_queue: &'sys AppEventBus,
 }
-impl<'a> AppShell<'a> {
+impl<'sys> AppShell<'sys> {
     #[tracing::instrument(skip(events))]
-    pub fn new(events: &'a AppEventBus) -> Self {
+    pub fn new(events: &'sys AppEventBus) -> Self {
         let hinstance =
             unsafe { core::mem::transmute::<_, HINSTANCE>(GetModuleHandleW(None).unwrap()) };
 
@@ -93,6 +96,23 @@ impl<'a> AppShell<'a> {
             );
         }
 
+        // notify frame change
+        let mut rc = core::mem::MaybeUninit::uninit();
+        unsafe {
+            GetWindowRect(hwnd, rc.as_mut_ptr()).unwrap();
+            let rc = rc.assume_init_ref();
+            SetWindowPos(
+                hwnd,
+                None,
+                rc.left,
+                rc.top,
+                rc.right - rc.left,
+                rc.bottom - rc.top,
+                SWP_FRAMECHANGED,
+            )
+            .unwrap();
+        }
+
         unsafe {
             let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
             // 96dpi as base
@@ -109,101 +129,117 @@ impl<'a> AppShell<'a> {
         }
     }
 
+    #[inline(always)]
+    fn app_event_bus<'a>(hwnd: HWND) -> &'a AppEventBus {
+        unsafe {
+            &*core::ptr::with_exposed_provenance::<AppEventBus>(GetWindowLongPtrW(
+                hwnd,
+                GWLP_USERDATA,
+            ) as _)
+        }
+    }
+
+    #[inline(always)]
+    fn ui_scale_factor_cell<'a>(hwnd: HWND) -> &'a Cell<f32> {
+        unsafe {
+            &*core::ptr::with_exposed_provenance::<Cell<f32>>(GetWindowLongPtrW(
+                hwnd,
+                WINDOW_LONG_PTR_INDEX(0),
+            ) as _)
+        }
+    }
+
     extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         if msg == WM_DESTROY {
-            let app_event_bus = unsafe {
-                &*(core::ptr::with_exposed_provenance::<AppEventBus>(GetWindowLongPtrW(
-                    hwnd,
-                    GWLP_USERDATA,
-                ) as _))
-            };
-
-            app_event_bus.push(AppEvent::ToplevelWindowClose);
+            Self::app_event_bus(hwnd).push(AppEvent::ToplevelWindowClose);
             return LRESULT(0);
         }
 
-        if msg == WM_DPICHANGED {
-            let ui_scale_factor = unsafe {
-                &*(core::ptr::with_exposed_provenance::<Cell<f32>>(GetWindowLongPtrW(
+        if msg == WM_ACTIVATE {
+            unsafe {
+                DwmExtendFrameIntoClientArea(
                     hwnd,
-                    WINDOW_LONG_PTR_INDEX(0),
-                ) as _))
-            };
+                    &MARGINS {
+                        cxLeftWidth: 1,
+                        cxRightWidth: 1,
+                        cyTopHeight: 1,
+                        cyBottomHeight: 1,
+                    },
+                )
+                .unwrap();
+            }
 
-            ui_scale_factor.set((wparam.0 & 0xffff) as u16 as _);
+            return LRESULT(0);
+        }
+
+        if msg == WM_NCCALCSIZE {
+            if wparam.0 == 0 {
+                // not needed to reply client area
+                return LRESULT(0);
+            }
+
+            // remove non-client area
+            let params = unsafe {
+                &mut *core::ptr::with_exposed_provenance_mut::<NCCALCSIZE_PARAMS>(lparam.0 as _)
+            };
+            let w = unsafe { GetSystemMetrics(SM_CXSIZEFRAME) };
+            let h = unsafe { GetSystemMetrics(SM_CYSIZEFRAME) };
+            params.rgrc[0].left += w;
+            params.rgrc[0].right -= w;
+            params.rgrc[0].bottom -= h;
+            // topはいじらない（他アプリもそんな感じになってるのでtopは自前でNCHITTESTしてリサイズ判定するらしい）
+
+            return LRESULT(0);
+        }
+
+        if msg == WM_NCHITTEST {
+            // TODO: nc hittest
+        }
+
+        if msg == WM_DPICHANGED {
+            Self::ui_scale_factor_cell(hwnd).set((wparam.0 & 0xffff) as u16 as _);
             return LRESULT(0);
         }
 
         if msg == WM_SIZE {
-            let app_event_bus = unsafe {
-                &*(core::ptr::with_exposed_provenance::<AppEventBus>(GetWindowLongPtrW(
-                    hwnd,
-                    GWLP_USERDATA,
-                ) as _))
-            };
-            let ui_scale_factor = unsafe {
-                &*(core::ptr::with_exposed_provenance::<Cell<f32>>(GetWindowLongPtrW(
-                    hwnd,
-                    WINDOW_LONG_PTR_INDEX(0),
-                ) as _))
-            };
+            let app_event_bus = Self::app_event_bus(hwnd);
+            let ui_scale_factor = Self::ui_scale_factor_cell(hwnd).get();
 
             // この順番で送ればok(Wayland側の仕様 あれに依存するのやめたいがどうしよう)
             app_event_bus.push(AppEvent::ToplevelWindowConfigure {
-                width: ((lparam.0 & 0xffff) as u16 as f32 / ui_scale_factor.get()) as _,
-                height: (((lparam.0 >> 16) & 0xffff) as u16 as f32 / ui_scale_factor.get()) as _,
+                width: ((lparam.0 & 0xffff) as u16 as f32 / ui_scale_factor) as _,
+                height: (((lparam.0 >> 16) & 0xffff) as u16 as f32 / ui_scale_factor) as _,
             });
             app_event_bus.push(AppEvent::ToplevelWindowSurfaceConfigure { serial: 0 });
             return LRESULT(0);
         }
 
         if msg == WM_LBUTTONDOWN {
-            let app_event_bus = unsafe {
-                &*(core::ptr::with_exposed_provenance::<AppEventBus>(GetWindowLongPtrW(
-                    hwnd,
-                    GWLP_USERDATA,
-                ) as _))
-            };
-
-            app_event_bus.push(AppEvent::MainWindowPointerLeftDown { enter_serial: 0 });
+            Self::app_event_bus(hwnd).push(AppEvent::MainWindowPointerLeftDown { enter_serial: 0 });
             return LRESULT(0);
         }
 
         if msg == WM_LBUTTONUP {
-            let app_event_bus = unsafe {
-                &*(core::ptr::with_exposed_provenance::<AppEventBus>(GetWindowLongPtrW(
-                    hwnd,
-                    GWLP_USERDATA,
-                ) as _))
-            };
-
-            app_event_bus.push(AppEvent::MainWindowPointerLeftUp { enter_serial: 0 });
+            Self::app_event_bus(hwnd).push(AppEvent::MainWindowPointerLeftUp { enter_serial: 0 });
             return LRESULT(0);
         }
 
         if msg == WM_MOUSEMOVE {
-            let app_event_bus = unsafe {
-                &*(core::ptr::with_exposed_provenance::<AppEventBus>(GetWindowLongPtrW(
-                    hwnd,
-                    GWLP_USERDATA,
-                ) as _))
-            };
-            let ui_scale_factor = unsafe {
-                &*(core::ptr::with_exposed_provenance::<Cell<f32>>(GetWindowLongPtrW(
-                    hwnd,
-                    WINDOW_LONG_PTR_INDEX(0),
-                ) as _))
-            };
+            let ui_scale_factor = Self::ui_scale_factor_cell(hwnd).get();
 
-            app_event_bus.push(AppEvent::MainWindowPointerMove {
+            Self::app_event_bus(hwnd).push(AppEvent::MainWindowPointerMove {
                 enter_serial: 0,
-                surface_x: (lparam.0 & 0xffff) as i16 as f32 / ui_scale_factor.get(),
-                surface_y: ((lparam.0 >> 16) & 0xffff) as i16 as f32 / ui_scale_factor.get(),
+                surface_x: (lparam.0 & 0xffff) as i16 as f32 / ui_scale_factor,
+                surface_y: ((lparam.0 >> 16) & 0xffff) as i16 as f32 / ui_scale_factor,
             });
             return LRESULT(0);
         }
 
         unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+    }
+
+    pub const fn is_floating_window(&self) -> bool {
+        true
     }
 
     pub unsafe fn create_vulkan_surface(
@@ -226,14 +262,12 @@ impl<'a> AppShell<'a> {
         unsafe {
             GetClientRect(self.hwnd, rc.as_mut_ptr()).unwrap();
         }
-        unsafe {
-            let r = rc.assume_init_ref();
+        let rc = unsafe { rc.assume_init_ref() };
 
-            (
-                (r.right - r.left) as f32 / ui_scale_factor,
-                (r.bottom - r.top) as f32 / ui_scale_factor,
-            )
-        }
+        (
+            (rc.right - rc.left) as f32 / ui_scale_factor,
+            (rc.bottom - rc.top) as f32 / ui_scale_factor,
+        )
     }
 
     #[tracing::instrument(skip(self))]
@@ -247,7 +281,7 @@ impl<'a> AppShell<'a> {
         let mut msg = core::mem::MaybeUninit::<MSG>::uninit();
         while unsafe { PeekMessageW(msg.as_mut_ptr(), None, 0, 0, PM_REMOVE).0 != 0 } {
             unsafe {
-                TranslateMessage(msg.assume_init_ref());
+                let _ = TranslateMessage(msg.assume_init_ref());
                 DispatchMessageW(msg.assume_init_ref());
             }
         }
@@ -255,13 +289,6 @@ impl<'a> AppShell<'a> {
         // TODO: いったんあいたタイミングをFrameTimingとする あとで適切にスリープいれてあげたい気持ち
         self.app_event_queue
             .push(AppEvent::ToplevelWindowFrameTiming);
-        Ok(())
-    }
-
-    pub fn cancel_read_events(&mut self) {}
-
-    #[tracing::instrument(skip(self))]
-    pub fn read_and_process_events(&mut self) -> std::io::Result<()> {
         Ok(())
     }
 

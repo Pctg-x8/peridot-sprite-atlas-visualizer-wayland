@@ -18,13 +18,6 @@ enum PointerFocusState {
     Capturing(HitTestTreeRef),
 }
 
-pub trait HitTestTreeManagerProvider<'c> {
-    type ActionContext: 'c;
-
-    fn ht_manager(&self) -> &HitTestTreeManager<Self::ActionContext>;
-    fn ht_manager_mut(&mut self) -> &mut HitTestTreeManager<Self::ActionContext>;
-}
-
 pub struct PointerInputManager {
     last_client_pointer_pos: Option<(f32, f32)>,
     pointer_focus: PointerFocusState,

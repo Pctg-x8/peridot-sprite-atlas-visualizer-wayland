@@ -5645,6 +5645,15 @@ fn main() {
                         shell_event_processed = true;
                     }
                     Some(&PollFDType::BackgroundWorkerViewFeedback) => {
+                        // 先にclearする
+                        match bg_worker.clear_view_feedback_notification() {
+                            Ok(_) => (),
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => (),
+                            Err(e) => {
+                                tracing::warn!(reason = ?e, "Failed to clear bg worker view feedback notification signal")
+                            }
+                        }
+
                         while let Some(vf) = bg_worker.try_pop_view_feedback() {
                             match vf {
                                 BackgroundWorkerViewFeedback::BeginWork(thread_number, message) => {
@@ -5660,15 +5669,6 @@ fn main() {
                                         .event_queue
                                         .push(AppEvent::EndBackgroundWork { thread_number })
                                 }
-                            }
-                        }
-
-                        // TODO: これロックとかとってあげないと僅差で状態がずれる可能性があるかも？
-                        match bg_worker.clear_view_feedback_notification() {
-                            Ok(_) => (),
-                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => (),
-                            Err(e) => {
-                                tracing::warn!(reason = ?e, "Failed to clear bg worker view feedback notification signal")
                             }
                         }
                     }
@@ -5701,7 +5701,7 @@ fn main() {
         }
         #[cfg(windows)]
         {
-            let r = unsafe {
+            unsafe {
                 use windows::Win32::UI::WindowsAndMessaging::MSG_WAIT_FOR_MULTIPLE_OBJECTS_EX_FLAGS;
 
                 windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx(
@@ -5714,6 +5714,14 @@ fn main() {
                     MSG_WAIT_FOR_MULTIPLE_OBJECTS_EX_FLAGS(0),
                 )
             };
+
+            match bg_worker.clear_view_feedback_notification() {
+                Ok(_) => (),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => (),
+                Err(e) => {
+                    tracing::warn!(reason = ?e, "Failed to clear bg worker view feedback notification signal")
+                }
+            }
 
             while let Some(vf) = bg_worker.try_pop_view_feedback() {
                 match vf {
@@ -5728,15 +5736,6 @@ fn main() {
                     BackgroundWorkerViewFeedback::EndWork(thread_number) => app_update_context
                         .event_queue
                         .push(AppEvent::EndBackgroundWork { thread_number }),
-                }
-            }
-
-            // TODO: これロックとかとってあげないと僅差で状態がずれる可能性があるかも？
-            match bg_worker.clear_view_feedback_notification() {
-                Ok(_) => (),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => (),
-                Err(e) => {
-                    tracing::warn!(reason = ?e, "Failed to clear bg worker view feedback notification signal")
                 }
             }
 
@@ -6945,6 +6944,7 @@ fn main() {
                     let (cw, ch) = client_size.get();
 
                     pointer_input_manager.handle_mouse_left_down(
+                        &app_shell,
                         last_pointer_pos.0,
                         last_pointer_pos.1,
                         cw,
@@ -6964,6 +6964,7 @@ fn main() {
                     let (cw, ch) = client_size.get();
 
                     pointer_input_manager.handle_mouse_left_up(
+                        &app_shell,
                         last_pointer_pos.0,
                         last_pointer_pos.1,
                         cw,

@@ -13,6 +13,7 @@ use windows::{
                 DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow,
                 SetProcessDpiAwarenessContext,
             },
+            Input::KeyboardAndMouse::{ReleaseCapture, SetCapture},
             Shell::IInitializeWithWindow,
             WindowsAndMessaging::{
                 CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA,
@@ -316,6 +317,18 @@ impl<'sys> AppShell<'sys> {
     #[inline]
     pub fn ui_scale_factor(&self) -> f32 {
         self.ui_scale_factor.get()
+    }
+
+    pub fn capture_pointer(&self) {
+        unsafe {
+            SetCapture(self.hwnd);
+        }
+    }
+
+    pub fn release_pointer(&self) {
+        if let Err(e) = unsafe { ReleaseCapture() } {
+            tracing::warn!(reason = ?e, "ReleaseCapture() failed");
+        }
     }
 
     pub async fn select_added_sprites(&self) -> Vec<PathBuf> {

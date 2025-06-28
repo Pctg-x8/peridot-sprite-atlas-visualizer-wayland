@@ -1,6 +1,9 @@
 use bitflags::bitflags;
 
-use crate::hittest::{CursorShape, HitTestTreeManager, HitTestTreeRef, PointerActionArgs};
+use crate::{
+    hittest::{CursorShape, HitTestTreeManager, HitTestTreeRef, PointerActionArgs},
+    shell::AppShell,
+};
 
 bitflags! {
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -82,6 +85,7 @@ impl PointerInputManager {
 
     fn dispatch_pointer_down<ActionContext>(
         &self,
+        sh: &AppShell,
         action_args: &PointerActionArgs,
         ht: &HitTestTreeManager<ActionContext>,
         action_context: &mut ActionContext,
@@ -103,7 +107,7 @@ impl PointerInputManager {
             }
             if flags.contains(EventContinueControl::CAPTURE_ELEMENT) {
                 new_captured = Some(ht_ref);
-                // TODO: capture native pointer here
+                sh.capture_pointer();
             }
             if flags.contains(EventContinueControl::STOP_PROPAGATION) {
                 break;
@@ -146,6 +150,7 @@ impl PointerInputManager {
 
     fn dispatch_pointer_up<ActionContext>(
         &self,
+        sh: &AppShell,
         action_args: &PointerActionArgs,
         ht: &HitTestTreeManager<ActionContext>,
         action_context: &mut ActionContext,
@@ -167,6 +172,7 @@ impl PointerInputManager {
             }
             if flags.contains(EventContinueControl::CAPTURE_ELEMENT) {
                 new_captured = Some(ht_ref);
+                sh.capture_pointer();
             }
             if flags.contains(EventContinueControl::STOP_PROPAGATION) {
                 break;
@@ -180,6 +186,7 @@ impl PointerInputManager {
 
     fn dispatch_click<ActionContext>(
         &self,
+        sh: &AppShell,
         action_args: &PointerActionArgs,
         ht: &HitTestTreeManager<ActionContext>,
         action_context: &mut ActionContext,
@@ -201,6 +208,7 @@ impl PointerInputManager {
             }
             if flags.contains(EventContinueControl::CAPTURE_ELEMENT) {
                 new_captured = Some(ht_ref);
+                sh.capture_pointer();
             }
             if flags.contains(EventContinueControl::STOP_PROPAGATION) {
                 break;
@@ -371,6 +379,7 @@ impl PointerInputManager {
 
     pub fn handle_mouse_left_down<ActionContext>(
         &mut self,
+        sh: &AppShell,
         client_x: f32,
         client_y: f32,
         client_width: f32,
@@ -410,7 +419,7 @@ impl PointerInputManager {
                     );
                 }
                 if flags.contains(EventContinueControl::RELEASE_CAPTURE_ELEMENT) {
-                    // TODO: release native pointer capture here
+                    sh.release_pointer();
                     self.pointer_focus = PointerFocusState::Entering(ht_ref);
                     self.handle_mouse_enter_leave(
                         client_x,
@@ -425,6 +434,7 @@ impl PointerInputManager {
             }
             PointerFocusState::Entering(ht_ref) => {
                 let (needs_recompute_pointer_enter, new_captured) = self.dispatch_pointer_down(
+                    sh,
                     &PointerActionArgs {
                         client_x,
                         client_y,
@@ -456,6 +466,7 @@ impl PointerInputManager {
 
     pub fn handle_mouse_left_up<ActionContext>(
         &mut self,
+        sh: &AppShell,
         client_x: f32,
         client_y: f32,
         client_width: f32,
@@ -493,7 +504,7 @@ impl PointerInputManager {
                     );
                 }
                 if flags.contains(EventContinueControl::RELEASE_CAPTURE_ELEMENT) {
-                    // TODO: release native pointer capture here
+                    sh.release_pointer();
                     self.pointer_focus = PointerFocusState::Entering(ht_ref);
                     self.handle_mouse_enter_leave(
                         client_x,
@@ -508,6 +519,7 @@ impl PointerInputManager {
             }
             PointerFocusState::Entering(ht_ref) => {
                 let (needs_recompute_pointer_enter, new_captured) = self.dispatch_pointer_up(
+                    sh,
                     &PointerActionArgs {
                         client_x,
                         client_y,
@@ -567,7 +579,7 @@ impl PointerInputManager {
                         );
                     }
                     if flags.contains(EventContinueControl::RELEASE_CAPTURE_ELEMENT) {
-                        // TODO: release native pointer capture here
+                        sh.release_pointer();
                         self.pointer_focus = PointerFocusState::Entering(ht_ref);
                         self.handle_mouse_enter_leave(
                             client_x,
@@ -582,6 +594,7 @@ impl PointerInputManager {
                 }
                 PointerFocusState::Entering(ht_ref) => {
                     let (needs_recompute_pointer_enter, new_captured) = self.dispatch_click(
+                        sh,
                         &PointerActionArgs {
                             client_x,
                             client_y,

@@ -293,11 +293,14 @@ impl CommonFrameView {
 
         let ct_root = init.composite_tree.register(CompositeRect {
             offset: [
-                -width * 0.5 * init.ui_scale_factor,
-                -height * 0.5 * init.ui_scale_factor,
+                AnimatableFloat::Value(-width * 0.5 * init.ui_scale_factor),
+                AnimatableFloat::Value(-height * 0.5 * init.ui_scale_factor),
             ],
             relative_offset_adjustment: [0.5, 0.5],
-            size: [width * init.ui_scale_factor, height * init.ui_scale_factor],
+            size: [
+                AnimatableFloat::Value(width * init.ui_scale_factor),
+                AnimatableFloat::Value(height * init.ui_scale_factor),
+            ],
             instance_slot_index: Some(init.composite_instance_manager.alloc()),
             texatlas_rect: frame_image_atlas_rect,
             slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
@@ -307,11 +310,14 @@ impl CommonFrameView {
         });
         let ct_border = init.composite_tree.register(CompositeRect {
             offset: [
-                -width * 0.5 * init.ui_scale_factor,
-                -height * 0.5 * init.ui_scale_factor,
+                AnimatableFloat::Value(-width * 0.5 * init.ui_scale_factor),
+                AnimatableFloat::Value(-height * 0.5 * init.ui_scale_factor),
             ],
             relative_offset_adjustment: [0.5, 0.5],
-            size: [width * init.ui_scale_factor, height * init.ui_scale_factor],
+            size: [
+                AnimatableFloat::Value(width * init.ui_scale_factor),
+                AnimatableFloat::Value(height * init.ui_scale_factor),
+            ],
             instance_slot_index: Some(init.composite_instance_manager.alloc()),
             texatlas_rect: frame_border_image_atlas_rect,
             slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
@@ -387,15 +393,17 @@ impl CommonFrameView {
                 event_on_complete: None,
             },
         );
-        ct.get_mut(self.ct_root).offset[1] = (-0.5 * self.height + 8.0) * self.ui_scale_factor;
-        ct.get_mut(self.ct_root).animation_data_top = Some(AnimationData {
-            to_value: (-0.5 * self.height) * self.ui_scale_factor,
-            start_sec: current_sec,
-            end_sec: current_sec + POPUP_ANIMATION_DURATION,
-            curve_p1: (0.25, 0.5),
-            curve_p2: (0.5, 0.9),
-            event_on_complete: None,
-        });
+        ct.get_mut(self.ct_root).offset[1] = AnimatableFloat::Animated(
+            (-0.5 * self.height + 8.0) * self.ui_scale_factor,
+            AnimationData {
+                to_value: (-0.5 * self.height) * self.ui_scale_factor,
+                start_sec: current_sec,
+                end_sec: current_sec + POPUP_ANIMATION_DURATION,
+                curve_p1: (0.25, 0.5),
+                curve_p2: (0.5, 0.9),
+                event_on_complete: None,
+            },
+        );
         ct.get_mut(self.ct_root).scale_x = AnimatableFloat::Animated(
             0.9,
             AnimationData {
@@ -434,15 +442,17 @@ impl CommonFrameView {
                 event_on_complete: None,
             },
         );
-        ct.get_mut(self.ct_root).offset[1] = (-0.5 * self.height) * self.ui_scale_factor;
-        ct.get_mut(self.ct_root).animation_data_top = Some(AnimationData {
-            to_value: (-0.5 * self.height + 8.0) * self.ui_scale_factor,
-            start_sec: current_sec,
-            end_sec: current_sec + POPUP_ANIMATION_DURATION,
-            curve_p1: (0.25, 0.5),
-            curve_p2: (0.5, 0.9),
-            event_on_complete: None,
-        });
+        ct.get_mut(self.ct_root).offset[1] = AnimatableFloat::Animated(
+            (-0.5 * self.height) * self.ui_scale_factor,
+            AnimationData {
+                to_value: (-0.5 * self.height + 8.0) * self.ui_scale_factor,
+                start_sec: current_sec,
+                end_sec: current_sec + POPUP_ANIMATION_DURATION,
+                curve_p1: (0.25, 0.5),
+                curve_p2: (0.5, 0.9),
+                event_on_complete: None,
+            },
+        );
         ct.get_mut(self.ct_root).scale_x = AnimatableFloat::Animated(
             1.0,
             AnimationData {

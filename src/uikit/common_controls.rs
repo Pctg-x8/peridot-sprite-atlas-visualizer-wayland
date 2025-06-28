@@ -7,8 +7,8 @@ use crate::{
     AppUpdateContext, BLEND_STATE_SINGLE_NONE, IA_STATE_TRILIST, MS_STATE_EMPTY,
     RASTER_STATE_DEFAULT_FILL_NOCULL, RoundedRectConstants, VI_STATE_EMPTY, ViewInitContext,
     composite::{
-        AnimatableColor, AnimationData, CompositeMode, CompositeRect, CompositeTree,
-        CompositeTreeRef,
+        AnimatableColor, AnimatableFloat, AnimationData, CompositeMode, CompositeRect,
+        CompositeTree, CompositeTreeRef,
     },
     hittest::{HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef},
     text::TextLayout,
@@ -17,6 +17,7 @@ use crate::{
 pub struct CommonButtonView {
     ct_root: CompositeTreeRef,
     ht_root: HitTestTreeRef,
+    preferred_width: f32,
     preferred_height: f32,
     hovering: Cell<bool>,
     pressing: Cell<bool>,
@@ -212,8 +213,12 @@ impl CommonButtonView {
 
         let ct_root = init.composite_tree.register(CompositeRect {
             size: [
-                Self::PADDING_H * 2.0 * init.ui_scale_factor + text_layout.width(),
-                Self::PADDING_V * 2.0 * init.ui_scale_factor + text_layout.height(),
+                AnimatableFloat::Value(
+                    Self::PADDING_H * 2.0 * init.ui_scale_factor + text_layout.width(),
+                ),
+                AnimatableFloat::Value(
+                    Self::PADDING_V * 2.0 * init.ui_scale_factor + text_layout.height(),
+                ),
             ],
             instance_slot_index: Some(init.composite_instance_manager.alloc()),
             texatlas_rect: frame_image_atlas_rect,
@@ -230,8 +235,14 @@ impl CommonButtonView {
             ..Default::default()
         });
         let ct_label = init.composite_tree.register(CompositeRect {
-            offset: [-0.5 * text_layout.width(), -0.5 * text_layout.height()],
-            size: [text_layout.width(), text_layout.height()],
+            offset: [
+                AnimatableFloat::Value(-0.5 * text_layout.width()),
+                AnimatableFloat::Value(-0.5 * text_layout.height()),
+            ],
+            size: [
+                AnimatableFloat::Value(text_layout.width()),
+                AnimatableFloat::Value(text_layout.height()),
+            ],
             relative_offset_adjustment: [0.5, 0.5],
             instance_slot_index: Some(init.composite_instance_manager.alloc()),
             texatlas_rect: text_atlas_rect,
@@ -251,11 +262,16 @@ impl CommonButtonView {
         Self {
             ct_root,
             ht_root,
+            preferred_width: Self::PADDING_H * 2.0 + text_layout.width() / init.ui_scale_factor,
             preferred_height: Self::PADDING_V * 2.0 + text_layout.height() / init.ui_scale_factor,
             hovering: Cell::new(false),
             pressing: Cell::new(false),
             is_dirty: Cell::new(false),
         }
+    }
+
+    pub const fn preferred_width(&self) -> f32 {
+        self.preferred_width
     }
 
     pub const fn preferred_height(&self) -> f32 {

@@ -4,7 +4,10 @@ use bedrock::{self as br, CommandBufferMut, ImageChild};
 
 use crate::{
     AppEvent, AppUpdateContext, PresenterInitContext, ViewInitContext,
-    composite::{AnimatableColor, CompositeMode, CompositeRect, CompositeTree, CompositeTreeRef},
+    composite::{
+        AnimatableColor, AnimatableFloat, CompositeMode, CompositeRect, CompositeTree,
+        CompositeTreeRef,
+    },
     hittest::{HitTestTreeActionHandler, HitTestTreeManager, HitTestTreeRef, PointerActionArgs},
     input::EventContinueControl,
     text::TextLayout,
@@ -100,10 +103,13 @@ impl ContentView {
             .unwrap();
 
         let ct_root = init.composite_tree.register(CompositeRect {
-            size: [text_layout.width(), text_layout.height()],
+            size: [
+                AnimatableFloat::Value(text_layout.width()),
+                AnimatableFloat::Value(text_layout.height()),
+            ],
             offset: [
-                -text_layout.width() * 0.5,
-                Self::FRAME_PADDING_V * init.ui_scale_factor,
+                AnimatableFloat::Value(-text_layout.width() * 0.5),
+                AnimatableFloat::Value(Self::FRAME_PADDING_V * init.ui_scale_factor),
             ],
             relative_offset_adjustment: [0.5, 0.0],
             instance_slot_index: Some(init.composite_instance_manager.alloc()),
@@ -290,8 +296,10 @@ impl Presenter {
 
             confirm_button_ct.relative_offset_adjustment = [0.5, 0.0];
             confirm_button_ct.offset = [
-                -0.5 * confirm_button_ct.size[0],
-                (content_view.preferred_height - 4.0) * init.for_view.ui_scale_factor,
+                AnimatableFloat::Value(-0.5 * confirm_button.preferred_width()),
+                AnimatableFloat::Value(
+                    (content_view.preferred_height - 4.0) * init.for_view.ui_scale_factor,
+                ),
             ];
             confirm_button_ht.left_adjustment_factor = 0.5;
             confirm_button_ht.left = -0.5 * confirm_button_ht.width;

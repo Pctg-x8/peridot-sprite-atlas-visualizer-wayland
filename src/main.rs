@@ -58,9 +58,9 @@ use windows::Win32::{
     UI::WindowsAndMessaging::{MWMO_INPUTAVAILABLE, QS_ALLINPUT},
 };
 
-use crate::quadtree::QuadTree;
 #[cfg(windows)]
 use crate::shell::AppShell;
+use crate::{composite::FloatParameter, quadtree::QuadTree};
 
 pub enum AppEvent {
     ToplevelWindowConfigure {
@@ -300,12 +300,14 @@ const fn const_subpass_description_2_single_color_write_only<const ATTACHMENT_IN
     )
 }
 
-#[derive(Debug)]
-struct CurrentSelectedSpriteFocusData {
-    global_x_pixels: f32,
-    global_y_pixels: f32,
-    width_pixels: f32,
-    height_pixels: f32,
+enum CurrentSelectedSpriteTrigger {
+    Focus {
+        global_x_pixels: f32,
+        global_y_pixels: f32,
+        width_pixels: f32,
+        height_pixels: f32,
+    },
+    Hide,
 }
 pub struct CurrentSelectedSpriteMarkerView {
     ct_root: CompositeTreeRef,
@@ -313,7 +315,7 @@ pub struct CurrentSelectedSpriteMarkerView {
     global_y_param: CompositeTreeFloatParameterRef,
     view_offset_x_param: CompositeTreeFloatParameterRef,
     view_offset_y_param: CompositeTreeFloatParameterRef,
-    focus_data: Cell<Option<CurrentSelectedSpriteFocusData>>,
+    focus_trigger: Cell<Option<CurrentSelectedSpriteTrigger>>,
     view_offset_x: Cell<f32>,
     view_offset_y: Cell<f32>,
 }
@@ -426,25 +428,34 @@ impl CurrentSelectedSpriteMarkerView {
         let global_x_param = init
             .composite_tree
             .parameter_store_mut()
-            .alloc_float(AnimatableFloat::Value(0.0));
+            .alloc_float(FloatParameter::Value(0.0));
         let global_y_param = init
             .composite_tree
             .parameter_store_mut()
-            .alloc_float(AnimatableFloat::Value(0.0));
+            .alloc_float(FloatParameter::Value(0.0));
         let view_offset_x_param = init
             .composite_tree
             .parameter_store_mut()
-            .alloc_float(AnimatableFloat::Value(0.0));
+            .alloc_float(FloatParameter::Value(0.0));
         let view_offset_y_param = init
             .composite_tree
             .parameter_store_mut()
-            .alloc_float(AnimatableFloat::Value(0.0));
+            .alloc_float(FloatParameter::Value(0.0));
 
         let ct_root = init.composite_tree.register(CompositeRect {
+            offset: [
+                AnimatableFloat::Expression(Box::new(move |store| {
+                    store.float_value(global_x_param) + store.float_value(view_offset_x_param)
+                })),
+                AnimatableFloat::Expression(Box::new(move |store| {
+                    store.float_value(global_y_param) + store.float_value(view_offset_y_param)
+                })),
+            ],
             instance_slot_index: Some(init.composite_instance_manager.alloc()),
             slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
             texatlas_rect: border_image_atlas_rect,
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value(Self::COLOR)),
+            opacity: AnimatableFloat::Value(0.0),
             ..Default::default()
         });
 
@@ -454,7 +465,7 @@ impl CurrentSelectedSpriteMarkerView {
             global_y_param,
             view_offset_x_param,
             view_offset_y_param,
-            focus_data: Cell::new(None),
+            focus_trigger: Cell::new(None),
             view_offset_x: Cell::new(0.0),
             view_offset_y: Cell::new(0.0),
         }
@@ -464,42 +475,98 @@ impl CurrentSelectedSpriteMarkerView {
         ct.add_child(ct_parent, self.ct_root);
     }
 
-    pub fn update(&self, ct: &mut CompositeTree) {
-        if let Some(fd) = self.focus_data.replace(None) {
-            ct.parameter_store_mut().set_float(
-                self.global_x_param,
-                AnimatableFloat::Value(fd.global_x_pixels),
-            );
-            ct.parameter_store_mut().set_float(
-                self.global_y_param,
-                AnimatableFloat::Value(fd.global_y_pixels),
-            );
-            ct.get_mut(self.ct_root).size = [fd.width_pixels, fd.height_pixels];
+    pub fn update(&self, ct: &mut CompositeTree, current_sec: f32) {
+        match self.focus_trigger.replace(None) {
+            None => (),
+            Some(CurrentSelectedSpriteTrigger::Focus {
+                global_x_pixels,
+                global_y_pixels,
+                width_pixels,
+                height_pixels,
+            }) => {
+                ct.parameter_store_mut()
+                    .set_float(self.global_x_param, FloatParameter::Value(global_x_pixels));
+                ct.parameter_store_mut()
+                    .set_float(self.global_y_param, FloatParameter::Value(global_y_pixels));
+                ct.get_mut(self.ct_root).size = [
+                    AnimatableFloat::Value(width_pixels),
+                    AnimatableFloat::Value(height_pixels),
+                ];
+
+                ct.get_mut(self.ct_root).scale_x = AnimatableFloat::Animated(
+                    1.3,
+                    AnimationData {
+                        to_value: 1.0,
+                        start_sec: current_sec,
+                        end_sec: current_sec + 0.15,
+                        curve_p1: (0.0, 0.0),
+                        curve_p2: (0.0, 1.0),
+                        event_on_complete: None,
+                    },
+                );
+                ct.get_mut(self.ct_root).scale_y = AnimatableFloat::Animated(
+                    1.3,
+                    AnimationData {
+                        to_value: 1.0,
+                        start_sec: current_sec,
+                        end_sec: current_sec + 0.15,
+                        curve_p1: (0.0, 0.0),
+                        curve_p2: (0.0, 1.0),
+                        event_on_complete: None,
+                    },
+                );
+                ct.get_mut(self.ct_root).opacity = AnimatableFloat::Animated(
+                    0.0,
+                    AnimationData {
+                        to_value: 1.0,
+                        start_sec: current_sec,
+                        end_sec: current_sec + 0.15,
+                        curve_p1: (0.5, 0.5),
+                        curve_p2: (0.5, 0.5),
+                        event_on_complete: None,
+                    },
+                );
+            }
+            Some(CurrentSelectedSpriteTrigger::Hide) => {
+                ct.get_mut(self.ct_root).opacity = AnimatableFloat::Animated(
+                    1.0,
+                    AnimationData {
+                        to_value: 0.0,
+                        start_sec: current_sec,
+                        end_sec: current_sec + 0.15,
+                        curve_p1: (0.5, 0.5),
+                        curve_p2: (0.5, 0.5),
+                        event_on_complete: None,
+                    },
+                );
+            }
         }
 
         ct.parameter_store_mut().set_float(
             self.view_offset_x_param,
-            AnimatableFloat::Value(self.view_offset_x.get()),
+            FloatParameter::Value(self.view_offset_x.get()),
         );
         ct.parameter_store_mut().set_float(
             self.view_offset_y_param,
-            AnimatableFloat::Value(self.view_offset_y.get()),
+            FloatParameter::Value(self.view_offset_y.get()),
         );
 
         ct.mark_dirty(self.ct_root);
     }
 
     pub fn focus(&self, x_pixels: f32, y_pixels: f32, width_pixels: f32, height_pixels: f32) {
-        self.focus_data.set(Some(CurrentSelectedSpriteFocusData {
-            global_x_pixels: x_pixels,
-            global_y_pixels: y_pixels,
-            width_pixels,
-            height_pixels,
-        }));
+        self.focus_trigger
+            .set(Some(CurrentSelectedSpriteTrigger::Focus {
+                global_x_pixels: x_pixels,
+                global_y_pixels: y_pixels,
+                width_pixels,
+                height_pixels,
+            }));
     }
 
     pub fn hide(&self) {
-        // TODO
+        self.focus_trigger
+            .set(Some(CurrentSelectedSpriteTrigger::Hide));
     }
 
     pub fn set_view_offset(&self, offset_x_pixels: f32, offset_y_pixels: f32) {
@@ -889,12 +956,12 @@ impl SpriteListToggleButtonView {
 
         let ct_root = init.composite_tree.register(CompositeRect {
             size: [
-                Self::SIZE * init.ui_scale_factor,
-                Self::SIZE * init.ui_scale_factor,
+                AnimatableFloat::Value(Self::SIZE * init.ui_scale_factor),
+                AnimatableFloat::Value(Self::SIZE * init.ui_scale_factor),
             ],
             offset: [
-                (-Self::SIZE - 8.0) * init.ui_scale_factor,
-                8.0 * init.ui_scale_factor,
+                AnimatableFloat::Value((-Self::SIZE - 8.0) * init.ui_scale_factor),
+                AnimatableFloat::Value(8.0 * init.ui_scale_factor),
             ],
             relative_offset_adjustment: [1.0, 0.0],
             instance_slot_index: Some(init.composite_instance_manager.alloc()),
@@ -904,13 +971,13 @@ impl SpriteListToggleButtonView {
         });
         let ct_icon = init.composite_tree.register(CompositeRect {
             offset: [
-                -Self::ICON_SIZE * 0.5 * init.ui_scale_factor,
-                -Self::ICON_SIZE * 0.5 * init.ui_scale_factor,
+                AnimatableFloat::Value(-Self::ICON_SIZE * 0.5 * init.ui_scale_factor),
+                AnimatableFloat::Value(-Self::ICON_SIZE * 0.5 * init.ui_scale_factor),
             ],
             relative_offset_adjustment: [0.5, 0.5],
             size: [
-                Self::ICON_SIZE * init.ui_scale_factor,
-                Self::ICON_SIZE * init.ui_scale_factor,
+                AnimatableFloat::Value(Self::ICON_SIZE * init.ui_scale_factor),
+                AnimatableFloat::Value(Self::ICON_SIZE * init.ui_scale_factor),
             ],
             instance_slot_index: Some(init.composite_instance_manager.alloc()),
             texatlas_rect: icon_atlas_rect.clone(),
@@ -963,27 +1030,31 @@ impl SpriteListToggleButtonView {
 
         if let Some(place_inner) = self.place_inner.get_if_triggered() {
             if place_inner {
-                ct.get_mut(self.ct_root).offset[0] = 8.0 * ui_scale_factor;
-                ct.get_mut(self.ct_root).animation_data_left = Some(AnimationData {
-                    to_value: (-Self::SIZE - 8.0) * ui_scale_factor,
-                    start_sec: current_sec,
-                    end_sec: current_sec + 0.25,
-                    curve_p1: (0.25, 0.8),
-                    curve_p2: (0.5, 1.0),
-                    event_on_complete: None,
-                });
+                ct.get_mut(self.ct_root).offset[0] = AnimatableFloat::Animated(
+                    8.0 * ui_scale_factor,
+                    AnimationData {
+                        to_value: (-Self::SIZE - 8.0) * ui_scale_factor,
+                        start_sec: current_sec,
+                        end_sec: current_sec + 0.25,
+                        curve_p1: (0.25, 0.8),
+                        curve_p2: (0.5, 1.0),
+                        event_on_complete: None,
+                    },
+                );
                 ct.mark_dirty(self.ct_root);
                 ht.get_data_mut(self.ht_root).left = -Self::SIZE - 8.0;
             } else {
-                ct.get_mut(self.ct_root).offset[0] = (-Self::SIZE - 8.0) * ui_scale_factor;
-                ct.get_mut(self.ct_root).animation_data_left = Some(AnimationData {
-                    to_value: 8.0 * ui_scale_factor,
-                    start_sec: current_sec,
-                    end_sec: current_sec + 0.25,
-                    curve_p1: (0.25, 0.8),
-                    curve_p2: (0.5, 1.0),
-                    event_on_complete: None,
-                });
+                ct.get_mut(self.ct_root).offset[0] = AnimatableFloat::Animated(
+                    (-Self::SIZE - 8.0) * ui_scale_factor,
+                    AnimationData {
+                        to_value: 8.0 * ui_scale_factor,
+                        start_sec: current_sec,
+                        end_sec: current_sec + 0.25,
+                        curve_p1: (0.25, 0.8),
+                        curve_p2: (0.5, 1.0),
+                        event_on_complete: None,
+                    },
+                );
                 ct.mark_dirty(self.ct_root);
                 ht.get_data_mut(self.ht_root).left = 8.0;
             }
@@ -1236,23 +1307,26 @@ impl SpriteListCellView {
 
         let ct_root = init.composite_tree.register(CompositeRect {
             offset: [
-                Self::MARGIN_H * init.ui_scale_factor,
-                init_top * init.ui_scale_factor,
+                AnimatableFloat::Value(Self::MARGIN_H * init.ui_scale_factor),
+                AnimatableFloat::Value(init_top * init.ui_scale_factor),
             ],
             relative_size_adjustment: [1.0, 0.0],
             size: [
-                -Self::MARGIN_H * 2.0 * init.ui_scale_factor,
-                Self::HEIGHT * init.ui_scale_factor,
+                AnimatableFloat::Value(-Self::MARGIN_H * 2.0 * init.ui_scale_factor),
+                AnimatableFloat::Value(Self::HEIGHT * init.ui_scale_factor),
             ],
             ..Default::default()
         });
         let ct_label = init.composite_tree.register(CompositeRect {
             offset: [
-                Self::LABEL_MARGIN_LEFT * init.ui_scale_factor,
-                -label_layout.height() * 0.5,
+                AnimatableFloat::Value(Self::LABEL_MARGIN_LEFT * init.ui_scale_factor),
+                AnimatableFloat::Value(-label_layout.height() * 0.5),
             ],
             relative_offset_adjustment: [0.0, 0.5],
-            size: [label_layout.width(), label_layout.height()],
+            size: [
+                AnimatableFloat::Value(label_layout.width()),
+                AnimatableFloat::Value(label_layout.height()),
+            ],
             instance_slot_index: Some(init.composite_instance_manager.alloc()),
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.1, 0.1, 0.1, 1.0])),
             texatlas_rect: label_atlas_rect,
@@ -1760,12 +1834,14 @@ impl SpriteListPaneView {
 
         let ct_root = init.composite_tree.register(CompositeRect {
             offset: [
-                Self::FLOATING_MARGIN * init.ui_scale_factor,
-                header_height * init.ui_scale_factor,
+                AnimatableFloat::Value(Self::FLOATING_MARGIN * init.ui_scale_factor),
+                AnimatableFloat::Value(header_height * init.ui_scale_factor),
             ],
             size: [
-                Self::INIT_WIDTH * init.ui_scale_factor,
-                -(header_height + Self::FLOATING_MARGIN) * init.ui_scale_factor,
+                AnimatableFloat::Value(Self::INIT_WIDTH * init.ui_scale_factor),
+                AnimatableFloat::Value(
+                    -(header_height + Self::FLOATING_MARGIN) * init.ui_scale_factor,
+                ),
             ],
             relative_size_adjustment: [0.0, 1.0],
             instance_slot_index: Some(init.composite_instance_manager.alloc()),
@@ -1780,13 +1856,15 @@ impl SpriteListPaneView {
         let ct_title_blurred = init.composite_tree.register(CompositeRect {
             instance_slot_index: Some(init.composite_instance_manager.alloc()),
             offset: [
-                -(title_blurred_atlas_rect.width() as f32 * 0.5),
-                (12.0 - Self::BLUR_AMOUNT_ONEDIR as f32) * init.ui_scale_factor,
+                AnimatableFloat::Value(-(title_blurred_atlas_rect.width() as f32 * 0.5)),
+                AnimatableFloat::Value(
+                    (12.0 - Self::BLUR_AMOUNT_ONEDIR as f32) * init.ui_scale_factor,
+                ),
             ],
             relative_offset_adjustment: [0.5, 0.0],
             size: [
-                title_blurred_atlas_rect.width() as f32,
-                title_blurred_atlas_rect.height() as f32,
+                AnimatableFloat::Value(title_blurred_atlas_rect.width() as f32),
+                AnimatableFloat::Value(title_blurred_atlas_rect.height() as f32),
             ],
             texatlas_rect: title_blurred_atlas_rect.clone(),
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.1, 0.1, 0.1, 1.0])),
@@ -1795,13 +1873,13 @@ impl SpriteListPaneView {
         let ct_title = init.composite_tree.register(CompositeRect {
             instance_slot_index: Some(init.composite_instance_manager.alloc()),
             offset: [
-                -(title_atlas_rect.width() as f32 * 0.5),
-                12.0 * init.ui_scale_factor,
+                AnimatableFloat::Value(-(title_atlas_rect.width() as f32 * 0.5)),
+                AnimatableFloat::Value(12.0 * init.ui_scale_factor),
             ],
             relative_offset_adjustment: [0.5, 0.0],
             size: [
-                title_atlas_rect.width() as f32,
-                title_atlas_rect.height() as f32,
+                AnimatableFloat::Value(title_atlas_rect.width() as f32),
+                AnimatableFloat::Value(title_atlas_rect.height() as f32),
             ],
             texatlas_rect: title_atlas_rect.clone(),
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
@@ -1862,28 +1940,31 @@ impl SpriteListPaneView {
     ) {
         if let Some(shown) = self.shown.get_if_triggered() {
             if shown {
-                ct.get_mut(self.ct_root).offset[0] = -self.width.get() * self.ui_scale_factor.get();
-                ct.get_mut(self.ct_root).animation_data_left = Some(AnimationData {
-                    to_value: Self::FLOATING_MARGIN * self.ui_scale_factor.get(),
-                    start_sec: current_sec,
-                    end_sec: current_sec + 0.25,
-                    curve_p1: (0.4, 1.25),
-                    curve_p2: (0.5, 1.0),
-                    event_on_complete: None,
-                });
+                ct.get_mut(self.ct_root).offset[0] = AnimatableFloat::Animated(
+                    -self.width.get() * self.ui_scale_factor.get(),
+                    AnimationData {
+                        to_value: Self::FLOATING_MARGIN * self.ui_scale_factor.get(),
+                        start_sec: current_sec,
+                        end_sec: current_sec + 0.25,
+                        curve_p1: (0.4, 1.25),
+                        curve_p2: (0.5, 1.0),
+                        event_on_complete: None,
+                    },
+                );
                 ct.mark_dirty(self.ct_root);
                 ht.get_data_mut(self.ht_frame).left = Self::FLOATING_MARGIN;
             } else {
-                ct.get_mut(self.ct_root).offset[0] =
-                    Self::FLOATING_MARGIN * self.ui_scale_factor.get();
-                ct.get_mut(self.ct_root).animation_data_left = Some(AnimationData {
-                    to_value: -self.width.get() * self.ui_scale_factor.get(),
-                    start_sec: current_sec,
-                    end_sec: current_sec + 0.25,
-                    curve_p1: (0.4, 1.25),
-                    curve_p2: (0.5, 1.0),
-                    event_on_complete: None,
-                });
+                ct.get_mut(self.ct_root).offset[0] = AnimatableFloat::Animated(
+                    Self::FLOATING_MARGIN * self.ui_scale_factor.get(),
+                    AnimationData {
+                        to_value: -self.width.get() * self.ui_scale_factor.get(),
+                        start_sec: current_sec,
+                        end_sec: current_sec + 0.25,
+                        curve_p1: (0.4, 1.25),
+                        curve_p2: (0.5, 1.0),
+                        event_on_complete: None,
+                    },
+                );
                 ct.mark_dirty(self.ct_root);
                 ht.get_data_mut(self.ht_frame).left = -self.width.get();
             }
@@ -1895,7 +1976,8 @@ impl SpriteListPaneView {
         }
 
         let width = self.width.get();
-        ct.get_mut(self.ct_root).size[0] = width * self.ui_scale_factor.get();
+        ct.get_mut(self.ct_root).size[0] =
+            AnimatableFloat::Value(width * self.ui_scale_factor.get());
         ct.mark_dirty(self.ct_root);
         ht.get_data_mut(self.ht_frame).width = width;
     }
@@ -3083,18 +3165,23 @@ impl AppMenuButtonView {
         let ct_bg_alpha_rate_shown = init
             .composite_tree
             .parameter_store_mut()
-            .alloc_float(AnimatableFloat::Value(0.0));
+            .alloc_float(FloatParameter::Value(0.0));
         let ct_bg_alpha_rate_pointer = init
             .composite_tree
             .parameter_store_mut()
-            .alloc_float(AnimatableFloat::Value(0.0));
+            .alloc_float(FloatParameter::Value(0.0));
         let ct_root = init.composite_tree.register(CompositeRect {
-            offset: [left * init.ui_scale_factor, top * init.ui_scale_factor],
+            offset: [
+                AnimatableFloat::Value(left * init.ui_scale_factor),
+                AnimatableFloat::Value(top * init.ui_scale_factor),
+            ],
             size: [
-                (Self::ICON_SIZE + Self::ICON_LABEL_GAP + Self::HPADDING * 2.0)
-                    * init.ui_scale_factor
-                    + label_layout.width(),
-                Self::BUTTON_HEIGHT * init.ui_scale_factor,
+                AnimatableFloat::Value(
+                    (Self::ICON_SIZE + Self::ICON_LABEL_GAP + Self::HPADDING * 2.0)
+                        * init.ui_scale_factor
+                        + label_layout.width(),
+                ),
+                AnimatableFloat::Value(Self::BUTTON_HEIGHT * init.ui_scale_factor),
             ],
             instance_slot_index: Some(init.composite_instance_manager.alloc()),
             texatlas_rect: bg_atlas_rect,
@@ -3111,12 +3198,12 @@ impl AppMenuButtonView {
         });
         let ct_icon = init.composite_tree.register(CompositeRect {
             size: [
-                Self::ICON_SIZE * init.ui_scale_factor,
-                Self::ICON_SIZE * init.ui_scale_factor,
+                AnimatableFloat::Value(Self::ICON_SIZE * init.ui_scale_factor),
+                AnimatableFloat::Value(Self::ICON_SIZE * init.ui_scale_factor),
             ],
             offset: [
-                Self::HPADDING * init.ui_scale_factor,
-                -Self::ICON_SIZE * 0.5 * init.ui_scale_factor,
+                AnimatableFloat::Value(Self::HPADDING * init.ui_scale_factor),
+                AnimatableFloat::Value(-Self::ICON_SIZE * 0.5 * init.ui_scale_factor),
             ],
             relative_offset_adjustment: [0.0, 0.5],
             instance_slot_index: Some(init.composite_instance_manager.alloc()),
@@ -3127,10 +3214,16 @@ impl AppMenuButtonView {
             ..Default::default()
         });
         let ct_label = init.composite_tree.register(CompositeRect {
-            size: [label_layout.width(), label_layout.height()],
+            size: [
+                AnimatableFloat::Value(label_layout.width()),
+                AnimatableFloat::Value(label_layout.height()),
+            ],
             offset: [
-                (Self::HPADDING + Self::ICON_SIZE + Self::ICON_LABEL_GAP) * init.ui_scale_factor,
-                -label_layout.height() * 0.5,
+                AnimatableFloat::Value(
+                    (Self::HPADDING + Self::ICON_SIZE + Self::ICON_LABEL_GAP)
+                        * init.ui_scale_factor,
+                ),
+                AnimatableFloat::Value(-label_layout.height() * 0.5),
             ],
             relative_offset_adjustment: [0.0, 0.5],
             instance_slot_index: Some(init.composite_instance_manager.alloc()),
@@ -3193,7 +3286,7 @@ impl AppMenuButtonView {
             if shown {
                 ct.parameter_store_mut().set_float(
                     self.ct_bg_alpha_rate_shown,
-                    AnimatableFloat::Animated(
+                    FloatParameter::Animated(
                         0.0,
                         AnimationData {
                             to_value: 1.0,
@@ -3230,15 +3323,17 @@ impl AppMenuButtonView {
                         },
                     ));
                 // TODO: ここでui_scale_factor適用するとui_scale_factorがかわったときにアニメーションが破綻するので別のところにおいたほうがよさそう(CompositeTreeで位置計算するときに適用する)
-                ct.get_mut(self.ct_root).offset[0] = (self.left + 8.0) * self.ui_scale_factor;
-                ct.get_mut(self.ct_root).animation_data_left = Some(AnimationData {
-                    start_sec: current_sec + self.show_delay_sec,
-                    end_sec: current_sec + self.show_delay_sec + 0.25,
-                    to_value: self.left * self.ui_scale_factor,
-                    curve_p1: (0.5, 0.5),
-                    curve_p2: (0.5, 1.0),
-                    event_on_complete: None,
-                });
+                ct.get_mut(self.ct_root).offset[0] = AnimatableFloat::Animated(
+                    (self.left + 8.0) * self.ui_scale_factor,
+                    AnimationData {
+                        start_sec: current_sec + self.show_delay_sec,
+                        end_sec: current_sec + self.show_delay_sec + 0.25,
+                        to_value: self.left * self.ui_scale_factor,
+                        curve_p1: (0.5, 0.5),
+                        curve_p2: (0.5, 1.0),
+                        event_on_complete: None,
+                    },
+                );
 
                 ct.mark_dirty(self.ct_root);
                 ct.mark_dirty(self.ct_icon);
@@ -3246,7 +3341,7 @@ impl AppMenuButtonView {
             } else {
                 ct.parameter_store_mut().set_float(
                     self.ct_bg_alpha_rate_shown,
-                    AnimatableFloat::Animated(
+                    FloatParameter::Animated(
                         1.0,
                         AnimationData {
                             to_value: 0.0,
@@ -3300,7 +3395,7 @@ impl AppMenuButtonView {
 
             ct.parameter_store_mut().set_float(
                 self.ct_bg_alpha_rate_pointer,
-                AnimatableFloat::Animated(
+                FloatParameter::Animated(
                     current,
                     AnimationData {
                         to_value: target,
@@ -3788,11 +3883,14 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler<'c> {
         if self.editing_atlas_dragging.get() {
             let dx = args.client_x - self.editing_atlas_drag_start_x.get();
             let dy = args.client_y - self.editing_atlas_drag_start_y.get();
+            let ox = self.editing_atlas_drag_start_offset_x.get() + dx * context.ui_scale_factor;
+            let oy = self.editing_atlas_drag_start_offset_y.get() + dy * context.ui_scale_factor;
 
-            ear.borrow_mut().set_offset(
-                self.editing_atlas_drag_start_offset_x.get() + dx * context.ui_scale_factor,
-                self.editing_atlas_drag_start_offset_y.get() + dy * context.ui_scale_factor,
-            );
+            ear.borrow_mut().set_offset(ox, oy);
+
+            if let Some(marker_view) = self.current_selected_sprite_marker_view.upgrade() {
+                marker_view.set_view_offset(ox, oy);
+            }
         }
 
         EventContinueControl::empty()
@@ -3812,11 +3910,14 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler<'c> {
         if self.editing_atlas_dragging.replace(false) {
             let dx = args.client_x - self.editing_atlas_drag_start_x.get();
             let dy = args.client_y - self.editing_atlas_drag_start_y.get();
+            let ox = self.editing_atlas_drag_start_offset_x.get() + dx * context.ui_scale_factor;
+            let oy = self.editing_atlas_drag_start_offset_y.get() + dy * context.ui_scale_factor;
 
-            ear.borrow_mut().set_offset(
-                self.editing_atlas_drag_start_offset_x.get() + dx * context.ui_scale_factor,
-                self.editing_atlas_drag_start_offset_y.get() + dy * context.ui_scale_factor,
-            );
+            ear.borrow_mut().set_offset(ox, oy);
+
+            if let Some(marker_view) = self.current_selected_sprite_marker_view.upgrade() {
+                marker_view.set_view_offset(ox, oy);
+            }
         }
 
         EventContinueControl::RELEASE_CAPTURE_ELEMENT
@@ -5679,7 +5780,7 @@ fn main() {
                         last_rendering = false;
                     }
 
-                    current_selected_sprite_marker_view.update(&mut composite_tree);
+                    current_selected_sprite_marker_view.update(&mut composite_tree, current_sec);
                     app_header.update(&mut composite_tree, &mut ht_manager, current_sec);
                     app_menu.update(&mut composite_tree, &mut ht_manager, current_sec);
                     sprite_list_pane.update(&mut composite_tree, &mut ht_manager, current_sec);

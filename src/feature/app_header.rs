@@ -9,8 +9,8 @@ use crate::{
     MS_STATE_EMPTY, PresenterInitContext, RASTER_STATE_DEFAULT_FILL_NOCULL, VI_STATE_FLOAT2_ONLY,
     ViewInitContext,
     composite::{
-        AnimatableColor, AnimationData, CompositeMode, CompositeRect, CompositeTree,
-        CompositeTreeRef,
+        AnimatableColor, AnimatableFloat, AnimationData, CompositeMode, CompositeRect,
+        CompositeTree, CompositeTreeRef,
     },
     hittest::{
         HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef,
@@ -207,7 +207,10 @@ impl MenuButtonView {
             .unwrap();
 
         let ct_root = init.composite_tree.register(CompositeRect {
-            size: [height * init.ui_scale_factor, height * init.ui_scale_factor],
+            size: [
+                AnimatableFloat::Value(height * init.ui_scale_factor),
+                AnimatableFloat::Value(height * init.ui_scale_factor),
+            ],
             ..Default::default()
         });
         let ct_bg = init.composite_tree.register(CompositeRect {
@@ -218,12 +221,12 @@ impl MenuButtonView {
         });
         let ct_icon = init.composite_tree.register(CompositeRect {
             size: [
-                Self::ICON_SIZE * init.ui_scale_factor,
-                Self::ICON_SIZE * init.ui_scale_factor,
+                AnimatableFloat::Value(Self::ICON_SIZE * init.ui_scale_factor),
+                AnimatableFloat::Value(Self::ICON_SIZE * init.ui_scale_factor),
             ],
             offset: [
-                -Self::ICON_SIZE * 0.5 * init.ui_scale_factor,
-                -Self::ICON_SIZE * 0.5 * init.ui_scale_factor,
+                AnimatableFloat::Value(-Self::ICON_SIZE * 0.5 * init.ui_scale_factor),
+                AnimatableFloat::Value(-Self::ICON_SIZE * 0.5 * init.ui_scale_factor),
             ],
             relative_offset_adjustment: [0.5, 0.5],
             instance_slot_index: Some(init.composite_instance_manager.alloc()),
@@ -442,17 +445,23 @@ impl BaseView {
 
         let ct_root = ctx.composite_tree.register(CompositeRect {
             relative_size_adjustment: [1.0, 0.0],
-            size: [0.0, height * ctx.ui_scale_factor],
+            size: [
+                AnimatableFloat::Value(0.0),
+                AnimatableFloat::Value(height * ctx.ui_scale_factor),
+            ],
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.0, 0.0, 0.0, 0.25])),
             texatlas_rect: bg_atlas_rect,
             instance_slot_index: Some(ctx.composite_instance_manager.alloc()),
             ..Default::default()
         });
         let ct_title = ctx.composite_tree.register(CompositeRect {
-            size: [text_layout.width(), text_layout.height()],
+            size: [
+                AnimatableFloat::Value(text_layout.width()),
+                AnimatableFloat::Value(text_layout.height()),
+            ],
             offset: [
-                Self::TITLE_LEFT_OFFSET * ctx.ui_scale_factor,
-                Self::TITLE_SPACING * ctx.ui_scale_factor,
+                AnimatableFloat::Value(Self::TITLE_LEFT_OFFSET * ctx.ui_scale_factor),
+                AnimatableFloat::Value(Self::TITLE_SPACING * ctx.ui_scale_factor),
             ],
             texatlas_rect: text_atlas_rect,
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),

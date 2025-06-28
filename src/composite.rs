@@ -69,14 +69,31 @@ const fn lerp4(x: f32, [a, c, e, g]: [f32; 4], [b, d, f, h]: [f32; 4]) -> [f32; 
 
 // TODO: このへんうまくまとめたいが......
 
-pub enum AnimatableFloat {
+pub enum FloatParameter {
     Value(f32),
     Animated(f32, AnimationData<f32>),
 }
-impl AnimatableFloat {
+impl FloatParameter {
     pub fn evaluate(&self, current_sec: f32) -> f32 {
         match self {
             &Self::Value(x) => x,
+            &Self::Animated(from_value, ref a) => {
+                lerp(a.interpolate(current_sec), from_value, a.to_value)
+            }
+        }
+    }
+}
+
+pub enum AnimatableFloat {
+    Value(f32),
+    Expression(Box<dyn Fn(&CompositeTreeParameterStore) -> f32>),
+    Animated(f32, AnimationData<f32>),
+}
+impl AnimatableFloat {
+    pub fn evaluate(&self, current_sec: f32, parameter_store: &CompositeTreeParameterStore) -> f32 {
+        match self {
+            &Self::Value(x) => x,
+            &Self::Expression(ref x) => x(parameter_store),
             &Self::Animated(from_value, ref a) => {
                 lerp(a.interpolate(current_sec), from_value, a.to_value)
             }
@@ -297,8 +314,8 @@ impl<T> AnimationData<T> {
 
 pub struct CompositeRect {
     pub instance_slot_index: Option<usize>,
-    pub offset: [f32; 2],
-    pub size: [f32; 2],
+    pub offset: [AnimatableFloat; 2],
+    pub size: [AnimatableFloat; 2],
     pub relative_offset_adjustment: [f32; 2],
     pub relative_size_adjustment: [f32; 2],
     pub texatlas_rect: AtlasRect,
@@ -308,10 +325,6 @@ pub struct CompositeRect {
     pub pivot: [f32; 2],
     pub scale_x: AnimatableFloat,
     pub scale_y: AnimatableFloat,
-    pub animation_data_left: Option<AnimationData<f32>>,
-    pub animation_data_top: Option<AnimationData<f32>>,
-    pub animation_data_width: Option<AnimationData<f32>>,
-    pub animation_data_height: Option<AnimationData<f32>>,
     pub dirty: bool,
     pub parent: Option<usize>,
     pub children: Vec<usize>,
@@ -320,8 +333,8 @@ impl Default for CompositeRect {
     fn default() -> Self {
         Self {
             instance_slot_index: None,
-            offset: [0.0, 0.0],
-            size: [0.0, 0.0],
+            offset: [const { AnimatableFloat::Value(0.0) }; 2],
+            size: [const { AnimatableFloat::Value(0.0) }; 2],
             relative_offset_adjustment: [0.0, 0.0],
             relative_size_adjustment: [0.0, 0.0],
             texatlas_rect: AtlasRect {
@@ -337,10 +350,6 @@ impl Default for CompositeRect {
             pivot: [0.5; 2],
             scale_x: AnimatableFloat::Value(1.0),
             scale_y: AnimatableFloat::Value(1.0),
-            animation_data_left: None,
-            animation_data_top: None,
-            animation_data_width: None,
-            animation_data_height: None,
             parent: None,
             children: Vec::new(),
         }
@@ -528,12 +537,12 @@ pub struct CompositeTreeRef(usize);
 pub struct CompositeTreeFloatParameterRef(usize);
 
 pub struct CompositeTreeParameterStore {
-    float_parameters: Vec<AnimatableFloat>,
+    float_parameters: Vec<FloatParameter>,
     float_values: Vec<f32>,
     unused_float_parameters: BTreeSet<usize>,
 }
 impl CompositeTreeParameterStore {
-    pub fn alloc_float(&mut self, init: AnimatableFloat) -> CompositeTreeFloatParameterRef {
+    pub fn alloc_float(&mut self, init: FloatParameter) -> CompositeTreeFloatParameterRef {
         if let Some(x) = self.unused_float_parameters.pop_first() {
             self.float_parameters[x] = init;
             return CompositeTreeFloatParameterRef(x);
@@ -548,7 +557,7 @@ impl CompositeTreeParameterStore {
         self.unused_float_parameters.insert(r.0);
     }
 
-    pub fn set_float(&mut self, r: CompositeTreeFloatParameterRef, a: AnimatableFloat) {
+    pub fn set_float(&mut self, r: CompositeTreeFloatParameterRef, a: FloatParameter) {
         self.float_parameters[r.0] = a;
     }
 
@@ -937,58 +946,10 @@ impl CompositeTree {
         {
             let r = &mut self.rects[r];
             r.dirty = false;
-            let local_left = match r.animation_data_left {
-                None => r.offset[0],
-                Some(ref mut x) => {
-                    let rate = x.interpolate(current_sec);
-                    if rate >= 1.0 {
-                        if let Some(e) = x.event_on_complete.take() {
-                            event_bus.push(e);
-                        }
-                    }
-
-                    r.offset[0] + (x.to_value - r.offset[0]) * rate
-                }
-            };
-            let local_top = match r.animation_data_top {
-                None => r.offset[1],
-                Some(ref mut x) => {
-                    let rate = x.interpolate(current_sec);
-                    if rate >= 1.0 {
-                        if let Some(e) = x.event_on_complete.take() {
-                            event_bus.push(e);
-                        }
-                    }
-
-                    r.offset[1] + (x.to_value - r.offset[1]) * rate
-                }
-            };
-            let local_width = match r.animation_data_width {
-                None => r.size[0],
-                Some(ref mut x) => {
-                    let rate = x.interpolate(current_sec);
-                    if rate >= 1.0 {
-                        if let Some(e) = x.event_on_complete.take() {
-                            event_bus.push(e);
-                        }
-                    }
-
-                    r.size[0] + (x.to_value - r.size[0]) * rate
-                }
-            };
-            let local_height = match r.animation_data_height {
-                None => r.size[1],
-                Some(ref mut x) => {
-                    let rate = x.interpolate(current_sec);
-                    if rate >= 1.0 {
-                        if let Some(e) = x.event_on_complete.take() {
-                            event_bus.push(e);
-                        }
-                    }
-
-                    r.size[1] + (x.to_value - r.size[1]) * rate
-                }
-            };
+            let local_left = r.offset[0].evaluate(current_sec, &self.parameter_store);
+            let local_top = r.offset[1].evaluate(current_sec, &self.parameter_store);
+            let local_width = r.size[0].evaluate(current_sec, &self.parameter_store);
+            let local_height = r.size[1].evaluate(current_sec, &self.parameter_store);
 
             let left = effective_base_left
                 + (effective_width * r.relative_offset_adjustment[0])
@@ -998,19 +959,23 @@ impl CompositeTree {
                 + local_top;
             let w = effective_width * r.relative_size_adjustment[0] + local_width;
             let h = effective_height * r.relative_size_adjustment[1] + local_height;
-            let opacity = parent_opacity * r.opacity.evaluate(current_sec);
+            let opacity = parent_opacity * r.opacity.evaluate(current_sec, &self.parameter_store);
             let matrix = parent_matrix.mul_mat4(
                 Matrix4::translate(
                     left - effective_base_left + r.pivot[0] * w,
                     top - effective_base_top + r.pivot[1] * h,
                 )
                 .mul_mat4(Matrix4::scale(
-                    r.scale_x.evaluate(current_sec),
-                    r.scale_y.evaluate(current_sec),
+                    r.scale_x.evaluate(current_sec, &self.parameter_store),
+                    r.scale_y.evaluate(current_sec, &self.parameter_store),
                 ))
                 .mul_mat4(Matrix4::translate(-r.pivot[0] * w, -r.pivot[1] * h)),
             );
 
+            r.offset[0].process_on_complete(current_sec, event_bus);
+            r.offset[1].process_on_complete(current_sec, event_bus);
+            r.size[0].process_on_complete(current_sec, event_bus);
+            r.size[1].process_on_complete(current_sec, event_bus);
             r.opacity.process_on_complete(current_sec, event_bus);
             r.scale_x.process_on_complete(current_sec, event_bus);
             r.scale_y.process_on_complete(current_sec, event_bus);
@@ -1088,7 +1053,7 @@ impl CompositeTree {
                 let backdrop_buffer_index = match r.composite_mode {
                     CompositeMode::ColorTintBackdropBlur(_, ref stdev)
                     | CompositeMode::FillColorBackdropBlur(_, ref stdev) => {
-                        let stdev = stdev.evaluate(current_sec);
+                        let stdev = stdev.evaluate(current_sec, &self.parameter_store);
 
                         if stdev > 0.0 {
                             inst_builder.request_backdrop_blur(

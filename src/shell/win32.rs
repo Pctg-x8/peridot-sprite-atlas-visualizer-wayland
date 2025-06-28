@@ -1,7 +1,8 @@
-use std::cell::Cell;
+use std::{cell::Cell, path::PathBuf, sync::Arc};
 
 use bedrock::{self as br, SurfaceCreateInfo};
 use windows::{
+    Storage::Pickers::FileOpenPicker,
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
         Graphics::{Dwm::DwmExtendFrameIntoClientArea, Gdi::HBRUSH},
@@ -12,6 +13,7 @@ use windows::{
                 DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow,
                 SetProcessDpiAwarenessContext,
             },
+            Shell::IInitializeWithWindow,
             WindowsAndMessaging::{
                 CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA,
                 GetClientRect, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, IDC_ARROW,
@@ -25,8 +27,9 @@ use windows::{
             },
         },
     },
-    core::{PCWSTR, w},
+    core::{Interface, PCWSTR, h, w},
 };
+use windows_future::{AsyncOperationCompletedHandler, AsyncStatus};
 
 use crate::{AppEvent, AppEventBus, hittest::CursorShape};
 
@@ -274,10 +277,7 @@ impl<'sys> AppShell<'sys> {
     pub fn flush(&mut self) {}
 
     #[tracing::instrument(skip(self))]
-    pub fn process_pending_events(&mut self) {}
-
-    #[tracing::instrument(skip(self))]
-    pub fn prepare_read_events(&mut self) -> std::io::Result<()> {
+    pub fn process_pending_events(&self) {
         let mut msg = core::mem::MaybeUninit::<MSG>::uninit();
         while unsafe { PeekMessageW(msg.as_mut_ptr(), None, 0, 0, PM_REMOVE).0 != 0 } {
             unsafe {
@@ -289,17 +289,21 @@ impl<'sys> AppShell<'sys> {
         // TODO: いったんあいたタイミングをFrameTimingとする あとで適切にスリープいれてあげたい気持ち
         self.app_event_queue
             .push(AppEvent::ToplevelWindowFrameTiming);
+    }
+
+    #[tracing::instrument(skip(self))]
+    pub fn prepare_read_events(&mut self) -> std::io::Result<()> {
         Ok(())
     }
 
     #[tracing::instrument(skip(self))]
-    pub fn request_next_frame(&mut self) {}
+    pub fn request_next_frame(&self) {}
 
     #[tracing::instrument(skip(self))]
-    pub fn post_configure(&mut self, _serial: u32) {}
+    pub fn post_configure(&self, _serial: u32) {}
 
     #[tracing::instrument(skip(self))]
-    pub fn set_cursor_shape(&mut self, _enter_serial: u32, shape: CursorShape) {
+    pub fn set_cursor_shape(&self, _enter_serial: u32, shape: CursorShape) {
         unsafe {
             SetCursor(match shape {
                 // TODO: 必要ならキャッシュする
@@ -312,5 +316,35 @@ impl<'sys> AppShell<'sys> {
     #[inline]
     pub fn ui_scale_factor(&self) -> f32 {
         self.ui_scale_factor.get()
+    }
+
+    pub async fn select_added_sprites(&self) -> Vec<PathBuf> {
+        let picker = FileOpenPicker::new().unwrap();
+        unsafe {
+            picker
+                .cast::<IInitializeWithWindow>()
+                .unwrap()
+                .Initialize(self.hwnd)
+                .unwrap();
+        }
+        picker.FileTypeFilter().unwrap().Append(h!(".png")).unwrap();
+
+        let files = picker.PickMultipleFilesAsync().unwrap().await.unwrap();
+        let mut paths = Vec::with_capacity(files.Size().unwrap() as _);
+        let files_iter = files.First().unwrap();
+        while files_iter.HasCurrent().unwrap() {
+            paths.push(
+                files_iter
+                    .Current()
+                    .unwrap()
+                    .Path()
+                    .unwrap()
+                    .to_os_string()
+                    .into(),
+            );
+            files_iter.MoveNext().unwrap();
+        }
+
+        paths
     }
 }

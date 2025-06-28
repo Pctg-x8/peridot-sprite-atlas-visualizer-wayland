@@ -176,8 +176,23 @@ impl br::Device for Subsystem {}
 impl Subsystem {
     #[tracing::instrument]
     pub fn init() -> Self {
+        let mut instance_layers =
+            Vec::with_capacity(br::instance_layer_property_count().unwrap() as _);
+        unsafe {
+            instance_layers.set_len(instance_layers.capacity());
+        }
+        br::instance_layer_properties(&mut instance_layers).unwrap();
+        let validation_layer_found = instance_layers
+            .iter()
+            .find(|x| x.layerName.as_cstr().unwrap() == c"VK_LAYER_KHRONOS_validation")
+            .is_some();
         for x in br::instance_extension_properties(None).unwrap() {
             tracing::debug!(extension_name = ?x.extensionName.as_cstr(), version = x.specVersion, "vkext");
+        }
+
+        let mut instance_layers = Vec::new();
+        if validation_layer_found {
+            instance_layers.push(c"VK_LAYER_KHRONOS_validation".into());
         }
 
         let instance = match br::InstanceObject::new(&br::InstanceCreateInfo::new(
@@ -188,7 +203,7 @@ impl Subsystem {
                 br::Version::new(0, 0, 0, 0),
             )
             .api_version(br::Version::new(0, 1, 4, 0)),
-            &[c"VK_LAYER_KHRONOS_validation".into()],
+            &instance_layers,
             &[
                 c"VK_KHR_surface".into(),
                 #[cfg(feature = "platform-linux-wayland")]

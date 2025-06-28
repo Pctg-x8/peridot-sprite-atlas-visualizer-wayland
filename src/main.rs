@@ -8,6 +8,7 @@ mod input;
 mod mathext;
 mod peridot;
 mod platform;
+mod quadtree;
 mod shell;
 mod source_reader;
 mod subsystem;
@@ -55,6 +56,10 @@ use windows::Win32::{
     UI::WindowsAndMessaging::{MWMO_INPUTAVAILABLE, QS_ALLINPUT},
 };
 
+use crate::quadtree::QuadTree;
+#[cfg(windows)]
+use crate::shell::AppShell;
+
 pub enum AppEvent {
     ToplevelWindowConfigure {
         width: u32,
@@ -94,6 +99,10 @@ pub enum AppEvent {
     EndBackgroundWork {
         thread_number: usize,
     },
+    SelectSprite {
+        index: usize,
+    },
+    DeselectSprite,
 }
 
 pub struct AppEventBus {
@@ -228,6 +237,7 @@ pub struct ViewFeedbackContext<'d> {
 
 pub struct AppUpdateContext<'d> {
     pub event_queue: &'d AppEventBus,
+    pub ui_scale_factor: f32,
 }
 
 pub struct BufferedStagingScratchBuffer<'subsystem> {
@@ -265,6 +275,233 @@ impl<'subsystem> BufferedStagingScratchBuffer<'subsystem> {
         &'s self,
     ) -> parking_lot::RwLockWriteGuard<'s, StagingScratchBufferManager<'subsystem>> {
         self.buffers[self.active_index].write()
+    }
+}
+
+/// Attachment Description that Renders to read-only texture(shader read-only) covering entire pixels(no blending with previous content and nothing needs to be cleared)
+const fn attachment_description_2_full_pixel_render_to_ro_texture(
+    format: br::Format,
+) -> br::AttachmentDescription2 {
+    br::AttachmentDescription2::new(format)
+        .with_layout_to(br::ImageLayout::ShaderReadOnlyOpt.from_undefined())
+        .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store)
+}
+
+const fn const_subpass_description_2_single_color_write_only<const ATTACHMENT_INDEX: u32>()
+-> br::SubpassDescription2<'static> {
+    br::SubpassDescription2::new().colors(
+        &const {
+            [br::AttachmentReference2::color_attachment_opt(
+                ATTACHMENT_INDEX,
+            )]
+        },
+    )
+}
+
+struct CurrentSelectedSpriteFocusData {
+    global_x_pixels: f32,
+    global_y_pixels: f32,
+    width_pixels: f32,
+    height_pixels: f32,
+}
+pub struct CurrentSelectedSpriteMarkerView {
+    ct_root: CompositeTreeRef,
+    global_x_param: CompositeTreeFloatParameterRef,
+    global_y_param: CompositeTreeFloatParameterRef,
+    view_offset_x_param: CompositeTreeFloatParameterRef,
+    view_offset_y_param: CompositeTreeFloatParameterRef,
+    focus_data: Cell<Option<CurrentSelectedSpriteFocusData>>,
+    view_offset_x: Cell<f32>,
+    view_offset_y: Cell<f32>,
+}
+impl CurrentSelectedSpriteMarkerView {
+    const CORNER_RADIUS: f32 = 4.0;
+    const THICKNESS: f32 = 2.0;
+    const COLOR: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
+
+    pub fn new(init: &mut ViewInitContext) -> Self {
+        let render_size_px = ((Self::CORNER_RADIUS * 2.0 + 1.0) * init.ui_scale_factor) as u32;
+        let border_image_atlas_rect = init.atlas.alloc(render_size_px, render_size_px);
+
+        let render_pass = br::RenderPassObject::new(
+            init.subsystem,
+            &br::RenderPassCreateInfo2::new(
+                &[attachment_description_2_full_pixel_render_to_ro_texture(
+                    init.atlas.format(),
+                )],
+                &[const_subpass_description_2_single_color_write_only::<0>()],
+                &[br::SubpassDependency2::new(
+                    br::SubpassIndex::Internal(0),
+                    br::SubpassIndex::External,
+                )
+                .of_memory(
+                    br::AccessFlags::COLOR_ATTACHMENT.write,
+                    br::AccessFlags::SHADER.read,
+                )
+                .of_execution(
+                    br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    br::PipelineStageFlags::FRAGMENT_SHADER,
+                )],
+            ),
+        )
+        .unwrap();
+        let framebuffer = br::FramebufferObject::new(
+            &init.subsystem,
+            &br::FramebufferCreateInfo::new(
+                &render_pass,
+                &[init.atlas.resource().as_transparent_ref()],
+                init.atlas.size(),
+                init.atlas.size(),
+            ),
+        )
+        .unwrap();
+
+        let [pipeline] = init
+            .subsystem
+            .create_graphics_pipelines_array(&[br::GraphicsPipelineCreateInfo::new(
+                init.subsystem.require_empty_pipeline_layout(),
+                render_pass.subpass(0),
+                &[
+                    init.subsystem
+                        .require_shader("resources/filltri.vert")
+                        .on_stage(br::ShaderStage::Vertex, c"main"),
+                    init.subsystem
+                        .require_shader("resources/rounded_rect_border.frag")
+                        .on_stage(br::ShaderStage::Fragment, c"main")
+                        .with_specialization_info(&br::SpecializationInfo::new(
+                            &RoundedRectConstants {
+                                corner_radius: Self::CORNER_RADIUS,
+                            },
+                        )),
+                ],
+                VI_STATE_EMPTY,
+                IA_STATE_TRILIST,
+                &br::PipelineViewportStateCreateInfo::new(
+                    &[border_image_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
+                    &[border_image_atlas_rect.vk_rect()],
+                ),
+                RASTER_STATE_DEFAULT_FILL_NOCULL,
+                BLEND_STATE_SINGLE_NONE,
+            )
+            .multisample_state(MS_STATE_EMPTY)])
+            .unwrap();
+
+        let mut cp = init
+            .subsystem
+            .create_transient_graphics_command_pool()
+            .unwrap();
+        let [mut cb] = br::CommandBufferObject::alloc_array(
+            init.subsystem,
+            &br::CommandBufferFixedCountAllocateInfo::new(&mut cp, br::CommandBufferLevel::Primary),
+        )
+        .unwrap();
+        unsafe {
+            cb.begin(
+                &br::CommandBufferBeginInfo::new().onetime_submit(),
+                init.subsystem,
+            )
+            .unwrap()
+        }
+        .begin_render_pass2(
+            &br::RenderPassBeginInfo::new(
+                &render_pass,
+                &framebuffer,
+                border_image_atlas_rect.vk_rect(),
+                &[br::ClearValue::color_f32([0.0; 4])],
+            ),
+            &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+        )
+        .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline)
+        .draw(3, 1, 0, 0)
+        .end_render_pass2(&br::SubpassEndInfo::new())
+        .end()
+        .unwrap();
+        init.subsystem
+            .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&cb)])
+            .unwrap();
+
+        let global_x_param = init
+            .composite_tree
+            .parameter_store_mut()
+            .alloc_float(AnimatableFloat::Value(0.0));
+        let global_y_param = init
+            .composite_tree
+            .parameter_store_mut()
+            .alloc_float(AnimatableFloat::Value(0.0));
+        let view_offset_x_param = init
+            .composite_tree
+            .parameter_store_mut()
+            .alloc_float(AnimatableFloat::Value(0.0));
+        let view_offset_y_param = init
+            .composite_tree
+            .parameter_store_mut()
+            .alloc_float(AnimatableFloat::Value(0.0));
+
+        let ct_root = init.composite_tree.register(CompositeRect {
+            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
+            texatlas_rect: border_image_atlas_rect,
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value(Self::COLOR)),
+            ..Default::default()
+        });
+
+        Self {
+            ct_root,
+            global_x_param,
+            global_y_param,
+            view_offset_x_param,
+            view_offset_y_param,
+            focus_data: Cell::new(None),
+            view_offset_x: Cell::new(0.0),
+            view_offset_y: Cell::new(0.0),
+        }
+    }
+
+    pub fn mount(&self, ct_parent: CompositeTreeRef, ct: &mut CompositeTree) {
+        ct.add_child(ct_parent, self.ct_root);
+    }
+
+    pub fn update(&self, ct: &mut CompositeTree) {
+        if let Some(fd) = self.focus_data.replace(None) {
+            ct.parameter_store_mut().set_float(
+                self.global_x_param,
+                AnimatableFloat::Value(fd.global_x_pixels),
+            );
+            ct.parameter_store_mut().set_float(
+                self.global_y_param,
+                AnimatableFloat::Value(fd.global_y_pixels),
+            );
+            ct.get_mut(self.ct_root).size = [fd.width_pixels, fd.height_pixels];
+        }
+
+        ct.parameter_store_mut().set_float(
+            self.view_offset_x_param,
+            AnimatableFloat::Value(self.view_offset_x.get()),
+        );
+        ct.parameter_store_mut().set_float(
+            self.view_offset_y_param,
+            AnimatableFloat::Value(self.view_offset_y.get()),
+        );
+
+        ct.mark_dirty(self.ct_root);
+    }
+
+    pub fn focus(&self, x_pixels: f32, y_pixels: f32, width_pixels: f32, height_pixels: f32) {
+        self.focus_data.set(Some(CurrentSelectedSpriteFocusData {
+            global_x_pixels: x_pixels,
+            global_y_pixels: y_pixels,
+            width_pixels,
+            height_pixels,
+        }));
+    }
+
+    pub fn hide(&self) {
+        // TODO
+    }
+
+    pub fn set_view_offset(&self, offset_x_pixels: f32, offset_y_pixels: f32) {
+        self.view_offset_x.set(offset_x_pixels);
+        self.view_offset_y.set(offset_y_pixels);
     }
 }
 
@@ -3481,12 +3718,33 @@ impl AppMenuPresenter {
 }
 
 struct HitTestRootTreeActionHandler<'subsystem> {
+    sprites_qt: RefCell<QuadTree>,
+    sprite_rects_cached: RefCell<Vec<(u32, u32, u32, u32)>>,
+    current_selected_sprite_marker_view: std::rc::Weak<CurrentSelectedSpriteMarkerView>,
     editing_atlas_renderer: std::rc::Weak<RefCell<EditingAtlasRenderer<'subsystem>>>,
     editing_atlas_dragging: Cell<bool>,
     editing_atlas_drag_start_x: Cell<f32>,
     editing_atlas_drag_start_y: Cell<f32>,
     editing_atlas_drag_start_offset_x: Cell<f32>,
     editing_atlas_drag_start_offset_y: Cell<f32>,
+}
+impl<'subsystem> HitTestRootTreeActionHandler<'subsystem> {
+    pub fn new(
+        editing_atlas_renderer: &Rc<RefCell<EditingAtlasRenderer<'subsystem>>>,
+        current_selected_sprite_marker_view: &Rc<CurrentSelectedSpriteMarkerView>,
+    ) -> Self {
+        Self {
+            editing_atlas_renderer: Rc::downgrade(editing_atlas_renderer),
+            current_selected_sprite_marker_view: Rc::downgrade(current_selected_sprite_marker_view),
+            sprites_qt: RefCell::new(QuadTree::new()),
+            sprite_rects_cached: RefCell::new(Vec::new()),
+            editing_atlas_dragging: Cell::new(false),
+            editing_atlas_drag_start_x: Cell::new(0.0),
+            editing_atlas_drag_start_y: Cell::new(0.0),
+            editing_atlas_drag_start_offset_x: Cell::new(0.0),
+            editing_atlas_drag_start_offset_y: Cell::new(0.0),
+        }
+    }
 }
 impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler<'c> {
     type Context = AppUpdateContext<'c>;
@@ -3561,6 +3819,44 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler<'c> {
         }
 
         EventContinueControl::RELEASE_CAPTURE_ELEMENT
+    }
+
+    fn on_click(
+        &self,
+        _sender: HitTestTreeRef,
+        context: &mut Self::Context,
+        args: &hittest::PointerActionArgs,
+    ) -> EventContinueControl {
+        let Some(ear) = self.editing_atlas_renderer.upgrade() else {
+            // app teardown-ed
+            return EventContinueControl::empty();
+        };
+
+        let x = args.client_x * context.ui_scale_factor + ear.borrow().offset()[0];
+        let y = args.client_y * context.ui_scale_factor + ear.borrow().offset()[1];
+
+        let mut max_index = None;
+        for n in self
+            .sprites_qt
+            .borrow()
+            .iter_possible_element_indices(x as _, y as _)
+        {
+            let (l, t, r, b) = self.sprite_rects_cached.borrow()[n];
+            if l as f32 <= x && x <= r as f32 && t as f32 <= y && y <= b as f32 {
+                // 大きいインデックスのものが最前面にいるのでmaxをとる
+                max_index = Some(max_index.map_or(n, |x: usize| x.max(n)));
+            }
+        }
+
+        if let Some(mx) = max_index {
+            context
+                .event_queue
+                .push(AppEvent::SelectSprite { index: mx });
+        } else {
+            context.event_queue.push(AppEvent::DeselectSprite);
+        }
+
+        EventContinueControl::STOP_PROPAGATION
     }
 }
 
@@ -4770,9 +5066,36 @@ fn main() {
     let sprite_list_pane = SpriteListPanePresenter::new(&mut init_context, app_header.height());
     let app_menu = AppMenuPresenter::new(&mut init_context, app_header.height());
 
+    let current_selected_sprite_marker_view = Rc::new(CurrentSelectedSpriteMarkerView::new(
+        &mut init_context.for_view,
+    ));
+    init_context.app_state.register_sprites_view_feedback({
+        let current_selected_sprite_marker_view =
+            Rc::downgrade(&current_selected_sprite_marker_view);
+
+        move |sprites| {
+            let Some(marker_view) = current_selected_sprite_marker_view.upgrade() else {
+                // app teardown-ed
+                return;
+            };
+
+            if let Some(selected) = sprites.iter().find(|x| x.selected) {
+                marker_view.focus(
+                    selected.left as _,
+                    selected.top as _,
+                    selected.width as _,
+                    selected.height as _,
+                );
+            } else {
+                marker_view.hide();
+            }
+        }
+    });
+
     drop(init_context);
     drop(staging_scratch_buffer_locked);
 
+    current_selected_sprite_marker_view.mount(CompositeTree::ROOT, &mut composite_tree);
     sprite_list_pane.mount(
         &mut composite_tree,
         CompositeTree::ROOT,
@@ -4796,14 +5119,10 @@ fn main() {
         .borrow_mut()
         .set_offset(0.0, app_header.height() * app_shell.ui_scale_factor());
 
-    let ht_root_fallback_action_handler = Rc::new(HitTestRootTreeActionHandler {
-        editing_atlas_renderer: std::rc::Rc::downgrade(&editing_atlas_renderer),
-        editing_atlas_dragging: Cell::new(false),
-        editing_atlas_drag_start_x: Cell::new(0.0),
-        editing_atlas_drag_start_y: Cell::new(0.0),
-        editing_atlas_drag_start_offset_x: Cell::new(0.0),
-        editing_atlas_drag_start_offset_y: Cell::new(0.0),
-    });
+    let ht_root_fallback_action_handler = Rc::new(HitTestRootTreeActionHandler::new(
+        &editing_atlas_renderer,
+        &current_selected_sprite_marker_view,
+    ));
     ht_manager.set_action_handler(ht_root, &ht_root_fallback_action_handler);
 
     {
@@ -5075,11 +5394,12 @@ fn main() {
         [const { core::mem::MaybeUninit::<platform::linux::epoll_event>::uninit() }; 8];
     let mut app_update_context = AppUpdateContext {
         event_queue: &events,
+        ui_scale_factor: app_shell.ui_scale_factor(),
     };
     'app: loop {
-        app_shell.prepare_read_events().unwrap();
         #[cfg(target_os = "linux")]
         {
+            app_shell.prepare_read_events().unwrap();
             let wake_count = epoll.wait(&mut epoll_events, None).unwrap();
             let mut shell_event_processed = false;
             for e in &epoll_events[..wake_count] {
@@ -5241,6 +5561,7 @@ fn main() {
                         last_rendering = false;
                     }
 
+                    current_selected_sprite_marker_view.update(&mut composite_tree);
                     app_header.update(&mut composite_tree, &mut ht_manager, current_sec);
                     app_menu.update(&mut composite_tree, &mut ht_manager, current_sec);
                     sprite_list_pane.update(&mut composite_tree, &mut ht_manager, current_sec);
@@ -6341,6 +6662,7 @@ fn main() {
                     surface_x,
                     surface_y,
                 } => {
+                    app_update_context.ui_scale_factor = app_shell.ui_scale_factor();
                     let (cw, ch) = client_size.get();
 
                     pointer_input_manager.handle_mouse_move(
@@ -6361,6 +6683,7 @@ fn main() {
                     last_pointer_pos = (surface_x, surface_y);
                 }
                 AppEvent::MainWindowPointerLeftDown { enter_serial } => {
+                    app_update_context.ui_scale_factor = app_shell.ui_scale_factor();
                     let (cw, ch) = client_size.get();
 
                     pointer_input_manager.handle_mouse_left_down(
@@ -6379,6 +6702,7 @@ fn main() {
                     );
                 }
                 AppEvent::MainWindowPointerLeftUp { enter_serial } => {
+                    app_update_context.ui_scale_factor = app_shell.ui_scale_factor();
                     let (cw, ch) = client_size.get();
 
                     pointer_input_manager.handle_mouse_left_up(
@@ -6460,7 +6784,11 @@ fn main() {
                     task_worker
                         .spawn(app_menu_on_add_sprite(&dbus, &events, &app_state))
                         .detach();
-                    #[cfg(not(target_os = "linux"))]
+                    #[cfg(windows)]
+                    task_worker
+                        .spawn(app_menu_on_add_sprite(&app_shell, &events, &app_state))
+                        .detach();
+                    #[cfg(not(any(target_os = "linux", windows)))]
                     events.push(AppEvent::UIMessageDialogRequest {
                         content: "[DEBUG] app_menu_on_add_sprite not implemented".into(),
                     });
@@ -6473,6 +6801,12 @@ fn main() {
                 }
                 AppEvent::EndBackgroundWork { thread_number } => {
                     tracing::trace!(thread_number, "TODO: EndBackgroundWork");
+                }
+                AppEvent::SelectSprite { index } => {
+                    app_state.borrow_mut().select_sprite(index);
+                }
+                AppEvent::DeselectSprite => {
+                    app_state.borrow_mut().deselect_sprite();
                 }
             }
             app_update_context.event_queue.notify_clear().unwrap();
@@ -6502,6 +6836,63 @@ impl DBusLink {
 
         Some(DBusWaitForReplyFuture::new(serial).await)
     }
+}
+
+#[cfg(windows)]
+async fn app_menu_on_add_sprite<'sys, 'subsystem>(
+    shell: &AppShell<'sys>,
+    events: &'sys AppEventBus,
+    app_state: &RefCell<AppState<'subsystem>>,
+) {
+    let added_paths = shell.select_added_sprites().await;
+
+    let mut added_sprites = Vec::with_capacity(added_paths.len());
+    for path in added_paths {
+        if path.is_dir() {
+            // process all files in directory(rec)
+            for entry in walkdir::WalkDir::new(&path)
+                .into_iter()
+                .filter_map(|e| e.ok())
+            {
+                let path = entry.path();
+                if !path.is_file() {
+                    // 自分自身を含むみたいなのでその場合は見逃す
+                    continue;
+                }
+
+                let mut fs = std::fs::File::open(&path).unwrap();
+                let Some(png_meta) = source_reader::png::Metadata::try_read(&mut fs) else {
+                    // PNGじゃないのは一旦見逃す
+                    continue;
+                };
+
+                added_sprites.push(SpriteInfo::new(
+                    path.file_stem().unwrap().to_str().unwrap().into(),
+                    path.to_path_buf(),
+                    png_meta.width,
+                    png_meta.height,
+                ));
+            }
+        } else {
+            let mut fs = std::fs::File::open(&path).unwrap();
+            let png_meta = match source_reader::png::Metadata::try_read(&mut fs) {
+                Some(x) => x,
+                None => {
+                    tracing::warn!(?path, "not a png?");
+                    continue;
+                }
+            };
+
+            added_sprites.push(SpriteInfo::new(
+                path.file_stem().unwrap().to_str().unwrap().into(),
+                path.to_path_buf(),
+                png_meta.width,
+                png_meta.height,
+            ));
+        }
+    }
+
+    app_state.borrow_mut().add_sprites(added_sprites);
 }
 
 #[cfg(target_os = "linux")]

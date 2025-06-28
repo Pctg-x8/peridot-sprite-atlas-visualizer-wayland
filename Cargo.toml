@@ -32,6 +32,8 @@ image = "0.25.6"
 crossbeam = "0.8.4"
 walkdir = "2.5.0"
 parking_lot = "0.12.4"
+windows-future = "0.2.1"
+windows-core = "0.61.2"
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.61"
@@ -42,6 +44,9 @@ features = [
     "Win32_System_LibraryLoader",
     "Win32_UI_HiDpi",
     "Win32_UI_Controls",
+    "Win32_UI_Shell",
     "Win32_Security",
     "Win32_System_Threading",
+    "Storage_Pickers",
+    "Storage_Streams",
 ]

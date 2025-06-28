@@ -296,7 +296,9 @@ impl Presenter {
 
             confirm_button_ct.relative_offset_adjustment = [0.5, 0.0];
             confirm_button_ct.offset = [
-                AnimatableFloat::Value(-0.5 * confirm_button.preferred_width()),
+                AnimatableFloat::Value(
+                    -0.5 * confirm_button.preferred_width() * init.for_view.ui_scale_factor,
+                ),
                 AnimatableFloat::Value(
                     (content_view.preferred_height - 4.0) * init.for_view.ui_scale_factor,
                 ),

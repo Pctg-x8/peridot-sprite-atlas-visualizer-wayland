@@ -51,6 +51,8 @@ use subsystem::{StagingScratchBufferManager, Subsystem};
 use text::TextLayout;
 use thirdparty::freetype::{self, FreeType};
 use trigger_cell::TriggerCell;
+#[cfg(windows)]
+use windows::Win32::Foundation::WAIT_TIMEOUT;
 use windows::Win32::{
     Foundation::WAIT_OBJECT_0,
     UI::WindowsAndMessaging::{MWMO_INPUTAVAILABLE, QS_ALLINPUT},
@@ -298,6 +300,7 @@ const fn const_subpass_description_2_single_color_write_only<const ATTACHMENT_IN
     )
 }
 
+#[derive(Debug)]
 struct CurrentSelectedSpriteFocusData {
     global_x_pixels: f32,
     global_y_pixels: f32,
@@ -3774,7 +3777,7 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler<'c> {
     fn on_pointer_move(
         &self,
         _sender: HitTestTreeRef,
-        _context: &mut Self::Context,
+        context: &mut Self::Context,
         args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         let Some(ear) = self.editing_atlas_renderer.upgrade() else {
@@ -3786,10 +3789,9 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler<'c> {
             let dx = args.client_x - self.editing_atlas_drag_start_x.get();
             let dy = args.client_y - self.editing_atlas_drag_start_y.get();
 
-            // TODO: あとでui_scale_factorをみれるようにする
             ear.borrow_mut().set_offset(
-                self.editing_atlas_drag_start_offset_x.get() + dx * 2.0,
-                self.editing_atlas_drag_start_offset_y.get() + dy * 2.0,
+                self.editing_atlas_drag_start_offset_x.get() + dx * context.ui_scale_factor,
+                self.editing_atlas_drag_start_offset_y.get() + dy * context.ui_scale_factor,
             );
         }
 
@@ -3799,7 +3801,7 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler<'c> {
     fn on_pointer_up(
         &self,
         _sender: HitTestTreeRef,
-        _context: &mut Self::Context,
+        context: &mut Self::Context,
         args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         let Some(ear) = self.editing_atlas_renderer.upgrade() else {
@@ -3811,10 +3813,9 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler<'c> {
             let dx = args.client_x - self.editing_atlas_drag_start_x.get();
             let dy = args.client_y - self.editing_atlas_drag_start_y.get();
 
-            // TODO: あとでui_scale_factorをみれるようにする
             ear.borrow_mut().set_offset(
-                self.editing_atlas_drag_start_offset_x.get() + dx * 2.0,
-                self.editing_atlas_drag_start_offset_y.get() + dy * 2.0,
+                self.editing_atlas_drag_start_offset_x.get() + dx * context.ui_scale_factor,
+                self.editing_atlas_drag_start_offset_y.get() + dy * context.ui_scale_factor,
             );
         }
 
@@ -3832,8 +3833,8 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler<'c> {
             return EventContinueControl::empty();
         };
 
-        let x = args.client_x * context.ui_scale_factor + ear.borrow().offset()[0];
-        let y = args.client_y * context.ui_scale_factor + ear.borrow().offset()[1];
+        let x = args.client_x * context.ui_scale_factor - ear.borrow().offset()[0];
+        let y = args.client_y * context.ui_scale_factor - ear.borrow().offset()[1];
 
         let mut max_index = None;
         for n in self
@@ -5039,28 +5040,6 @@ fn main() {
             editing_atlas_renderer.borrow_mut().set_atlas_size(*size);
         }
     });
-    init_context.app_state.register_sprites_view_feedback({
-        let editing_atlas_renderer = Rc::downgrade(&editing_atlas_renderer);
-        let bg_worker = bg_worker.enqueue_access().downgrade();
-        let staging_scratch_buffers = Arc::downgrade(&staging_scratch_buffers);
-
-        move |sprites| {
-            let Some(editing_atlas_renderer) = editing_atlas_renderer.upgrade() else {
-                // app teardown-ed
-                return;
-            };
-            let Some(bg_worker) = bg_worker.upgrade() else {
-                // app teardown-ed
-                return;
-            };
-
-            editing_atlas_renderer.borrow().update_sprites(
-                sprites,
-                &bg_worker,
-                &staging_scratch_buffers,
-            );
-        }
-    });
 
     let app_header = feature::app_header::Presenter::new(&mut init_context);
     let sprite_list_pane = SpriteListPanePresenter::new(&mut init_context, app_header.height());
@@ -5069,28 +5048,6 @@ fn main() {
     let current_selected_sprite_marker_view = Rc::new(CurrentSelectedSpriteMarkerView::new(
         &mut init_context.for_view,
     ));
-    init_context.app_state.register_sprites_view_feedback({
-        let current_selected_sprite_marker_view =
-            Rc::downgrade(&current_selected_sprite_marker_view);
-
-        move |sprites| {
-            let Some(marker_view) = current_selected_sprite_marker_view.upgrade() else {
-                // app teardown-ed
-                return;
-            };
-
-            if let Some(selected) = sprites.iter().find(|x| x.selected) {
-                marker_view.focus(
-                    selected.left as _,
-                    selected.top as _,
-                    selected.width as _,
-                    selected.height as _,
-                );
-            } else {
-                marker_view.hide();
-            }
-        }
-    });
 
     drop(init_context);
     drop(staging_scratch_buffer_locked);
@@ -5124,6 +5081,139 @@ fn main() {
         &current_selected_sprite_marker_view,
     ));
     ht_manager.set_action_handler(ht_root, &ht_root_fallback_action_handler);
+
+    app_state.get_mut().register_sprites_view_feedback({
+        let ht_root_fallback_action_handler = Rc::downgrade(&ht_root_fallback_action_handler);
+        let editing_atlas_renderer = Rc::downgrade(&editing_atlas_renderer);
+        let bg_worker = bg_worker.enqueue_access().downgrade();
+        let mut last_selected_index = None;
+        let staging_scratch_buffers = Arc::downgrade(&staging_scratch_buffers);
+        let current_selected_sprite_marker_view =
+            Rc::downgrade(&current_selected_sprite_marker_view);
+
+        move |sprites| {
+            let Some(ht_root_fallback_action_handler) = ht_root_fallback_action_handler.upgrade()
+            else {
+                // app teardown-ed
+                return;
+            };
+            let Some(editing_atlas_renderer) = editing_atlas_renderer.upgrade() else {
+                // app teardown-ed
+                return;
+            };
+            let Some(bg_worker) = bg_worker.upgrade() else {
+                // app teardown-ed
+                return;
+            };
+            let Some(marker_view) = current_selected_sprite_marker_view.upgrade() else {
+                // app teardown-ed
+                return;
+            };
+
+            while ht_root_fallback_action_handler
+                .sprite_rects_cached
+                .borrow()
+                .len()
+                > sprites.len()
+            {
+                // 削除分
+                let n = ht_root_fallback_action_handler
+                    .sprite_rects_cached
+                    .borrow()
+                    .len()
+                    - 1;
+                let old = ht_root_fallback_action_handler
+                    .sprite_rects_cached
+                    .borrow_mut()
+                    .pop()
+                    .unwrap();
+                let (index, level) = QuadTree::rect_index_and_level(old.0, old.1, old.2, old.3);
+
+                ht_root_fallback_action_handler
+                    .sprites_qt
+                    .borrow_mut()
+                    .element_index_for_region[level][index as usize]
+                    .remove(&n);
+            }
+            for (n, (old, new)) in ht_root_fallback_action_handler
+                .sprite_rects_cached
+                .borrow_mut()
+                .iter_mut()
+                .zip(sprites.iter())
+                .enumerate()
+            {
+                // 移動分
+                if old.0 == new.left
+                    && old.1 == new.top
+                    && old.2 == new.right()
+                    && old.3 == new.bottom()
+                {
+                    // 座標変化なし
+                    continue;
+                }
+
+                let (old_index, old_level) =
+                    QuadTree::rect_index_and_level(old.0, old.1, old.2, old.3);
+                let (new_index, new_level) =
+                    QuadTree::rect_index_and_level(new.left, new.top, new.right(), new.bottom());
+                *old = (new.left, new.top, new.right(), new.bottom());
+
+                if old_level == new_level && old_index == new_index {
+                    // 所属ブロックに変化なし
+                    continue;
+                }
+
+                ht_root_fallback_action_handler
+                    .sprites_qt
+                    .borrow_mut()
+                    .element_index_for_region[old_level][old_index as usize]
+                    .remove(&n);
+                ht_root_fallback_action_handler
+                    .sprites_qt
+                    .borrow_mut()
+                    .bind(new_level, new_index, n);
+            }
+            let new_base = ht_root_fallback_action_handler
+                .sprite_rects_cached
+                .borrow()
+                .len();
+            for (n, new) in sprites.iter().enumerate().skip(new_base) {
+                // 追加分
+                let (index, level) =
+                    QuadTree::rect_index_and_level(new.left, new.top, new.right(), new.bottom());
+                ht_root_fallback_action_handler
+                    .sprites_qt
+                    .borrow_mut()
+                    .bind(level, index, n);
+                ht_root_fallback_action_handler
+                    .sprite_rects_cached
+                    .borrow_mut()
+                    .push((new.left, new.top, new.right(), new.bottom()));
+            }
+
+            editing_atlas_renderer.borrow().update_sprites(
+                sprites,
+                &bg_worker,
+                &staging_scratch_buffers,
+            );
+
+            // TODO: Model的には複数選択できる形にしてるけどViewはどうしようか......
+            let selected_index = sprites.iter().position(|x| x.selected);
+            if selected_index != last_selected_index {
+                last_selected_index = selected_index;
+                if let Some(x) = selected_index {
+                    marker_view.focus(
+                        sprites[x].left as _,
+                        sprites[x].top as _,
+                        sprites[x].width as _,
+                        sprites[x].height as _,
+                    );
+                } else {
+                    marker_view.hide();
+                }
+            }
+        }
+    });
 
     {
         let mut staging_scratch_buffer_locked =
@@ -5470,21 +5560,21 @@ fn main() {
             }
         }
         #[cfg(windows)]
-        let r = unsafe {
-            windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx(
-                Some(&[
-                    events.event_notify.handle(),
-                    bg_worker.main_thread_waker().handle(),
-                ]),
-                0,
-                QS_ALLINPUT,
-                MWMO_INPUTAVAILABLE,
-            )
-        };
-        #[cfg(windows)]
-        if r.0 == WAIT_OBJECT_0.0 + 2 {
-            app_shell.process_pending_events();
-        } else if r.0 == WAIT_OBJECT_0.0 + 1 {
+        {
+            let r = unsafe {
+                use windows::Win32::UI::WindowsAndMessaging::MSG_WAIT_FOR_MULTIPLE_OBJECTS_EX_FLAGS;
+
+                windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx(
+                    Some(&[
+                        events.event_notify.handle(),
+                        bg_worker.main_thread_waker().handle(),
+                    ]),
+                    16,
+                    QS_ALLINPUT,
+                    MSG_WAIT_FOR_MULTIPLE_OBJECTS_EX_FLAGS(0),
+                )
+            };
+
             while let Some(vf) = bg_worker.try_pop_view_feedback() {
                 match vf {
                     BackgroundWorkerViewFeedback::BeginWork(thread_number, message) => {
@@ -5509,6 +5599,8 @@ fn main() {
                     tracing::warn!(reason = ?e, "Failed to clear bg worker view feedback notification signal")
                 }
             }
+
+            app_shell.process_pending_events();
         }
 
         #[cfg(target_os = "linux")]

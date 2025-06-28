@@ -3815,16 +3815,31 @@ impl AppMenuPresenter {
     }
 }
 
+enum DragState {
+    None,
+    Grid {
+        base_x_pixels: f32,
+        base_y_pixels: f32,
+        drag_start_client_x_pixels: f32,
+        drag_start_client_y_pixels: f32,
+    },
+    Sprite {
+        index: usize,
+        base_x_pixels: f32,
+        base_y_pixels: f32,
+        base_width_pixels: f32,
+        base_height_pixels: f32,
+        drag_start_client_x_pixels: f32,
+        drag_start_client_y_pixels: f32,
+    },
+}
+
 struct HitTestRootTreeActionHandler<'subsystem> {
     sprites_qt: RefCell<QuadTree>,
     sprite_rects_cached: RefCell<Vec<(u32, u32, u32, u32)>>,
     current_selected_sprite_marker_view: std::rc::Weak<CurrentSelectedSpriteMarkerView>,
     editing_atlas_renderer: std::rc::Weak<RefCell<EditingAtlasRenderer<'subsystem>>>,
-    editing_atlas_dragging: Cell<bool>,
-    editing_atlas_drag_start_x: Cell<f32>,
-    editing_atlas_drag_start_y: Cell<f32>,
-    editing_atlas_drag_start_offset_x: Cell<f32>,
-    editing_atlas_drag_start_offset_y: Cell<f32>,
+    drag_state: RefCell<DragState>,
 }
 impl<'subsystem> HitTestRootTreeActionHandler<'subsystem> {
     pub fn new(
@@ -3836,11 +3851,7 @@ impl<'subsystem> HitTestRootTreeActionHandler<'subsystem> {
             current_selected_sprite_marker_view: Rc::downgrade(current_selected_sprite_marker_view),
             sprites_qt: RefCell::new(QuadTree::new()),
             sprite_rects_cached: RefCell::new(Vec::new()),
-            editing_atlas_dragging: Cell::new(false),
-            editing_atlas_drag_start_x: Cell::new(0.0),
-            editing_atlas_drag_start_y: Cell::new(0.0),
-            editing_atlas_drag_start_offset_x: Cell::new(0.0),
-            editing_atlas_drag_start_offset_y: Cell::new(0.0),
+            drag_state: RefCell::new(DragState::None),
         }
     }
 }
@@ -3850,7 +3861,7 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler<'c> {
     fn on_pointer_down(
         &self,
         _sender: HitTestTreeRef,
-        _context: &mut Self::Context,
+        context: &mut Self::Context,
         args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         let Some(ear) = self.editing_atlas_renderer.upgrade() else {
@@ -3858,13 +3869,18 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler<'c> {
             return EventContinueControl::empty();
         };
 
-        self.editing_atlas_dragging.set(true);
-        self.editing_atlas_drag_start_x.set(args.client_x);
-        self.editing_atlas_drag_start_y.set(args.client_y);
-        self.editing_atlas_drag_start_offset_x
-            .set(ear.borrow().offset()[0]);
-        self.editing_atlas_drag_start_offset_y
-            .set(ear.borrow().offset()[1]);
+        let [current_offset_x, current_offset_y] = ear.borrow().offset();
+        let pointing_x = args.client_x * context.ui_scale_factor + current_offset_x;
+        let pointing_y = args.client_y * context.ui_scale_factor + current_offset_y;
+
+        // TODO: detect sprite drag
+
+        *self.drag_state.borrow_mut() = DragState::Grid {
+            base_x_pixels: current_offset_x,
+            base_y_pixels: current_offset_y,
+            drag_start_client_x_pixels: args.client_x * context.ui_scale_factor,
+            drag_start_client_y_pixels: args.client_y * context.ui_scale_factor,
+        };
 
         EventContinueControl::CAPTURE_ELEMENT
     }
@@ -3880,17 +3896,28 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler<'c> {
             return EventContinueControl::empty();
         };
 
-        if self.editing_atlas_dragging.get() {
-            let dx = args.client_x - self.editing_atlas_drag_start_x.get();
-            let dy = args.client_y - self.editing_atlas_drag_start_y.get();
-            let ox = self.editing_atlas_drag_start_offset_x.get() + dx * context.ui_scale_factor;
-            let oy = self.editing_atlas_drag_start_offset_y.get() + dy * context.ui_scale_factor;
+        match &*self.drag_state.borrow() {
+            DragState::None => (),
+            DragState::Grid {
+                base_x_pixels,
+                base_y_pixels,
+                drag_start_client_x_pixels,
+                drag_start_client_y_pixels,
+            } => {
+                let dx = args.client_x * context.ui_scale_factor - drag_start_client_x_pixels;
+                let dy = args.client_y * context.ui_scale_factor - drag_start_client_y_pixels;
+                let ox = base_x_pixels + dx;
+                let oy = base_y_pixels + dy;
 
-            ear.borrow_mut().set_offset(ox, oy);
+                ear.borrow_mut().set_offset(ox, oy);
 
-            if let Some(marker_view) = self.current_selected_sprite_marker_view.upgrade() {
-                marker_view.set_view_offset(ox, oy);
+                if let Some(marker_view) = self.current_selected_sprite_marker_view.upgrade() {
+                    marker_view.set_view_offset(ox, oy);
+                }
+
+                return EventContinueControl::STOP_PROPAGATION;
             }
+            DragState::Sprite { .. } => unimplemented!(),
         }
 
         EventContinueControl::empty()
@@ -3907,20 +3934,32 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler<'c> {
             return EventContinueControl::empty();
         };
 
-        if self.editing_atlas_dragging.replace(false) {
-            let dx = args.client_x - self.editing_atlas_drag_start_x.get();
-            let dy = args.client_y - self.editing_atlas_drag_start_y.get();
-            let ox = self.editing_atlas_drag_start_offset_x.get() + dx * context.ui_scale_factor;
-            let oy = self.editing_atlas_drag_start_offset_y.get() + dy * context.ui_scale_factor;
+        match self.drag_state.replace(DragState::None) {
+            DragState::None => (),
+            DragState::Grid {
+                base_x_pixels,
+                base_y_pixels,
+                drag_start_client_x_pixels,
+                drag_start_client_y_pixels,
+            } => {
+                let dx = args.client_x * context.ui_scale_factor - drag_start_client_x_pixels;
+                let dy = args.client_y * context.ui_scale_factor - drag_start_client_y_pixels;
+                let ox = base_x_pixels + dx;
+                let oy = base_y_pixels + dy;
 
-            ear.borrow_mut().set_offset(ox, oy);
+                ear.borrow_mut().set_offset(ox, oy);
 
-            if let Some(marker_view) = self.current_selected_sprite_marker_view.upgrade() {
-                marker_view.set_view_offset(ox, oy);
+                if let Some(marker_view) = self.current_selected_sprite_marker_view.upgrade() {
+                    marker_view.set_view_offset(ox, oy);
+                }
+
+                return EventContinueControl::STOP_PROPAGATION
+                    | EventContinueControl::RELEASE_CAPTURE_ELEMENT;
             }
+            DragState::Sprite { .. } => unimplemented!(),
         }
 
-        EventContinueControl::RELEASE_CAPTURE_ELEMENT
+        EventContinueControl::empty()
     }
 
     fn on_click(

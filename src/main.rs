@@ -5481,8 +5481,34 @@ fn main() {
                 MWMO_INPUTAVAILABLE,
             )
         };
+        #[cfg(windows)]
         if r.0 == WAIT_OBJECT_0.0 + 2 {
             app_shell.process_pending_events();
+        } else if r.0 == WAIT_OBJECT_0.0 + 1 {
+            while let Some(vf) = bg_worker.try_pop_view_feedback() {
+                match vf {
+                    BackgroundWorkerViewFeedback::BeginWork(thread_number, message) => {
+                        app_update_context
+                            .event_queue
+                            .push(AppEvent::BeginBackgroundWork {
+                                thread_number,
+                                message,
+                            })
+                    }
+                    BackgroundWorkerViewFeedback::EndWork(thread_number) => app_update_context
+                        .event_queue
+                        .push(AppEvent::EndBackgroundWork { thread_number }),
+                }
+            }
+
+            // TODO: これロックとかとってあげないと僅差で状態がずれる可能性があるかも？
+            match bg_worker.clear_view_feedback_notification() {
+                Ok(_) => (),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => (),
+                Err(e) => {
+                    tracing::warn!(reason = ?e, "Failed to clear bg worker view feedback notification signal")
+                }
+            }
         }
 
         #[cfg(target_os = "linux")]
@@ -6786,7 +6812,7 @@ fn main() {
                         .detach();
                     #[cfg(windows)]
                     task_worker
-                        .spawn(app_menu_on_add_sprite(&app_shell, &events, &app_state))
+                        .spawn(app_menu_on_add_sprite(&app_shell, &app_state))
                         .detach();
                     #[cfg(not(any(target_os = "linux", windows)))]
                     events.push(AppEvent::UIMessageDialogRequest {
@@ -6812,6 +6838,8 @@ fn main() {
             app_update_context.event_queue.notify_clear().unwrap();
         }
     }
+
+    bg_worker.teardown();
 
     if let Err(e) = unsafe { subsystem.wait() } {
         tracing::warn!(reason = ?e, "Error in waiting pending works before shutdown");
@@ -6841,7 +6869,6 @@ impl DBusLink {
 #[cfg(windows)]
 async fn app_menu_on_add_sprite<'sys, 'subsystem>(
     shell: &AppShell<'sys>,
-    events: &'sys AppEventBus,
     app_state: &RefCell<AppState<'subsystem>>,
 ) {
     let added_paths = shell.select_added_sprites().await;

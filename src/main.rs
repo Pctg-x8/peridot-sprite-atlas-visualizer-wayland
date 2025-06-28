@@ -6460,7 +6460,10 @@ fn main() {
                     task_worker
                         .spawn(app_menu_on_add_sprite(&dbus, &events, &app_state))
                         .detach();
-                    unimplemented!("app_menu_on_add_sprite");
+                    #[cfg(not(target_os = "linux"))]
+                    events.push(AppEvent::UIMessageDialogRequest {
+                        content: "[DEBUG] app_menu_on_add_sprite not implemented".into(),
+                    });
                 }
                 AppEvent::BeginBackgroundWork {
                     thread_number,

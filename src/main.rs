@@ -20,7 +20,6 @@ mod uikit;
 use std::{
     cell::{Cell, RefCell, UnsafeCell},
     collections::{BTreeSet, HashMap, VecDeque},
-    os::fd::AsRawFd,
     path::Path,
     rc::Rc,
     sync::Arc,
@@ -47,16 +46,14 @@ use hittest::{
 };
 use input::{EventContinueControl, PointerInputManager};
 use parking_lot::RwLock;
-use platform::linux::{
-    EPOLLERR, EPOLLHUP, EPOLLIN, EPOLLOUT, Epoll, EpollData, EventFD, EventFDOptions, epoll_event,
-};
 use subsystem::{StagingScratchBufferManager, Subsystem};
 use text::TextLayout;
-use thirdparty::{
-    dbus, fontconfig,
-    freetype::{self, FreeType},
-};
+use thirdparty::freetype::{self, FreeType};
 use trigger_cell::TriggerCell;
+use windows::Win32::{
+    Foundation::WAIT_OBJECT_0,
+    UI::WindowsAndMessaging::{MWMO_INPUTAVAILABLE, QS_ALLINPUT},
+};
 
 pub enum AppEvent {
     ToplevelWindowConfigure {
@@ -101,12 +98,18 @@ pub enum AppEvent {
 
 pub struct AppEventBus {
     queue: UnsafeCell<VecDeque<AppEvent>>,
-    efd: EventFD,
+    #[cfg(target_os = "linux")]
+    efd: platform::linux::EventFD,
+    #[cfg(windows)]
+    event_notify: platform::win32::event::EventObject,
 }
 impl AppEventBus {
     pub fn push(&self, e: AppEvent) {
         unsafe { &mut *self.queue.get() }.push_back(e);
+        #[cfg(target_os = "linux")]
         self.efd.add(1).unwrap();
+        #[cfg(windows)]
+        platform::win32::event::EventObject::new(None, true, false).unwrap();
     }
 
     fn pop(&self) -> Option<AppEvent> {
@@ -114,11 +117,16 @@ impl AppEventBus {
     }
 
     fn notify_clear(&self) -> std::io::Result<()> {
+        #[cfg(target_os = "linux")]
         match self.efd.take() {
             // WouldBlock(EAGAIN)はでてきてもOK
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
             Err(e) => Err(e),
             Ok(_) => Ok(()),
+        }
+        #[cfg(windows)]
+        {
+            self.event_notify.reset().map_err(From::from)
         }
     }
 }
@@ -1956,7 +1964,13 @@ impl AppMenuButtonView {
             .atlas
             .alloc(label_layout.width_px(), label_layout.height_px());
 
-        let icon_svg_content = std::fs::read_to_string(icon_path).unwrap();
+        let icon_svg_content = match std::fs::read_to_string(icon_path) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to load icon svg");
+                std::process::exit(1);
+            }
+        };
         let mut reader = quick_xml::Reader::from_str(&icon_svg_content);
         let mut svg_path_commands = Vec::new();
         let mut viewbox = None;
@@ -3924,15 +3938,21 @@ fn main() {
     tracing::info!("Initializing Peridot SpriteAtlas Visualizer/Editor");
     let setup_timer = std::time::Instant::now();
 
-    let dbus = dbus::Connection::connect_bus(dbus::BusType::Session).unwrap();
+    #[cfg(unix)]
+    let dbus =
+        thirdparty::dbus::Connection::connect_bus(thirdparty::dbus::BusType::Session).unwrap();
 
     let events = AppEventBus {
         queue: UnsafeCell::new(VecDeque::new()),
+        #[cfg(target_os = "linux")]
         efd: EventFD::new(0, EventFDOptions::NONBLOCK).unwrap(),
+        #[cfg(windows)]
+        event_notify: platform::win32::event::EventObject::new(None, true, false).unwrap(),
     };
 
     // initialize font systems
-    fontconfig::init();
+    #[cfg(unix)]
+    thirdparty::fontconfig::init();
     let mut ft = FreeType::new().expect("Failed to initialize FreeType");
     let hinting = unsafe { ft.get_property::<u32>(c"cff", c"hinting-engine").unwrap() };
     let no_stem_darkening = unsafe {
@@ -3957,8 +3977,8 @@ fn main() {
 
     let mut app_state = RefCell::new(AppState::new());
 
-    let mut app_shell = shell::wayland::AppShell::new(&events);
-    let client_size = Cell::new((640.0f32, 480.0));
+    let mut app_shell = shell::AppShell::new(&events);
+    let client_size = Cell::new(app_shell.client_size());
     let mut pointer_input_manager = PointerInputManager::new();
     let mut ht_manager = HitTestTreeManager::new();
     let ht_root = ht_manager.create(HitTestTreeData {
@@ -3982,32 +4002,40 @@ fn main() {
         subsystem: &subsystem,
     });
 
-    let mut fc_pat = fontconfig::Pattern::new();
-    fc_pat.add_family_name(c"system-ui");
-    fc_pat.add_weight(80);
-    fontconfig::Config::current()
-        .unwrap()
-        .substitute(&mut fc_pat, fontconfig::MatchKind::Pattern);
-    fc_pat.default_substitute();
-    let fc_set = fontconfig::Config::current()
-        .unwrap()
-        .sort(&mut fc_pat, true)
-        .unwrap();
-    let mut primary_face_info = None;
-    for &f in fc_set.fonts() {
-        let file_path = f.get_file_path(0).unwrap();
-        let index = f.get_face_index(0).unwrap();
+    #[cfg(unix)]
+    {
+        let mut fc_pat = fontconfig::Pattern::new();
+        fc_pat.add_family_name(c"system-ui");
+        fc_pat.add_weight(80);
+        fontconfig::Config::current()
+            .unwrap()
+            .substitute(&mut fc_pat, fontconfig::MatchKind::Pattern);
+        fc_pat.default_substitute();
+        let fc_set = fontconfig::Config::current()
+            .unwrap()
+            .sort(&mut fc_pat, true)
+            .unwrap();
+        let mut primary_face_info = None;
+        for &f in fc_set.fonts() {
+            let file_path = f.get_file_path(0).unwrap();
+            let index = f.get_face_index(0).unwrap();
 
-        tracing::debug!(?file_path, index, "match font");
+            tracing::debug!(?file_path, index, "match font");
 
-        if primary_face_info.is_none() {
-            primary_face_info = Some((file_path.to_owned(), index));
+            if primary_face_info.is_none() {
+                primary_face_info = Some((file_path.to_owned(), index));
+            }
         }
+        let Some((primary_face_path, primary_face_index)) = primary_face_info else {
+            tracing::error!("No UI face found");
+            std::process::exit(1);
+        };
     }
-    let Some((primary_face_path, primary_face_index)) = primary_face_info else {
-        tracing::error!("No UI face found");
-        std::process::exit(1);
-    };
+    // TODO: mock
+    #[cfg(windows)]
+    let primary_face_path = c"C:\\Windows\\Fonts\\YuGothR.ttc";
+    #[cfg(windows)]
+    let primary_face_index = 0;
 
     let mut ft_face = match ft.new_face(&primary_face_path, primary_face_index as _) {
         Ok(x) => x,
@@ -4657,10 +4685,12 @@ fn main() {
         )
         .unwrap();
 
+    #[cfg(unix)]
     let mut dbus = DBusLink {
         con: RefCell::new(dbus),
     };
 
+    #[cfg(target_os = "linux")]
     unsafe {
         DBUS_WAIT_FOR_REPLY_WAKERS = &mut HashMap::new() as *mut _;
         DBUS_WAIT_FOR_SIGNAL_WAKERS = &mut HashMap::new() as *mut _;
@@ -4672,6 +4702,7 @@ fn main() {
         parking_lot::RwLockWriteGuard::map(staging_scratch_buffers.write(), |x| {
             x.active_buffer_mut()
         });
+    tracing::info!(value = app_shell.ui_scale_factor(), "initial ui scale");
     let mut init_context = PresenterInitContext {
         for_view: ViewInitContext {
             subsystem: &subsystem,
@@ -4850,16 +4881,19 @@ fn main() {
     app_state.get_mut().synchronize_view();
     app_shell.flush();
 
+    #[cfg(target_os = "linux")]
     pub enum PollFDType {
         AppEventBus,
         AppShellDisplay,
         BackgroundWorkerViewFeedback,
         DBusWatch(*mut dbus::WatchRef),
     }
+    #[cfg(target_os = "linux")]
     struct PollFDPool {
         types: Vec<PollFDType>,
         freelist: BTreeSet<u64>,
     }
+    #[cfg(target_os = "linux")]
     impl PollFDPool {
         pub fn new() -> Self {
             Self {
@@ -4889,39 +4923,44 @@ fn main() {
         }
     }
 
-    let poll_fd_pool = RefCell::new(PollFDPool::new());
-    let epoll = Epoll::new(0).unwrap();
-    epoll
-        .add(
-            &events.efd,
-            EPOLLIN,
-            EpollData::U64(poll_fd_pool.borrow_mut().alloc(PollFDType::AppEventBus)),
-        )
-        .unwrap();
-    epoll
-        .add(
-            &app_shell.display_fd(),
-            EPOLLIN,
-            EpollData::U64(poll_fd_pool.borrow_mut().alloc(PollFDType::AppShellDisplay)),
-        )
-        .unwrap();
-    epoll
-        .add(
-            bg_worker.view_feedback_notifier(),
-            EPOLLIN,
-            EpollData::U64(
-                poll_fd_pool
-                    .borrow_mut()
-                    .alloc(PollFDType::BackgroundWorkerViewFeedback),
-            ),
-        )
-        .unwrap();
+    #[cfg(target_os = "linux")]
+    {
+        let poll_fd_pool = RefCell::new(PollFDPool::new());
+        let epoll = Epoll::new(0).unwrap();
+        epoll
+            .add(
+                &events.efd,
+                EPOLLIN,
+                EpollData::U64(poll_fd_pool.borrow_mut().alloc(PollFDType::AppEventBus)),
+            )
+            .unwrap();
+        epoll
+            .add(
+                &app_shell.display_fd(),
+                EPOLLIN,
+                EpollData::U64(poll_fd_pool.borrow_mut().alloc(PollFDType::AppShellDisplay)),
+            )
+            .unwrap();
+        epoll
+            .add(
+                bg_worker.view_feedback_notifier(),
+                EPOLLIN,
+                EpollData::U64(
+                    poll_fd_pool
+                        .borrow_mut()
+                        .alloc(PollFDType::BackgroundWorkerViewFeedback),
+                ),
+            )
+            .unwrap();
+    }
 
+    #[cfg(target_os = "linux")]
     struct DBusWatcher<'e> {
         epoll: &'e Epoll,
         fd_pool: &'e RefCell<PollFDPool>,
         fd_to_pool_index: HashMap<core::ffi::c_int, u64>,
     }
+    #[cfg(target_os = "linux")]
     impl dbus::WatchFunction for DBusWatcher<'_> {
         fn add(&mut self, watch: &mut dbus::WatchRef) -> bool {
             if watch.enabled() {
@@ -5006,6 +5045,7 @@ fn main() {
         }
     }
 
+    #[cfg(target_os = "linux")]
     dbus.con
         .get_mut()
         .set_watch_functions(Box::new(DBusWatcher {
@@ -5030,80 +5070,102 @@ fn main() {
     };
     let mut composite_instance_buffer_dirty = false;
     let mut popups = HashMap::<uuid::Uuid, uikit::message_dialog::Presenter>::new();
-    let mut epoll_events = [const { core::mem::MaybeUninit::<epoll_event>::uninit() }; 8];
+    #[cfg(target_os = "linux")]
+    let mut epoll_events =
+        [const { core::mem::MaybeUninit::<platform::linux::epoll_event>::uninit() }; 8];
     let mut app_update_context = AppUpdateContext {
         event_queue: &events,
     };
     'app: loop {
         app_shell.prepare_read_events().unwrap();
-        let wake_count = epoll.wait(&mut epoll_events, None).unwrap();
-        let mut shell_event_processed = false;
-        for e in &epoll_events[..wake_count] {
-            let e = unsafe { e.assume_init_ref() };
+        #[cfg(target_os = "linux")]
+        {
+            let wake_count = epoll.wait(&mut epoll_events, None).unwrap();
+            let mut shell_event_processed = false;
+            for e in &epoll_events[..wake_count] {
+                let e = unsafe { e.assume_init_ref() };
 
-            match poll_fd_pool.borrow().get(unsafe { e.data.u64 }) {
-                Some(&PollFDType::AppEventBus) => {
-                    // app event
-                }
-                Some(&PollFDType::AppShellDisplay) => {
-                    // display event
-                    app_shell.read_and_process_events().unwrap();
-                    shell_event_processed = true;
-                }
-                Some(&PollFDType::BackgroundWorkerViewFeedback) => {
-                    while let Some(vf) = bg_worker.try_pop_view_feedback() {
-                        match vf {
-                            BackgroundWorkerViewFeedback::BeginWork(thread_number, message) => {
-                                app_update_context
-                                    .event_queue
-                                    .push(AppEvent::BeginBackgroundWork {
-                                        thread_number,
-                                        message,
-                                    })
+                match poll_fd_pool.borrow().get(unsafe { e.data.u64 }) {
+                    Some(&PollFDType::AppEventBus) => {
+                        // app event
+                    }
+                    Some(&PollFDType::AppShellDisplay) => {
+                        // display event
+                        app_shell.read_and_process_events().unwrap();
+                        shell_event_processed = true;
+                    }
+                    Some(&PollFDType::BackgroundWorkerViewFeedback) => {
+                        while let Some(vf) = bg_worker.try_pop_view_feedback() {
+                            match vf {
+                                BackgroundWorkerViewFeedback::BeginWork(thread_number, message) => {
+                                    app_update_context.event_queue.push(
+                                        AppEvent::BeginBackgroundWork {
+                                            thread_number,
+                                            message,
+                                        },
+                                    )
+                                }
+                                BackgroundWorkerViewFeedback::EndWork(thread_number) => {
+                                    app_update_context
+                                        .event_queue
+                                        .push(AppEvent::EndBackgroundWork { thread_number })
+                                }
                             }
-                            BackgroundWorkerViewFeedback::EndWork(thread_number) => {
-                                app_update_context
-                                    .event_queue
-                                    .push(AppEvent::EndBackgroundWork { thread_number })
+                        }
+
+                        // TODO: これロックとかとってあげないと僅差で状態がずれる可能性があるかも？
+                        match bg_worker.clear_view_feedback_notification() {
+                            Ok(_) => (),
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => (),
+                            Err(e) => {
+                                tracing::warn!(reason = ?e, "Failed to clear bg worker view feedback notification signal")
                             }
                         }
                     }
-
-                    // TODO: これロックとかとってあげないと僅差で状態がずれる可能性があるかも？
-                    match bg_worker.clear_view_feedback_notification() {
-                        Ok(_) => (),
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => (),
-                        Err(e) => {
-                            tracing::warn!(reason = ?e, "Failed to clear bg worker view feedback notification signal")
+                    Some(&PollFDType::DBusWatch(watch_ptr)) => {
+                        let watch_ptr = unsafe { &mut *watch_ptr };
+                        let mut flags = dbus::WatchFlags::empty();
+                        if (e.events & EPOLLIN) != 0 {
+                            flags |= dbus::WatchFlags::READABLE;
+                        }
+                        if (e.events & EPOLLOUT) != 0 {
+                            flags |= dbus::WatchFlags::WRITABLE;
+                        }
+                        if (e.events & EPOLLERR) != 0 {
+                            flags |= dbus::WatchFlags::ERROR;
+                        }
+                        if (e.events & EPOLLHUP) != 0 {
+                            flags |= dbus::WatchFlags::HANGUP;
+                        }
+                        if !watch_ptr.handle(flags) {
+                            tracing::warn!(?flags, "dbus_watch_handle failed");
                         }
                     }
+                    // ignore
+                    None => (),
                 }
-                Some(&PollFDType::DBusWatch(watch_ptr)) => {
-                    let watch_ptr = unsafe { &mut *watch_ptr };
-                    let mut flags = dbus::WatchFlags::empty();
-                    if (e.events & EPOLLIN) != 0 {
-                        flags |= dbus::WatchFlags::READABLE;
-                    }
-                    if (e.events & EPOLLOUT) != 0 {
-                        flags |= dbus::WatchFlags::WRITABLE;
-                    }
-                    if (e.events & EPOLLERR) != 0 {
-                        flags |= dbus::WatchFlags::ERROR;
-                    }
-                    if (e.events & EPOLLHUP) != 0 {
-                        flags |= dbus::WatchFlags::HANGUP;
-                    }
-                    if !watch_ptr.handle(flags) {
-                        tracing::warn!(?flags, "dbus_watch_handle failed");
-                    }
-                }
-                // ignore
-                None => (),
+            }
+            if !shell_event_processed {
+                app_shell.cancel_read_events();
             }
         }
-        if !shell_event_processed {
-            app_shell.cancel_read_events();
+        #[cfg(windows)]
+        let r = unsafe {
+            windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx(
+                Some(&[
+                    events.event_notify.handle(),
+                    bg_worker.main_thread_waker().handle(),
+                ]),
+                0,
+                QS_ALLINPUT,
+                MWMO_INPUTAVAILABLE,
+            )
+        };
+        if r.0 == WAIT_OBJECT_0.0 + 2 {
+            app_shell.process_pending_events();
         }
+
+        #[cfg(target_os = "linux")]
         while let Some(m) = dbus.underlying_mut().pop_message() {
             println!("!! dbus msg recv: {}", m.r#type());
             if m.r#type() == dbus::MESSAGE_TYPE_METHOD_RETURN {
@@ -5824,14 +5886,20 @@ fn main() {
                         main_cb_invalid = false;
                     }
 
-                    let next = sc
-                        .acquire_next(
-                            None,
-                            br::CompletionHandlerMut::Queue(
-                                acquire_completion.as_transparent_ref_mut(),
-                            ),
-                        )
-                        .unwrap();
+                    let next = match sc.acquire_next(
+                        None,
+                        br::CompletionHandlerMut::Queue(
+                            acquire_completion.as_transparent_ref_mut(),
+                        ),
+                    ) {
+                        Ok(x) => x,
+                        Err(e) if e == br::vk::VK_ERROR_OUT_OF_DATE_KHR => {
+                            // TODO: OUT_OF_DATE handling(Waylandでもこれ出るようならこっちにリサイズ処理を寄せたほうがいいかもしれんね)
+                            tracing::warn!("swapchain out of date");
+                            continue;
+                        }
+                        Err(e) => Err(e).unwrap(),
+                    };
                     subsystem
                         .submit_graphics_works(
                             &[br::SubmitInfo2::new(
@@ -5847,17 +5915,19 @@ fn main() {
                         )
                         .unwrap();
                     last_rendering = true;
-                    subsystem
-                        .queue_present(&br::PresentInfo::new(
-                            &[
-                                render_completion_per_backbuffer[next as usize]
-                                    .as_transparent_ref(),
-                            ],
-                            &[sc.as_transparent_ref()],
-                            &[next],
-                            &mut [br::vk::VkResult(0)],
-                        ))
-                        .unwrap();
+                    match subsystem.queue_present(&br::PresentInfo::new(
+                        &[render_completion_per_backbuffer[next as usize].as_transparent_ref()],
+                        &[sc.as_transparent_ref()],
+                        &[next],
+                        &mut [br::vk::VkResult(0)],
+                    )) {
+                        Ok(_) => (),
+                        Err(e) if e == br::vk::VK_ERROR_OUT_OF_DATE_KHR => {
+                            tracing::warn!("swapchain out of date");
+                            continue;
+                        }
+                        Err(e) => Err(e).unwrap(),
+                    }
 
                     app_shell.request_next_frame();
                 }
@@ -6386,9 +6456,14 @@ fn main() {
                     app_state.borrow_mut().toggle_menu();
                 }
                 AppEvent::AppMenuRequestAddSprite => {
+                    #[cfg(target_os = "linux")]
                     task_worker
                         .spawn(app_menu_on_add_sprite(&dbus, &events, &app_state))
                         .detach();
+                    #[cfg(not(target_os = "linux"))]
+                    events.push(AppEvent::UIMessageDialogRequest {
+                        content: "[DEBUG] app_menu_on_add_sprite not implemented".into(),
+                    });
                 }
                 AppEvent::BeginBackgroundWork {
                     thread_number,
@@ -6409,9 +6484,11 @@ fn main() {
     }
 }
 
+#[cfg(target_os = "linux")]
 struct DBusLink {
     con: RefCell<dbus::Connection>,
 }
+#[cfg(target_os = "linux")]
 impl DBusLink {
     #[inline(always)]
     pub fn underlying_mut(&self) -> std::cell::RefMut<dbus::Connection> {
@@ -6427,6 +6504,7 @@ impl DBusLink {
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn app_menu_on_add_sprite<'subsystem>(
     dbus: &DBusLink,
     events: &AppEventBus,
@@ -6747,6 +6825,7 @@ async fn app_menu_on_add_sprite<'subsystem>(
     app_state.borrow_mut().add_sprites(added_sprites);
 }
 
+#[cfg(target_os = "linux")]
 static mut DBUS_WAIT_FOR_REPLY_WAKERS: *mut HashMap<
     u32,
     Vec<(
@@ -6755,6 +6834,7 @@ static mut DBUS_WAIT_FOR_REPLY_WAKERS: *mut HashMap<
     )>,
 > = core::ptr::null_mut();
 
+#[cfg(target_os = "linux")]
 static mut DBUS_WAIT_FOR_SIGNAL_WAKERS: *mut HashMap<
     (std::ffi::CString, std::ffi::CString, std::ffi::CString),
     Vec<(
@@ -6763,10 +6843,12 @@ static mut DBUS_WAIT_FOR_SIGNAL_WAKERS: *mut HashMap<
     )>,
 > = core::ptr::null_mut();
 
+#[cfg(target_os = "linux")]
 pub struct DBusWaitForReplyFuture {
     serial: u32,
     reply: std::rc::Rc<std::cell::Cell<Option<dbus::Message>>>,
 }
+#[cfg(target_os = "linux")]
 impl DBusWaitForReplyFuture {
     pub fn new(serial: u32) -> Self {
         Self {
@@ -6775,6 +6857,7 @@ impl DBusWaitForReplyFuture {
         }
     }
 }
+#[cfg(target_os = "linux")]
 impl core::future::Future for DBusWaitForReplyFuture {
     type Output = dbus::Message;
 
@@ -6802,10 +6885,12 @@ impl core::future::Future for DBusWaitForReplyFuture {
     }
 }
 
+#[cfg(target_os = "linux")]
 pub struct DBusWaitForSignalFuture {
     key: Option<(std::ffi::CString, std::ffi::CString, std::ffi::CString)>,
     message: std::rc::Rc<std::cell::Cell<Option<dbus::Message>>>,
 }
+#[cfg(target_os = "linux")]
 impl DBusWaitForSignalFuture {
     pub fn new(
         object_path: std::ffi::CString,
@@ -6818,6 +6903,7 @@ impl DBusWaitForSignalFuture {
         }
     }
 }
+#[cfg(target_os = "linux")]
 impl core::future::Future for DBusWaitForSignalFuture {
     type Output = dbus::Message;
 

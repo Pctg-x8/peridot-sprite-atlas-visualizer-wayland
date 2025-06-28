@@ -79,7 +79,13 @@ pub struct hb_glyph_position_t {
 
 FFIOpaqueStruct!(pub struct hb_face_t);
 
-#[link(name = "harfbuzz")]
+#[link(name = "harfbuzz", kind = "static")]
+// TODO: このへんいらないので外せるなら外したい（が、vcpkgでいれたharfbuzzのfreetypeがこれに依存してる......）
+#[cfg_attr(windows, link(name = "libpng16", kind = "static"))]
+#[cfg_attr(windows, link(name = "zlib", kind = "static"))]
+#[cfg_attr(windows, link(name = "bz2", kind = "static"))]
+#[cfg_attr(windows, link(name = "brotlidec", kind = "static"))]
+#[cfg_attr(windows, link(name = "brotlicommon", kind = "static"))]
 unsafe extern "C" {
     pub unsafe fn hb_buffer_create() -> *mut hb_buffer_t;
     pub unsafe fn hb_buffer_reference(buffer: *mut hb_buffer_t) -> *mut hb_buffer_t;

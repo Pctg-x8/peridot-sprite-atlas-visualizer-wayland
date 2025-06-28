@@ -1,0 +1,11 @@
+{
+  "dependencies": [
+    {
+      "name": "harfbuzz",
+      "features": [
+        "freetype"
+      ]
+    },
+    "freetype"
+  ]
+}

@@ -191,7 +191,10 @@ impl Subsystem {
             &[c"VK_LAYER_KHRONOS_validation".into()],
             &[
                 c"VK_KHR_surface".into(),
+                #[cfg(feature = "platform-linux-wayland")]
                 c"VK_KHR_wayland_surface".into(),
+                #[cfg(feature = "platform-windows")]
+                c"VK_KHR_win32_surface".into(),
                 c"VK_EXT_debug_utils".into(),
             ],
         )) {

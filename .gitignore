@@ -6,3 +6,4 @@
 .vk-pipeline-cache
 /.flatpak-builder
 /package
+/vcpkg_installed

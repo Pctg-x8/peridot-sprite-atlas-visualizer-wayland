@@ -51,12 +51,6 @@ use subsystem::{StagingScratchBufferManager, Subsystem};
 use text::TextLayout;
 use thirdparty::freetype::{self, FreeType};
 use trigger_cell::TriggerCell;
-#[cfg(windows)]
-use windows::Win32::Foundation::WAIT_TIMEOUT;
-use windows::Win32::{
-    Foundation::WAIT_OBJECT_0,
-    UI::WindowsAndMessaging::{MWMO_INPUTAVAILABLE, QS_ALLINPUT},
-};
 
 #[cfg(windows)]
 use crate::shell::AppShell;
@@ -5619,6 +5613,18 @@ fn main() {
     };
     let mut composite_instance_buffer_dirty = false;
     let mut popups = HashMap::<uuid::Uuid, uikit::message_dialog::Presenter>::new();
+    #[cfg(windows)]
+    let (mut next_target_frame_timing, mut qpc_freq) = (0i64, 0i64);
+    #[cfg(windows)]
+    unsafe {
+        // always success on Windows XP or later: https://learn.microsoft.com/ja-jp/windows/win32/api/profileapi/nf-profileapi-queryperformancecounter
+        windows::Win32::System::Performance::QueryPerformanceCounter(&mut next_target_frame_timing)
+            .unwrap_unchecked();
+        windows::Win32::System::Performance::QueryPerformanceFrequency(&mut qpc_freq)
+            .unwrap_unchecked();
+
+        next_target_frame_timing += (qpc_freq as f64 / app_shell.refresh_rate_hz() as f64) as i64;
+    }
     #[cfg(target_os = "linux")]
     let mut epoll_events =
         [const { core::mem::MaybeUninit::<platform::linux::epoll_event>::uninit() }; 8];
@@ -5701,19 +5707,31 @@ fn main() {
         }
         #[cfg(windows)]
         {
-            unsafe {
-                use windows::Win32::UI::WindowsAndMessaging::MSG_WAIT_FOR_MULTIPLE_OBJECTS_EX_FLAGS;
+            use windows::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+
+            let mut current_qpc = 0i64;
+            let r = unsafe {
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    MSG_WAIT_FOR_MULTIPLE_OBJECTS_EX_FLAGS, QS_ALLINPUT,
+                };
+
+                windows::Win32::System::Performance::QueryPerformanceCounter(&mut current_qpc)
+                    .unwrap_unchecked();
+                let waittime_ms = (next_target_frame_timing - current_qpc).max(0) as f64 * 1000.0
+                    / qpc_freq as f64;
 
                 windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx(
                     Some(&[
                         events.event_notify.handle(),
                         bg_worker.main_thread_waker().handle(),
                     ]),
-                    16,
+                    waittime_ms.trunc() as _,
                     QS_ALLINPUT,
                     MSG_WAIT_FOR_MULTIPLE_OBJECTS_EX_FLAGS(0),
                 )
             };
+
+            // とりあえず全部処理しておく
 
             match bg_worker.clear_view_feedback_notification() {
                 Ok(_) => (),
@@ -5740,6 +5758,11 @@ fn main() {
             }
 
             app_shell.process_pending_events();
+
+            if r.0 == WAIT_TIMEOUT.0 {
+                // timeout
+                events.push(AppEvent::ToplevelWindowFrameTiming);
+            }
         }
 
         #[cfg(target_os = "linux")]
@@ -6508,6 +6531,19 @@ fn main() {
                     }
 
                     app_shell.request_next_frame();
+
+                    #[cfg(windows)]
+                    {
+                        let mut current_qpc = 0i64;
+                        unsafe {
+                            windows::Win32::System::Performance::QueryPerformanceCounter(
+                                &mut current_qpc,
+                            )
+                            .unwrap_unchecked();
+                        }
+                        next_target_frame_timing = current_qpc
+                            + (qpc_freq as f64 / app_shell.refresh_rate_hz() as f64) as i64;
+                    }
                 }
                 AppEvent::ToplevelWindowConfigure { width, height } => {
                     tracing::trace!(width, height, "ToplevelWindowConfigure");

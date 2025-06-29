@@ -5,7 +5,13 @@ use windows::{
     Storage::Pickers::FileOpenPicker,
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
-        Graphics::{Dwm::DwmExtendFrameIntoClientArea, Gdi::HBRUSH},
+        Graphics::{
+            Dwm::DwmExtendFrameIntoClientArea,
+            Gdi::{
+                DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, GetMonitorInfoW, HBRUSH,
+                MONITOR_DEFAULTTOPRIMARY, MONITORINFOEXW, MonitorFromWindow,
+            },
+        },
         System::LibraryLoader::GetModuleHandleW,
         UI::{
             Controls::MARGINS,
@@ -30,7 +36,6 @@ use windows::{
     },
     core::{Interface, PCWSTR, h, w},
 };
-use windows_future::{AsyncOperationCompletedHandler, AsyncStatus};
 
 use crate::{AppEvent, AppEventBus, hittest::CursorShape};
 
@@ -38,6 +43,7 @@ pub struct AppShell<'sys> {
     hinstance: HINSTANCE,
     hwnd: HWND,
     ui_scale_factor: core::pin::Pin<Box<Cell<f32>>>,
+    current_display_refresh_rate_hz: core::pin::Pin<Box<Cell<f32>>>,
     app_event_queue: &'sys AppEventBus,
 }
 impl<'sys> AppShell<'sys> {
@@ -50,7 +56,8 @@ impl<'sys> AppShell<'sys> {
             // TODO: マニフェストで設定する
             SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2).unwrap();
         }
-        let ui_scale_factor = Box::pin(Cell::new(1.0));
+        let ui_scale_factor = Box::pin(Cell::new(1.0f32));
+        let current_display_refresh_rate_hz = Box::pin(Cell::new(60.0f32));
 
         let wc = WNDCLASSEXW {
             cbSize: core::mem::size_of::<WNDCLASSEXW>() as _,
@@ -125,10 +132,42 @@ impl<'sys> AppShell<'sys> {
                 .set(GetDpiForWindow(hwnd) as f32 / 96.0);
         }
 
+        let hm = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY) };
+        let mut mi = core::mem::MaybeUninit::<MONITORINFOEXW>::uninit();
+        let mi = unsafe {
+            core::ptr::addr_of_mut!((*mi.as_mut_ptr()).monitorInfo.cbSize)
+                .write(core::mem::size_of::<MONITORINFOEXW>() as _);
+            GetMonitorInfoW(hm, mi.as_mut_ptr() as _).unwrap();
+            mi.assume_init_ref()
+        };
+        let mut current_mode = core::mem::MaybeUninit::<DEVMODEW>::uninit();
+        let current_mode = unsafe {
+            core::ptr::addr_of_mut!((*current_mode.as_mut_ptr()).dmSize)
+                .write(core::mem::size_of::<DEVMODEW>() as _);
+            EnumDisplaySettingsW(
+                PCWSTR::from_raw(mi.szDevice.as_ptr()),
+                ENUM_CURRENT_SETTINGS,
+                current_mode.as_mut_ptr(),
+            )
+            .unwrap();
+            current_mode.assume_init_ref()
+        };
+        tracing::debug!(
+            bits_per_pel = current_mode.dmBitsPerPel,
+            pels_width = current_mode.dmPelsWidth,
+            pels_height = current_mode.dmPelsHeight,
+            display_freq = current_mode.dmDisplayFrequency,
+            "Current Monitor Settings"
+        );
+        current_display_refresh_rate_hz
+            .as_ref()
+            .set(current_mode.dmDisplayFrequency as _);
+
         Self {
             hinstance,
             hwnd,
             ui_scale_factor,
+            current_display_refresh_rate_hz,
             app_event_queue: events,
         }
     }
@@ -286,10 +325,6 @@ impl<'sys> AppShell<'sys> {
                 DispatchMessageW(msg.assume_init_ref());
             }
         }
-
-        // TODO: いったんあいたタイミングをFrameTimingとする あとで適切にスリープいれてあげたい気持ち
-        self.app_event_queue
-            .push(AppEvent::ToplevelWindowFrameTiming);
     }
 
     #[tracing::instrument(skip(self))]
@@ -319,12 +354,19 @@ impl<'sys> AppShell<'sys> {
         self.ui_scale_factor.get()
     }
 
+    #[inline]
+    pub fn refresh_rate_hz(&self) -> f32 {
+        self.current_display_refresh_rate_hz.get()
+    }
+
+    #[inline]
     pub fn capture_pointer(&self) {
         unsafe {
             SetCapture(self.hwnd);
         }
     }
 
+    #[inline]
     pub fn release_pointer(&self) {
         if let Err(e) = unsafe { ReleaseCapture() } {
             tracing::warn!(reason = ?e, "ReleaseCapture() failed");

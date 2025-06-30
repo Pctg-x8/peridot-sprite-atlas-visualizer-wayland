@@ -12,7 +12,10 @@ use windows::{
                 MONITOR_DEFAULTTOPRIMARY, MONITORINFOEXW, MonitorFromWindow,
             },
         },
-        System::LibraryLoader::GetModuleHandleW,
+        System::{
+            LibraryLoader::GetModuleHandleW,
+            Performance::{QueryPerformanceCounter, QueryPerformanceFrequency},
+        },
         UI::{
             Controls::MARGINS,
             HiDpi::{
@@ -45,6 +48,8 @@ pub struct AppShell<'sys> {
     ui_scale_factor: core::pin::Pin<Box<Cell<f32>>>,
     current_display_refresh_rate_hz: core::pin::Pin<Box<Cell<f32>>>,
     app_event_queue: &'sys AppEventBus,
+    perf_counter_freq: i64,
+    next_target_frame_timing: Cell<i64>,
 }
 impl<'sys> AppShell<'sys> {
     #[tracing::instrument(skip(events))]
@@ -163,12 +168,27 @@ impl<'sys> AppShell<'sys> {
             .as_ref()
             .set(current_mode.dmDisplayFrequency as _);
 
+        // フレームタイミング計算用データを取得
+        let mut perf_counter_freq = 0i64;
+        let mut current_perf_counter = 0i64;
+        unsafe {
+            // always success on Windows XP or later: https://learn.microsoft.com/ja-jp/windows/win32/api/profileapi/nf-profileapi-queryperformancecounter
+            QueryPerformanceFrequency(&mut perf_counter_freq as _).unwrap_unchecked();
+            QueryPerformanceCounter(&mut current_perf_counter as _).unwrap_unchecked();
+        }
+
         Self {
             hinstance,
             hwnd,
             ui_scale_factor,
-            current_display_refresh_rate_hz,
             app_event_queue: events,
+            perf_counter_freq,
+            next_target_frame_timing: Cell::new(
+                current_perf_counter
+                    + (perf_counter_freq as f64 / current_display_refresh_rate_hz.get() as f64)
+                        as i64,
+            ),
+            current_display_refresh_rate_hz,
         }
     }
 
@@ -333,7 +353,28 @@ impl<'sys> AppShell<'sys> {
     }
 
     #[tracing::instrument(skip(self))]
-    pub fn request_next_frame(&self) {}
+    pub fn request_next_frame(&self) {
+        unsafe {
+            QueryPerformanceCounter(self.next_target_frame_timing.as_ptr()).unwrap_unchecked();
+        }
+
+        self.next_target_frame_timing.update(|v| {
+            v + (self.perf_counter_freq as f64 / self.current_display_refresh_rate_hz.get() as f64)
+                as i64
+        });
+    }
+
+    /// windows only
+    pub fn next_frame_left_ms(&self) -> i64 {
+        let mut cur = 0i64;
+        unsafe {
+            QueryPerformanceCounter(&mut cur as _).unwrap_unchecked();
+        }
+
+        ((self.next_target_frame_timing.get() - cur).max(0) as f64 * 1000.0
+            / self.perf_counter_freq as f64)
+            .trunc() as _
+    }
 
     #[tracing::instrument(skip(self))]
     pub fn post_configure(&self, _serial: u32) {}

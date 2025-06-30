@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
-use crate::input::EventContinueControl;
+use crate::{AppUpdateContext, input::EventContinueControl};
 
-pub struct HitTestTreeData<'c, ActionContext> {
+pub struct HitTestTreeData<'h> {
     pub left: f32,
     pub top: f32,
     pub left_adjustment_factor: f32,
@@ -11,10 +11,9 @@ pub struct HitTestTreeData<'c, ActionContext> {
     pub height: f32,
     pub width_adjustment_factor: f32,
     pub height_adjustment_factor: f32,
-    pub action_handler:
-        Option<std::rc::Weak<dyn HitTestTreeActionHandler<'c, Context = ActionContext> + 'c>>,
+    pub action_handler: Option<std::rc::Weak<dyn HitTestTreeActionHandler + 'h>>,
 }
-impl<ActionContext> Default for HitTestTreeData<'_, ActionContext> {
+impl Default for HitTestTreeData<'_> {
     #[inline]
     fn default() -> Self {
         Self {
@@ -30,11 +29,9 @@ impl<ActionContext> Default for HitTestTreeData<'_, ActionContext> {
         }
     }
 }
-impl<'c, ActionContext> HitTestTreeData<'c, ActionContext> {
+impl<'h> HitTestTreeData<'h> {
     #[inline]
-    pub fn action_handler(
-        &self,
-    ) -> Option<std::rc::Rc<dyn HitTestTreeActionHandler<'c, Context = ActionContext> + 'c>> {
+    pub fn action_handler(&self) -> Option<std::rc::Rc<dyn HitTestTreeActionHandler + 'h>> {
         self.action_handler
             .as_ref()
             .and_then(std::rc::Weak::upgrade)
@@ -50,12 +47,12 @@ struct HitTestTreeRelationData {
     children: Vec<usize>,
 }
 
-pub struct HitTestTreeManager<'c, ActionContext> {
-    data: Vec<HitTestTreeData<'c, ActionContext>>,
+pub struct HitTestTreeManager<'h> {
+    data: Vec<HitTestTreeData<'h>>,
     relations: Vec<HitTestTreeRelationData>,
     free_index: BTreeSet<usize>,
 }
-impl<'c, ActionContext> HitTestTreeManager<'c, ActionContext> {
+impl<'h> HitTestTreeManager<'h> {
     pub fn new() -> Self {
         Self {
             data: Vec::new(),
@@ -64,7 +61,7 @@ impl<'c, ActionContext> HitTestTreeManager<'c, ActionContext> {
         }
     }
 
-    pub fn create(&mut self, data: HitTestTreeData<'c, ActionContext>) -> HitTestTreeRef {
+    pub fn create(&mut self, data: HitTestTreeData<'h>) -> HitTestTreeRef {
         if let Some(x) = self.free_index.pop_first() {
             self.data[x] = data;
             self.relations[x].parent = None;
@@ -83,12 +80,12 @@ impl<'c, ActionContext> HitTestTreeManager<'c, ActionContext> {
     }
 
     #[inline]
-    pub fn get_data(&self, r: HitTestTreeRef) -> &HitTestTreeData<'c, ActionContext> {
+    pub fn get_data(&self, r: HitTestTreeRef) -> &HitTestTreeData {
         &self.data[r.0]
     }
 
     #[inline]
-    pub fn get_data_mut(&mut self, r: HitTestTreeRef) -> &mut HitTestTreeData<'c, ActionContext> {
+    pub fn get_data_mut(&mut self, r: HitTestTreeRef) -> &mut HitTestTreeData<'h> {
         &mut self.data[r.0]
     }
 
@@ -96,7 +93,7 @@ impl<'c, ActionContext> HitTestTreeManager<'c, ActionContext> {
     pub fn set_action_handler(
         &mut self,
         r: HitTestTreeRef,
-        h: &std::rc::Rc<impl HitTestTreeActionHandler<'c, Context = ActionContext> + 'c>,
+        h: &std::rc::Rc<impl HitTestTreeActionHandler + 'h>,
     ) {
         self.data[r.0].action_handler = Some(std::rc::Rc::downgrade(h) as _);
     }
@@ -130,12 +127,7 @@ impl<'c, ActionContext> HitTestTreeManager<'c, ActionContext> {
     }
 
     pub fn dump(&self, root: HitTestTreeRef) {
-        fn rec<ActionContext>(
-            sink: &mut String,
-            this: &HitTestTreeManager<ActionContext>,
-            r: usize,
-            indent: usize,
-        ) {
+        fn rec(sink: &mut String, this: &HitTestTreeManager, r: usize, indent: usize) {
             use std::fmt::Write;
 
             for _ in 0..indent {
@@ -219,7 +211,7 @@ impl<'c, ActionContext> HitTestTreeManager<'c, ActionContext> {
 
     pub fn test(
         &self,
-        context: &ActionContext,
+        context: &AppUpdateContext,
         root: HitTestTreeRef,
         global_x: f32,
         global_y: f32,
@@ -293,18 +285,17 @@ pub struct PointerActionArgs {
     pub client_height: f32,
 }
 
-pub trait HitTestTreeActionHandler<'c> {
-    type Context;
-
+// 将来的にはAppUpdateContextへの直接依存を剥がしたいが、associated typeに局所的なlifetime与える方法がない
+pub trait HitTestTreeActionHandler {
     #[allow(unused_variables)]
     #[inline]
-    fn hit_active(&self, sender: HitTestTreeRef, context: &Self::Context) -> bool {
+    fn hit_active(&self, sender: HitTestTreeRef, context: &AppUpdateContext) -> bool {
         true
     }
 
     #[allow(unused_variables)]
     #[inline]
-    fn cursor_shape(&self, sender: HitTestTreeRef, context: &mut Self::Context) -> CursorShape {
+    fn cursor_shape(&self, sender: HitTestTreeRef, context: &mut AppUpdateContext) -> CursorShape {
         CursorShape::Default
     }
 
@@ -312,7 +303,7 @@ pub trait HitTestTreeActionHandler<'c> {
     fn on_pointer_enter(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
+        context: &mut AppUpdateContext,
         args: &PointerActionArgs,
     ) -> EventContinueControl {
         EventContinueControl::empty()
@@ -322,7 +313,7 @@ pub trait HitTestTreeActionHandler<'c> {
     fn on_pointer_leave(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
+        context: &mut AppUpdateContext,
         args: &PointerActionArgs,
     ) -> EventContinueControl {
         EventContinueControl::empty()
@@ -332,7 +323,7 @@ pub trait HitTestTreeActionHandler<'c> {
     fn on_pointer_move(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
+        context: &mut AppUpdateContext,
         args: &PointerActionArgs,
     ) -> EventContinueControl {
         EventContinueControl::empty()
@@ -342,7 +333,7 @@ pub trait HitTestTreeActionHandler<'c> {
     fn on_pointer_down(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
+        context: &mut AppUpdateContext,
         args: &PointerActionArgs,
     ) -> EventContinueControl {
         EventContinueControl::empty()
@@ -352,7 +343,7 @@ pub trait HitTestTreeActionHandler<'c> {
     fn on_pointer_up(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
+        context: &mut AppUpdateContext,
         args: &PointerActionArgs,
     ) -> EventContinueControl {
         EventContinueControl::empty()
@@ -362,7 +353,7 @@ pub trait HitTestTreeActionHandler<'c> {
     fn on_click(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
+        context: &mut AppUpdateContext,
         args: &PointerActionArgs,
     ) -> EventContinueControl {
         EventContinueControl::empty()

@@ -3,9 +3,8 @@ use std::rc::Rc;
 use bedrock::{self as br, CommandBufferMut, RenderPass, ShaderModule, VkHandle};
 
 use crate::{
-    AppEvent, AppSystem, AppUpdateContext, BLEND_STATE_SINGLE_NONE, IA_STATE_TRILIST,
-    MS_STATE_EMPTY, RASTER_STATE_DEFAULT_FILL_NOCULL, RoundedRectConstants, VI_STATE_EMPTY,
-    ViewInitContext,
+    AppEvent, AppSystem, BLEND_STATE_SINGLE_NONE, IA_STATE_TRILIST, MS_STATE_EMPTY,
+    RASTER_STATE_DEFAULT_FILL_NOCULL, RoundedRectConstants, VI_STATE_EMPTY, ViewInitContext,
     composite::{
         AnimatableColor, AnimatableFloat, AnimationData, CompositeMode, CompositeRect,
         CompositeTree, CompositeTreeRef,
@@ -40,10 +39,10 @@ impl MaskView {
     }
 
     #[inline]
-    pub fn bind_action_handler<'c, ActionContext>(
+    pub fn bind_action_handler(
         &self,
-        handler: &Rc<impl HitTestTreeActionHandler<'c, Context = ActionContext> + 'static>,
-        ht: &mut HitTestTreeManager<'c, ActionContext>,
+        handler: &Rc<impl HitTestTreeActionHandler + 'static>,
+        ht: &mut HitTestTreeManager,
     ) {
         ht.set_action_handler(self.ht_root, handler);
     }
@@ -71,7 +70,7 @@ impl MaskView {
         app_system.set_tree_parent((self.ct_root, self.ht_root), (ct_parent, ht_parent));
     }
 
-    pub fn unmount_ht(&self, ht: &mut HitTestTreeManager<AppUpdateContext<'_>>) {
+    pub fn unmount_ht(&self, ht: &mut HitTestTreeManager) {
         ht.remove_child(self.ht_root);
     }
 
@@ -358,10 +357,10 @@ impl CommonFrameView {
     }
 
     #[inline]
-    pub fn bind_action_handler<'c, ActionContext>(
+    pub fn bind_action_handler(
         &self,
-        handler: &Rc<impl HitTestTreeActionHandler<'c, Context = ActionContext> + 'static>,
-        ht: &mut HitTestTreeManager<'c, ActionContext>,
+        handler: &Rc<impl HitTestTreeActionHandler + 'static>,
+        ht: &mut HitTestTreeManager,
     ) {
         ht.set_action_handler(self.ht_root, handler);
     }

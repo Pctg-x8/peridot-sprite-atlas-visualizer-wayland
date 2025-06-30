@@ -1,6 +1,7 @@
 use bitflags::bitflags;
 
 use crate::{
+    AppUpdateContext,
     hittest::{CursorShape, HitTestTreeManager, HitTestTreeRef, PointerActionArgs},
     shell::AppShell,
 };
@@ -37,11 +38,11 @@ impl PointerInputManager {
         }
     }
 
-    fn dispatch_pointer_enter<ActionContext>(
+    fn dispatch_pointer_enter(
         &self,
         action_args: &PointerActionArgs,
-        ht: &HitTestTreeManager<ActionContext>,
-        action_context: &mut ActionContext,
+        ht: &HitTestTreeManager,
+        action_context: &mut AppUpdateContext,
         ht_target: HitTestTreeRef,
     ) {
         let mut p = Some(ht_target);
@@ -60,11 +61,11 @@ impl PointerInputManager {
         }
     }
 
-    fn dispatch_pointer_leave<ActionContext>(
+    fn dispatch_pointer_leave(
         &self,
         action_args: &PointerActionArgs,
-        ht: &HitTestTreeManager<ActionContext>,
-        action_context: &mut ActionContext,
+        ht: &HitTestTreeManager,
+        action_context: &mut AppUpdateContext,
         ht_target: HitTestTreeRef,
     ) {
         let mut p = Some(ht_target);
@@ -83,12 +84,12 @@ impl PointerInputManager {
         }
     }
 
-    fn dispatch_pointer_down<ActionContext>(
+    fn dispatch_pointer_down(
         &self,
         sh: &AppShell,
         action_args: &PointerActionArgs,
-        ht: &HitTestTreeManager<ActionContext>,
-        action_context: &mut ActionContext,
+        ht: &HitTestTreeManager,
+        action_context: &mut AppUpdateContext,
         ht_target: HitTestTreeRef,
     ) -> (bool, Option<HitTestTreeRef>) {
         let mut needs_recompute_pointer_enter = false;
@@ -119,11 +120,11 @@ impl PointerInputManager {
         (needs_recompute_pointer_enter, new_captured)
     }
 
-    fn dispatch_pointer_move<ActionContext>(
+    fn dispatch_pointer_move(
         &self,
         action_args: &PointerActionArgs,
-        ht: &HitTestTreeManager<ActionContext>,
-        action_context: &mut ActionContext,
+        ht: &HitTestTreeManager,
+        action_context: &mut AppUpdateContext,
         ht_target: HitTestTreeRef,
     ) -> bool {
         let mut needs_recompute_pointer_enter = false;
@@ -148,12 +149,12 @@ impl PointerInputManager {
         needs_recompute_pointer_enter
     }
 
-    fn dispatch_pointer_up<ActionContext>(
+    fn dispatch_pointer_up(
         &self,
         sh: &AppShell,
         action_args: &PointerActionArgs,
-        ht: &HitTestTreeManager<ActionContext>,
-        action_context: &mut ActionContext,
+        ht: &HitTestTreeManager,
+        action_context: &mut AppUpdateContext,
         ht_target: HitTestTreeRef,
     ) -> (bool, Option<HitTestTreeRef>) {
         let mut needs_recompute_pointer_enter = false;
@@ -184,12 +185,12 @@ impl PointerInputManager {
         (needs_recompute_pointer_enter, new_captured)
     }
 
-    fn dispatch_click<ActionContext>(
+    fn dispatch_click(
         &self,
         sh: &AppShell,
         action_args: &PointerActionArgs,
-        ht: &HitTestTreeManager<ActionContext>,
-        action_context: &mut ActionContext,
+        ht: &HitTestTreeManager,
+        action_context: &mut AppUpdateContext,
         ht_target: HitTestTreeRef,
     ) -> (bool, Option<HitTestTreeRef>) {
         let mut needs_recompute_pointer_enter = false;
@@ -220,14 +221,14 @@ impl PointerInputManager {
         (needs_recompute_pointer_enter, new_captured)
     }
 
-    fn handle_mouse_enter_leave<ActionContext>(
+    fn handle_mouse_enter_leave(
         &mut self,
         client_x: f32,
         client_y: f32,
         client_width: f32,
         client_height: f32,
-        ht: &mut HitTestTreeManager<ActionContext>,
-        action_context: &mut ActionContext,
+        ht: &mut HitTestTreeManager,
+        action_context: &mut AppUpdateContext,
         ht_root: HitTestTreeRef,
     ) {
         let new_hit = ht.test(
@@ -301,14 +302,14 @@ impl PointerInputManager {
         }
     }
 
-    pub fn handle_mouse_move<ActionContext>(
+    pub fn handle_mouse_move(
         &mut self,
         client_x: f32,
         client_y: f32,
         client_width: f32,
         client_height: f32,
-        ht: &mut HitTestTreeManager<ActionContext>,
-        action_context: &mut ActionContext,
+        ht: &mut HitTestTreeManager,
+        action_context: &mut AppUpdateContext,
         ht_root: HitTestTreeRef,
     ) {
         self.last_client_pointer_pos = Some((client_x, client_y));
@@ -377,15 +378,15 @@ impl PointerInputManager {
         }
     }
 
-    pub fn handle_mouse_left_down<ActionContext>(
+    pub fn handle_mouse_left_down(
         &mut self,
         sh: &AppShell,
         client_x: f32,
         client_y: f32,
         client_width: f32,
         client_height: f32,
-        ht: &mut HitTestTreeManager<ActionContext>,
-        action_context: &mut ActionContext,
+        ht: &mut HitTestTreeManager,
+        action_context: &mut AppUpdateContext,
         ht_root: HitTestTreeRef,
     ) {
         self.click_base_client_pointer_pos = Some((client_x, client_y));
@@ -464,15 +465,15 @@ impl PointerInputManager {
         }
     }
 
-    pub fn handle_mouse_left_up<ActionContext>(
+    pub fn handle_mouse_left_up(
         &mut self,
         sh: &AppShell,
         client_x: f32,
         client_y: f32,
         client_width: f32,
         client_height: f32,
-        ht: &mut HitTestTreeManager<ActionContext>,
-        action_context: &mut ActionContext,
+        ht: &mut HitTestTreeManager,
+        action_context: &mut AppUpdateContext,
         ht_root: HitTestTreeRef,
     ) {
         match self.pointer_focus {
@@ -625,10 +626,10 @@ impl PointerInputManager {
         }
     }
 
-    pub fn cursor_shape<ActionContext>(
+    pub fn cursor_shape(
         &self,
-        ht: &mut HitTestTreeManager<ActionContext>,
-        action_context: &mut ActionContext,
+        ht: &mut HitTestTreeManager,
+        action_context: &mut AppUpdateContext,
     ) -> CursorShape {
         match self.pointer_focus {
             PointerFocusState::Capturing(ht_ref) => ht

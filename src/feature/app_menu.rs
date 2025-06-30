@@ -1354,17 +1354,15 @@ struct ActionHandler {
     item_views: Vec<Rc<CommandButtonView>>,
     shown: Cell<bool>,
 }
-impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
-    type Context = AppUpdateContext<'c>;
-
-    fn hit_active(&self, _sender: HitTestTreeRef, _context: &Self::Context) -> bool {
+impl HitTestTreeActionHandler for ActionHandler {
+    fn hit_active(&self, _sender: HitTestTreeRef, _context: &AppUpdateContext) -> bool {
         self.shown.get()
     }
 
     fn on_pointer_enter(
         &self,
         sender: HitTestTreeRef,
-        _context: &mut Self::Context,
+        _context: &mut AppUpdateContext,
         _args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         for v in self.item_views.iter() {
@@ -1384,7 +1382,7 @@ impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
     fn on_pointer_leave(
         &self,
         sender: HitTestTreeRef,
-        _context: &mut Self::Context,
+        _context: &mut AppUpdateContext,
         _args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         for v in self.item_views.iter() {
@@ -1404,7 +1402,7 @@ impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
     fn on_pointer_down(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
+        context: &mut AppUpdateContext,
         _args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         for v in self.item_views.iter() {
@@ -1427,7 +1425,7 @@ impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
     fn on_pointer_move(
         &self,
         sender: HitTestTreeRef,
-        _context: &mut Self::Context,
+        _context: &mut AppUpdateContext,
         _args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.base_view.ht_root {
@@ -1440,7 +1438,7 @@ impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
     fn on_pointer_up(
         &self,
         sender: HitTestTreeRef,
-        _context: &mut Self::Context,
+        _context: &mut AppUpdateContext,
         _args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         for v in self.item_views.iter() {
@@ -1460,7 +1458,7 @@ impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
     fn on_click(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
+        context: &mut AppUpdateContext,
         _args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         for v in self.item_views.iter() {

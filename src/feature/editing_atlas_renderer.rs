@@ -240,7 +240,6 @@ impl<'subsystem> SpriteInstanceBuffers<'subsystem> {
 }
 
 pub struct EditingAtlasRenderer<'d> {
-    app_event_bus: &'d AppEventBus,
     _sprite_sampler: br::SamplerObject<&'d Subsystem>,
     pub param_buffer: br::BufferObject<&'d Subsystem>,
     _param_buffer_memory: br::DeviceMemoryObject<&'d Subsystem>,
@@ -273,10 +272,9 @@ pub struct EditingAtlasRenderer<'d> {
     sprite_image_copies: Arc<RwLock<HashMap<usize, Vec<br::vk::VkBufferImageCopy>>>>,
 }
 impl<'d> EditingAtlasRenderer<'d> {
-    #[tracing::instrument(skip(app_system, rendered_pass, app_event_bus))]
+    #[tracing::instrument(skip(app_system, rendered_pass))]
     pub fn new<'app_system>(
-        app_event_bus: &'d AppEventBus,
-        app_system: &'app_system AppSystem<'d, '_>,
+        app_system: &'app_system AppSystem<'d>,
         rendered_pass: br::SubpassRef<impl br::RenderPass>,
         main_buffer_size: br::Extent2D,
         init_atlas_size: SizePixels,
@@ -549,7 +547,6 @@ impl<'d> EditingAtlasRenderer<'d> {
         );
 
         Self {
-            app_event_bus,
             _sprite_sampler: sprite_sampler,
             param_buffer,
             _param_buffer_memory: param_buffer_memory,
@@ -584,6 +581,41 @@ impl<'d> EditingAtlasRenderer<'d> {
             sprite_count: Cell::new(0),
             sprite_image_copies: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    pub fn update_sprite_offset(&self, index: usize, left_pixels: f32, top_pixels: f32) {
+        let mut buffers_mref = self.sprite_instance_buffers.borrow_mut();
+
+        let h = buffers_mref.stg_memory.native_ptr();
+        let cap = buffers_mref.capacity;
+        let p = buffers_mref
+            .stg_memory
+            .map(0..(cap as usize * core::mem::size_of::<SpriteInstance>()))
+            .unwrap();
+        self.sprite_image_copies.write().clear();
+        unsafe {
+            let instance_ptr =
+                p.addr_of_mut::<SpriteInstance>(index * core::mem::size_of::<SpriteInstance>());
+            core::ptr::addr_of_mut!((*instance_ptr).pos_st[2]).write(left_pixels);
+            core::ptr::addr_of_mut!((*instance_ptr).pos_st[3]).write(top_pixels);
+        }
+        if buffers_mref.stg_requires_flush {
+            unsafe {
+                buffers_mref
+                    .subsystem
+                    .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(
+                        h,
+                        0,
+                        cap * core::mem::size_of::<SpriteInstance>() as u64,
+                    )])
+                    .unwrap();
+            }
+        }
+        unsafe {
+            buffers_mref.stg_memory.unmap();
+        }
+
+        buffers_mref.is_dirty = true;
     }
 
     #[tracing::instrument(skip(self, sprites, bg_worker_access, staging_scratch_buffers))]

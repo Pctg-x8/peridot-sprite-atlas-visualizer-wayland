@@ -139,13 +139,11 @@ struct ActionHandler {
     confirm_button: CommonButtonView,
     popup_id: uuid::Uuid,
 }
-impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
-    type Context = AppUpdateContext<'c>;
-
+impl HitTestTreeActionHandler for ActionHandler {
     fn on_pointer_enter(
         &self,
         sender: HitTestTreeRef,
-        _context: &mut Self::Context,
+        _context: &mut AppUpdateContext,
         _args: &PointerActionArgs,
     ) -> EventContinueControl {
         if self.confirm_button.is_sender(sender) {
@@ -168,7 +166,7 @@ impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
     fn on_pointer_leave(
         &self,
         sender: HitTestTreeRef,
-        _context: &mut Self::Context,
+        _context: &mut AppUpdateContext,
         _args: &PointerActionArgs,
     ) -> EventContinueControl {
         if self.confirm_button.is_sender(sender) {
@@ -191,7 +189,7 @@ impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
     fn on_pointer_down(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
+        context: &mut AppUpdateContext,
         _args: &PointerActionArgs,
     ) -> EventContinueControl {
         if self.confirm_button.is_sender(sender) {
@@ -217,7 +215,7 @@ impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
     fn on_pointer_up(
         &self,
         sender: HitTestTreeRef,
-        _context: &mut Self::Context,
+        _context: &mut AppUpdateContext,
         _args: &PointerActionArgs,
     ) -> EventContinueControl {
         if self.confirm_button.is_sender(sender) {
@@ -240,7 +238,7 @@ impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
     fn on_click(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
+        context: &mut AppUpdateContext,
         _args: &PointerActionArgs,
     ) -> EventContinueControl {
         if self.confirm_button.is_sender(sender) {

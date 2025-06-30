@@ -294,18 +294,18 @@ impl CommonButtonView {
     }
 
     #[inline]
-    pub fn ht_mut<'h, 'c, C>(
+    pub fn ht_mut<'h, 'ah>(
         &self,
-        ht: &'h mut HitTestTreeManager<'c, C>,
-    ) -> &'h mut HitTestTreeData<'c, C> {
+        ht: &'h mut HitTestTreeManager<'ah>,
+    ) -> &'h mut HitTestTreeData<'ah> {
         ht.get_data_mut(self.ht_root)
     }
 
     #[inline]
-    pub fn bind_action_handler<'c, C>(
+    pub fn bind_action_handler(
         &self,
-        action_handler: &Rc<impl HitTestTreeActionHandler<'c, Context = C> + 'static>,
-        ht: &mut HitTestTreeManager<'c, C>,
+        action_handler: &Rc<impl HitTestTreeActionHandler + 'static>,
+        ht: &mut HitTestTreeManager,
     ) {
         ht.set_action_handler(self.ht_root, action_handler);
     }

@@ -482,13 +482,11 @@ impl BaseView {
 struct ActionHandler {
     menu_button_view: MenuButtonView,
 }
-impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
-    type Context = AppUpdateContext<'c>;
-
+impl HitTestTreeActionHandler for ActionHandler {
     fn on_pointer_enter(
         &self,
         sender: HitTestTreeRef,
-        _context: &mut Self::Context,
+        _context: &mut AppUpdateContext,
         _args: &PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.menu_button_view.ht_root {
@@ -502,7 +500,7 @@ impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
     fn on_pointer_leave(
         &self,
         sender: HitTestTreeRef,
-        _context: &mut Self::Context,
+        _context: &mut AppUpdateContext,
         _args: &PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.menu_button_view.ht_root {
@@ -516,7 +514,7 @@ impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
     fn on_pointer_down(
         &self,
         sender: HitTestTreeRef,
-        _context: &mut Self::Context,
+        _context: &mut AppUpdateContext,
         _args: &PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.menu_button_view.ht_root {
@@ -530,7 +528,7 @@ impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
     fn on_pointer_up(
         &self,
         sender: HitTestTreeRef,
-        _context: &mut Self::Context,
+        _context: &mut AppUpdateContext,
         _args: &PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.menu_button_view.ht_root {
@@ -544,7 +542,7 @@ impl<'c> HitTestTreeActionHandler<'c> for ActionHandler {
     fn on_click(
         &self,
         sender: HitTestTreeRef,
-        context: &mut Self::Context,
+        context: &mut AppUpdateContext,
         _args: &PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.menu_button_view.ht_root {

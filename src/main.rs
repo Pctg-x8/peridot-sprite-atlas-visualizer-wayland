@@ -203,29 +203,24 @@ pub struct RoundedRectConstants {
     pub corner_radius: f32,
 }
 
-pub trait ViewUpdate<ActionContext> {
-    fn update(
-        &self,
-        ct: &mut CompositeTree,
-        ht: &mut HitTestTreeManager<ActionContext>,
-        current_sec: f32,
-    );
+pub trait ViewUpdate {
+    fn update(&self, ct: &mut CompositeTree, ht: &mut HitTestTreeManager, current_sec: f32);
 }
 
 pub struct FontSet {
     pub ui_default: freetype::Owned<freetype::Face>,
 }
 
-pub struct AppSystem<'subsystem, 'ht_context> {
+pub struct AppSystem<'subsystem> {
     pub subsystem: &'subsystem Subsystem,
     pub atlas: UnboundedCompositionSurfaceAtlas,
     pub composite_tree: CompositeTree,
     pub composite_instance_manager: UnboundedCompositeInstanceManager,
-    pub hit_tree: HitTestTreeManager<'ht_context, AppUpdateContext<'ht_context>>,
+    pub hit_tree: HitTestTreeManager<'subsystem>,
     pub fonts: FontSet,
     pub ft: FreeType,
 }
-impl Drop for AppSystem<'_, '_> {
+impl Drop for AppSystem<'_> {
     fn drop(&mut self) {
         unsafe {
             self.composite_instance_manager
@@ -234,7 +229,7 @@ impl Drop for AppSystem<'_, '_> {
         }
     }
 }
-impl<'subsystem, 'ht_context> AppSystem<'subsystem, 'ht_context> {
+impl<'subsystem> AppSystem<'subsystem> {
     fn new(subsystem: &'subsystem Subsystem) -> Self {
         // initialize font systems
         #[cfg(unix)]
@@ -370,10 +365,7 @@ impl<'subsystem, 'ht_context> AppSystem<'subsystem, 'ht_context> {
     }
 
     #[inline(always)]
-    pub fn create_hit_tree(
-        &mut self,
-        init: HitTestTreeData<'ht_context, AppUpdateContext<'ht_context>>,
-    ) -> HitTestTreeRef {
+    pub fn create_hit_tree(&mut self, init: HitTestTreeData<'subsystem>) -> HitTestTreeRef {
         self.hit_tree.create(init)
     }
 
@@ -501,14 +493,14 @@ impl<'subsystem, 'ht_context> AppSystem<'subsystem, 'ht_context> {
     }
 }
 
-pub struct ViewInitContext<'r, 'app_system, 'subsystem, 'ht_context> {
-    pub app_system: &'app_system mut AppSystem<'subsystem, 'ht_context>,
+pub struct ViewInitContext<'r, 'app_system, 'subsystem> {
+    pub app_system: &'app_system mut AppSystem<'subsystem>,
     pub staging_scratch_buffer: &'r mut StagingScratchBufferManager<'subsystem>,
     pub ui_scale_factor: f32,
 }
 
-pub struct PresenterInitContext<'r, 'state, 'app_system, 'subsystem, 'ht_context> {
-    pub for_view: ViewInitContext<'r, 'app_system, 'subsystem, 'ht_context>,
+pub struct PresenterInitContext<'r, 'state, 'app_system, 'subsystem> {
+    pub for_view: ViewInitContext<'r, 'app_system, 'subsystem>,
     pub app_state: &'state mut AppState<'subsystem>,
 }
 
@@ -517,8 +509,9 @@ pub struct ViewFeedbackContext<'d> {
     pub current_sec: f32,
 }
 
-pub struct AppUpdateContext<'d> {
+pub struct AppUpdateContext<'d, 'subsystem> {
     pub event_queue: &'d AppEventBus,
+    pub state: &'d RefCell<AppState<'subsystem>>,
     pub ui_scale_factor: f32,
 }
 
@@ -2252,10 +2245,8 @@ pub struct SpriteListPaneActionHandler {
     resize_state: Cell<Option<(f32, f32)>>,
     shown: Cell<bool>,
 }
-impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
-    type Context = AppUpdateContext<'c>;
-
-    fn cursor_shape(&self, sender: HitTestTreeRef, _context: &mut Self::Context) -> CursorShape {
+impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
+    fn cursor_shape(&self, sender: HitTestTreeRef, _context: &mut AppUpdateContext) -> CursorShape {
         if sender == self.ht_resize_area && self.shown.get() {
             return CursorShape::ResizeHorizontal;
         }
@@ -2266,7 +2257,7 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
     fn on_pointer_enter(
         &self,
         sender: HitTestTreeRef,
-        _context: &mut Self::Context,
+        _context: &mut AppUpdateContext,
         _args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.toggle_button_view.ht_root {
@@ -2281,7 +2272,7 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
     fn on_pointer_leave(
         &self,
         sender: HitTestTreeRef,
-        _context: &mut Self::Context,
+        _context: &mut AppUpdateContext,
         _args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.toggle_button_view.ht_root {
@@ -2296,7 +2287,7 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
     fn on_pointer_down(
         &self,
         sender: HitTestTreeRef,
-        _context: &mut Self::Context,
+        _context: &mut AppUpdateContext,
         args: &hittest::PointerActionArgs,
     ) -> input::EventContinueControl {
         if self.shown.get() {
@@ -2326,7 +2317,7 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
     fn on_pointer_move(
         &self,
         sender: HitTestTreeRef,
-        _context: &mut Self::Context,
+        _context: &mut AppUpdateContext,
         args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         if self.shown.get() {
@@ -2351,7 +2342,7 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
     fn on_pointer_up(
         &self,
         sender: HitTestTreeRef,
-        _context: &mut Self::Context,
+        _context: &mut AppUpdateContext,
         args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         if self.shown.get() {
@@ -2382,7 +2373,7 @@ impl<'c> HitTestTreeActionHandler<'c> for SpriteListPaneActionHandler {
     fn on_click(
         &self,
         sender: HitTestTreeRef,
-        _context: &mut Self::Context,
+        _context: &mut AppUpdateContext,
         _args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         if self.shown.get() && sender == self.view.ht_frame {
@@ -2510,32 +2501,57 @@ impl<'subsystem> HitTestRootTreeActionHandler<'subsystem> {
         }
     }
 }
-impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler<'c> {
-    type Context = AppUpdateContext<'c>;
-
+impl<'c> HitTestTreeActionHandler for HitTestRootTreeActionHandler<'c> {
     fn on_pointer_down(
         &self,
         _sender: HitTestTreeRef,
-        context: &mut Self::Context,
+        context: &mut AppUpdateContext,
         args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         let Some(ear) = self.editing_atlas_renderer.upgrade() else {
             // app teardown-ed
             return EventContinueControl::empty();
         };
+        let Some(marker_view) = self.current_selected_sprite_marker_view.upgrade() else {
+            // app teardown-ed
+            return EventContinueControl::empty();
+        };
 
         let [current_offset_x, current_offset_y] = ear.borrow().offset();
-        let pointing_x = args.client_x * context.ui_scale_factor + current_offset_x;
-        let pointing_y = args.client_y * context.ui_scale_factor + current_offset_y;
+        let pointing_x = args.client_x * context.ui_scale_factor - current_offset_x;
+        let pointing_y = args.client_y * context.ui_scale_factor - current_offset_y;
 
-        // TODO: detect sprite drag
-
-        *self.drag_state.borrow_mut() = DragState::Grid {
-            base_x_pixels: current_offset_x,
-            base_y_pixels: current_offset_y,
-            drag_start_client_x_pixels: args.client_x * context.ui_scale_factor,
-            drag_start_client_y_pixels: args.client_y * context.ui_scale_factor,
-        };
+        let state_locked = context.state.borrow();
+        let sprite_drag_target_index =
+            state_locked
+                .selected_sprites_with_index()
+                .rev()
+                .find(|(_, x)| {
+                    x.left as f32 <= pointing_x
+                        && pointing_x <= x.right() as f32
+                        && x.top as f32 <= pointing_y
+                        && pointing_y <= x.bottom() as f32
+                });
+        if let Some((sprite_drag_target_index, target_sprite_ref)) = sprite_drag_target_index {
+            // 選択中のスプライトの上で操作が開始された
+            marker_view.hide();
+            *self.drag_state.borrow_mut() = DragState::Sprite {
+                index: sprite_drag_target_index,
+                base_x_pixels: target_sprite_ref.left as f32,
+                base_y_pixels: target_sprite_ref.top as f32,
+                base_width_pixels: target_sprite_ref.width as f32,
+                base_height_pixels: target_sprite_ref.height as f32,
+                drag_start_client_x_pixels: args.client_x * context.ui_scale_factor,
+                drag_start_client_y_pixels: args.client_y * context.ui_scale_factor,
+            };
+        } else {
+            *self.drag_state.borrow_mut() = DragState::Grid {
+                base_x_pixels: current_offset_x,
+                base_y_pixels: current_offset_y,
+                drag_start_client_x_pixels: args.client_x * context.ui_scale_factor,
+                drag_start_client_y_pixels: args.client_y * context.ui_scale_factor,
+            };
+        }
 
         EventContinueControl::CAPTURE_ELEMENT
     }
@@ -2543,7 +2559,7 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler<'c> {
     fn on_pointer_move(
         &self,
         _sender: HitTestTreeRef,
-        context: &mut Self::Context,
+        context: &mut AppUpdateContext,
         args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         let Some(ear) = self.editing_atlas_renderer.upgrade() else {
@@ -2572,7 +2588,27 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler<'c> {
 
                 return EventContinueControl::STOP_PROPAGATION;
             }
-            DragState::Sprite { .. } => unimplemented!(),
+            &DragState::Sprite {
+                index,
+                base_x_pixels,
+                base_y_pixels,
+                drag_start_client_x_pixels,
+                drag_start_client_y_pixels,
+                ..
+            } => {
+                let (dx, dy) = (
+                    (args.client_x * context.ui_scale_factor) - drag_start_client_x_pixels,
+                    (args.client_y * context.ui_scale_factor) - drag_start_client_y_pixels,
+                );
+                let (sx, sy) = (
+                    (base_x_pixels + dx).max(0.0) as u32,
+                    (base_y_pixels + dy).max(0.0) as u32,
+                );
+                ear.borrow_mut()
+                    .update_sprite_offset(index, sx as _, sy as _);
+
+                return EventContinueControl::STOP_PROPAGATION;
+            }
         }
 
         EventContinueControl::empty()
@@ -2581,10 +2617,14 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler<'c> {
     fn on_pointer_up(
         &self,
         _sender: HitTestTreeRef,
-        context: &mut Self::Context,
+        context: &mut AppUpdateContext,
         args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         let Some(ear) = self.editing_atlas_renderer.upgrade() else {
+            // app teardown-ed
+            return EventContinueControl::empty();
+        };
+        let Some(marker_view) = self.current_selected_sprite_marker_view.upgrade() else {
             // app teardown-ed
             return EventContinueControl::empty();
         };
@@ -2611,7 +2651,28 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler<'c> {
                 return EventContinueControl::STOP_PROPAGATION
                     | EventContinueControl::RELEASE_CAPTURE_ELEMENT;
             }
-            DragState::Sprite { .. } => unimplemented!(),
+            DragState::Sprite {
+                index,
+                base_x_pixels,
+                base_y_pixels,
+                base_width_pixels,
+                base_height_pixels,
+                drag_start_client_x_pixels,
+                drag_start_client_y_pixels,
+            } => {
+                let (dx, dy) = (
+                    (args.client_x * context.ui_scale_factor) - drag_start_client_x_pixels,
+                    (args.client_y * context.ui_scale_factor) - drag_start_client_y_pixels,
+                );
+                let (sx, sy) = (
+                    (base_x_pixels + dx).max(0.0) as u32,
+                    (base_y_pixels + dy).max(0.0) as u32,
+                );
+                context.state.borrow_mut().set_sprite_offset(index, sx, sy);
+
+                // 選択インデックスが変わるわけではないのでここで選択枠Viewを復帰させる
+                marker_view.focus(sx as _, sy as _, base_width_pixels, base_height_pixels);
+            }
         }
 
         EventContinueControl::empty()
@@ -2620,7 +2681,7 @@ impl<'c> HitTestTreeActionHandler<'c> for HitTestRootTreeActionHandler<'c> {
     fn on_click(
         &self,
         _sender: HitTestTreeRef,
-        context: &mut Self::Context,
+        context: &mut AppUpdateContext,
         args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         let Some(ear) = self.editing_atlas_renderer.upgrade() else {
@@ -3720,7 +3781,6 @@ fn main() {
     };
 
     let editing_atlas_renderer = Rc::new(RefCell::new(EditingAtlasRenderer::new(
-        &events,
         init_context.for_view.app_system,
         main_rp_final.subpass(0),
         sc.size,
@@ -4189,6 +4249,7 @@ fn main() {
         [const { core::mem::MaybeUninit::<platform::linux::epoll_event>::uninit() }; 8];
     let mut app_update_context = AppUpdateContext {
         event_queue: &events,
+        state: &app_state,
         ui_scale_factor: app_shell.ui_scale_factor(),
     };
     'app: loop {

@@ -183,11 +183,6 @@ impl<'subsystem> BackgroundWorker<'subsystem> {
         }
     }
 
-    #[inline(always)]
-    pub fn worker_count(&self) -> usize {
-        self.join_handles.len()
-    }
-
     #[cfg(target_os = "linux")]
     #[inline(always)]
     pub fn main_thread_waker(&self) -> &crate::platform::liunx::EventFD {

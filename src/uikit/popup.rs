@@ -3,8 +3,9 @@ use std::rc::Rc;
 use bedrock::{self as br, CommandBufferMut, RenderPass, ShaderModule, VkHandle};
 
 use crate::{
-    AppEvent, AppUpdateContext, BLEND_STATE_SINGLE_NONE, IA_STATE_TRILIST, MS_STATE_EMPTY,
-    RASTER_STATE_DEFAULT_FILL_NOCULL, RoundedRectConstants, VI_STATE_EMPTY, ViewInitContext,
+    AppEvent, AppSystem, AppUpdateContext, BLEND_STATE_SINGLE_NONE, IA_STATE_TRILIST,
+    MS_STATE_EMPTY, RASTER_STATE_DEFAULT_FILL_NOCULL, RoundedRectConstants, VI_STATE_EMPTY,
+    ViewInitContext,
     composite::{
         AnimatableColor, AnimatableFloat, AnimationData, CompositeMode, CompositeRect,
         CompositeTree, CompositeTreeRef,
@@ -22,14 +23,14 @@ pub struct MaskView {
 }
 impl MaskView {
     pub fn new(init: &mut ViewInitContext) -> Self {
-        let ct_root = init.composite_tree.register(CompositeRect {
+        let ct_root = init.app_system.register_composite_rect(CompositeRect {
             relative_size_adjustment: [1.0, 1.0],
-            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            instance_slot_index: Some(0),
             composite_mode: CompositeMode::FillColor(AnimatableColor::Value([0.0, 0.0, 0.0, 0.0])),
             ..Default::default()
         });
 
-        let ht_root = init.ht.create(HitTestTreeData {
+        let ht_root = init.app_system.create_hit_tree(HitTestTreeData {
             width_adjustment_factor: 1.0,
             height_adjustment_factor: 1.0,
             ..Default::default()
@@ -61,15 +62,13 @@ impl MaskView {
         self.ht_root == sender
     }
 
-    pub fn mount<ActionContext>(
+    pub fn mount(
         &self,
+        app_system: &mut AppSystem,
         ct_parent: CompositeTreeRef,
-        ct: &mut CompositeTree,
         ht_parent: HitTestTreeRef,
-        ht: &mut HitTestTreeManager<ActionContext>,
     ) {
-        ct.add_child(ct_parent, self.ct_root);
-        ht.add_child(ht_parent, self.ht_root);
+        app_system.set_tree_parent((self.ct_root, self.ht_root), (ct_parent, ht_parent));
     }
 
     pub fn unmount_ht(&self, ht: &mut HitTestTreeManager<AppUpdateContext<'_>>) {
@@ -150,15 +149,21 @@ impl CommonFrameView {
 
     pub fn new(init: &mut ViewInitContext, width: f32, height: f32) -> Self {
         let render_size_px = ((Self::CORNER_RADIUS * 2.0 + 1.0) * init.ui_scale_factor) as u32;
-        let frame_image_atlas_rect = init.atlas.alloc(render_size_px, render_size_px);
-        let frame_border_image_atlas_rect = init.atlas.alloc(render_size_px, render_size_px);
+        let frame_image_atlas_rect = init
+            .app_system
+            .alloc_mask_atlas_rect(render_size_px, render_size_px);
+        let frame_border_image_atlas_rect = init
+            .app_system
+            .alloc_mask_atlas_rect(render_size_px, render_size_px);
 
         let render_pass = br::RenderPassObject::new(
-            init.subsystem,
+            &init.app_system.subsystem,
             &br::RenderPassCreateInfo2::new(
-                &[br::AttachmentDescription2::new(init.atlas.format())
-                    .with_layout_to(br::ImageLayout::ShaderReadOnlyOpt.from_undefined())
-                    .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store)],
+                &[
+                    br::AttachmentDescription2::new(init.app_system.mask_atlas_format())
+                        .with_layout_to(br::ImageLayout::ShaderReadOnlyOpt.from_undefined())
+                        .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store),
+                ],
                 &[br::SubpassDescription2::new()
                     .colors(&[br::AttachmentReference2::color_attachment_opt(0)])],
                 &[br::SubpassDependency2::new(
@@ -177,27 +182,30 @@ impl CommonFrameView {
         )
         .unwrap();
         let framebuffer = br::FramebufferObject::new(
-            &init.subsystem,
+            &init.app_system.subsystem,
             &br::FramebufferCreateInfo::new(
                 &render_pass,
-                &[init.atlas.resource().as_transparent_ref()],
-                init.atlas.size(),
-                init.atlas.size(),
+                &[init
+                    .app_system
+                    .mask_atlas_resource_transparent_ref()
+                    .as_transparent_ref()],
+                init.app_system.mask_atlas_size(),
+                init.app_system.mask_atlas_size(),
             ),
         )
         .unwrap();
 
         let [pipeline, pipeline_border] = init
-            .subsystem
+            .app_system
             .create_graphics_pipelines_array(&[
                 br::GraphicsPipelineCreateInfo::new(
-                    init.subsystem.require_empty_pipeline_layout(),
+                    init.app_system.require_empty_pipeline_layout(),
                     render_pass.subpass(0),
                     &[
-                        init.subsystem
+                        init.app_system
                             .require_shader("resources/filltri.vert")
                             .on_stage(br::ShaderStage::Vertex, c"main"),
-                        init.subsystem
+                        init.app_system
                             .require_shader("resources/rounded_rect.frag")
                             .on_stage(br::ShaderStage::Fragment, c"main")
                             .with_specialization_info(&br::SpecializationInfo::new(
@@ -217,13 +225,13 @@ impl CommonFrameView {
                 )
                 .multisample_state(MS_STATE_EMPTY),
                 br::GraphicsPipelineCreateInfo::new(
-                    init.subsystem.require_empty_pipeline_layout(),
+                    init.app_system.require_empty_pipeline_layout(),
                     render_pass.subpass(0),
                     &[
-                        init.subsystem
+                        init.app_system
                             .require_shader("resources/filltri.vert")
                             .on_stage(br::ShaderStage::Vertex, c"main"),
-                        init.subsystem
+                        init.app_system
                             .require_shader("resources/rounded_rect_border.frag")
                             .on_stage(br::ShaderStage::Fragment, c"main")
                             .with_specialization_info(&br::SpecializationInfo::new(
@@ -248,16 +256,16 @@ impl CommonFrameView {
             .unwrap();
 
         let mut cp = init
-            .subsystem
+            .app_system
             .create_transient_graphics_command_pool()
             .unwrap();
         let [mut cb] = br::CommandBufferObject::alloc_array(
-            &init.subsystem,
+            &init.app_system.subsystem,
             &br::CommandBufferFixedCountAllocateInfo::new(&mut cp, br::CommandBufferLevel::Primary),
         )
         .unwrap();
         unsafe {
-            cb.begin(&br::CommandBufferBeginInfo::new(), &init.subsystem)
+            cb.begin(&br::CommandBufferBeginInfo::new(), &init.app_system)
                 .unwrap()
         }
         .begin_render_pass2(
@@ -287,11 +295,12 @@ impl CommonFrameView {
         .end()
         .unwrap();
 
-        init.subsystem
+        init.app_system
             .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&cb)])
             .unwrap();
+        drop((cp, pipeline, pipeline_border, framebuffer, render_pass));
 
-        let ct_root = init.composite_tree.register(CompositeRect {
+        let ct_root = init.app_system.register_composite_rect(CompositeRect {
             offset: [
                 AnimatableFloat::Value(-width * 0.5 * init.ui_scale_factor),
                 AnimatableFloat::Value(-height * 0.5 * init.ui_scale_factor),
@@ -301,14 +310,14 @@ impl CommonFrameView {
                 AnimatableFloat::Value(width * init.ui_scale_factor),
                 AnimatableFloat::Value(height * init.ui_scale_factor),
             ],
-            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            instance_slot_index: Some(0),
             texatlas_rect: frame_image_atlas_rect,
             slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.0, 0.0, 0.0, 1.0])),
             opacity: AnimatableFloat::Value(0.0),
             ..Default::default()
         });
-        let ct_border = init.composite_tree.register(CompositeRect {
+        let ct_border = init.app_system.register_composite_rect(CompositeRect {
             offset: [
                 AnimatableFloat::Value(-width * 0.5 * init.ui_scale_factor),
                 AnimatableFloat::Value(-height * 0.5 * init.ui_scale_factor),
@@ -318,7 +327,7 @@ impl CommonFrameView {
                 AnimatableFloat::Value(width * init.ui_scale_factor),
                 AnimatableFloat::Value(height * init.ui_scale_factor),
             ],
-            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            instance_slot_index: Some(0),
             texatlas_rect: frame_border_image_atlas_rect,
             slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([
@@ -327,9 +336,10 @@ impl CommonFrameView {
             ..Default::default()
         });
 
-        init.composite_tree.add_child(ct_root, ct_border);
+        init.app_system
+            .set_composite_tree_parent(ct_border, ct_root);
 
-        let ht_root = init.ht.create(HitTestTreeData {
+        let ht_root = init.app_system.create_hit_tree(HitTestTreeData {
             left: -width * 0.5,
             top: -height * 0.5,
             left_adjustment_factor: 0.5,
@@ -370,15 +380,13 @@ impl CommonFrameView {
         self.ht_root == sender
     }
 
-    pub fn mount<ActionContext>(
+    pub fn mount(
         &self,
+        app_system: &mut AppSystem,
         ct_parent: CompositeTreeRef,
-        ct: &mut CompositeTree,
         ht_parent: HitTestTreeRef,
-        ht: &mut HitTestTreeManager<ActionContext>,
     ) {
-        ct.add_child(ct_parent, self.ct_root);
-        ht.add_child(ht_parent, self.ht_root);
+        app_system.set_tree_parent((self.ct_root, self.ht_root), (ct_parent, ht_parent));
     }
 
     pub fn show(&self, ct: &mut CompositeTree, current_sec: f32) {

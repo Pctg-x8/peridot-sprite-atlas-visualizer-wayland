@@ -1,21 +1,18 @@
 use bedrock::{
-    self as br, CommandBufferMut, Device, DeviceMemoryMut, ImageChild, MemoryBound, RenderPass,
-    ShaderModule, VkHandle,
+    self as br, CommandBufferMut, Device, DeviceMemoryMut, MemoryBound, RenderPass, ShaderModule,
+    VkHandle,
 };
 use std::{cell::Cell, rc::Rc};
 
 use crate::{
-    AppEvent, AppUpdateContext, BLEND_STATE_SINGLE_NONE, FillcolorRConstants, IA_STATE_TRILIST,
-    MS_STATE_EMPTY, PresenterInitContext, RASTER_STATE_DEFAULT_FILL_NOCULL, VI_STATE_FLOAT2_ONLY,
-    ViewInitContext,
+    AppEvent, AppSystem, AppUpdateContext, BLEND_STATE_SINGLE_NONE, FillcolorRConstants,
+    IA_STATE_TRILIST, MS_STATE_EMPTY, PresenterInitContext, RASTER_STATE_DEFAULT_FILL_NOCULL,
+    VI_STATE_FLOAT2_ONLY, ViewInitContext,
     composite::{
         AnimatableColor, AnimatableFloat, AnimationData, CompositeMode, CompositeRect,
         CompositeTree, CompositeTreeRef,
     },
-    hittest::{
-        HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef,
-        PointerActionArgs,
-    },
+    hittest::{HitTestTreeActionHandler, HitTestTreeData, HitTestTreeRef, PointerActionArgs},
     input::EventContinueControl,
     subsystem::StagingScratchBufferMapMode,
     text::TextLayout,
@@ -49,13 +46,13 @@ impl MenuButtonView {
 
     #[tracing::instrument(name = "MenuButtonView::new", skip(init))]
     pub fn new(init: &mut ViewInitContext, height: f32) -> Self {
-        let icon_atlas_rect = init.atlas.alloc(
+        let icon_atlas_rect = init.app_system.alloc_mask_atlas_rect(
             (Self::ICON_SIZE * init.ui_scale_factor) as _,
             (Self::ICON_SIZE * init.ui_scale_factor) as _,
         );
 
         let mut vbuf = br::BufferObject::new(
-            init.subsystem,
+            &init.app_system.subsystem,
             &br::BufferCreateInfo::new(
                 core::mem::size_of::<[f32; 2]>() * Self::ICON_VERTICES.len()
                     + core::mem::size_of::<u16>() * Self::ICON_INDICES.len(),
@@ -65,18 +62,18 @@ impl MenuButtonView {
         .unwrap();
         let req = vbuf.requirements();
         let memindex = init
-            .subsystem
+            .app_system
             .find_direct_memory_index(req.memoryTypeBits)
             .expect("no suitable memory");
         let mut mem = br::DeviceMemoryObject::new(
-            init.subsystem,
+            &init.app_system.subsystem,
             &br::MemoryAllocateInfo::new(req.size, memindex),
         )
         .unwrap();
         vbuf.bind(&mem, 0).unwrap();
 
         let h = mem.native_ptr();
-        let requires_flush = !init.subsystem.is_coherent_memory_type(memindex);
+        let requires_flush = !init.app_system.is_coherent_memory_type(memindex);
         let ptr = mem.map(0..req.size as _).unwrap();
         unsafe {
             core::ptr::copy_nonoverlapping(
@@ -94,7 +91,8 @@ impl MenuButtonView {
         }
         if requires_flush {
             unsafe {
-                init.subsystem
+                init.app_system
+                    .subsystem
                     .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(h, 0, req.size)])
                     .unwrap();
             }
@@ -104,11 +102,13 @@ impl MenuButtonView {
         }
 
         let rp = br::RenderPassObject::new(
-            init.subsystem,
+            &init.app_system.subsystem,
             &br::RenderPassCreateInfo2::new(
-                &[br::AttachmentDescription2::new(init.atlas.format())
-                    .color_memory_op(br::LoadOp::Clear, br::StoreOp::Store)
-                    .with_layout_to(br::ImageLayout::ShaderReadOnlyOpt.from_undefined())],
+                &[
+                    br::AttachmentDescription2::new(init.app_system.mask_atlas_format())
+                        .color_memory_op(br::LoadOp::Clear, br::StoreOp::Store)
+                        .with_layout_to(br::ImageLayout::ShaderReadOnlyOpt.from_undefined()),
+                ],
                 &[br::SubpassDescription2::new()
                     .colors(&[br::AttachmentReference2::color_attachment_opt(0)])],
                 &[br::SubpassDependency2::new(
@@ -128,26 +128,29 @@ impl MenuButtonView {
         )
         .unwrap();
         let fb = br::FramebufferObject::new(
-            init.subsystem,
+            &init.app_system.subsystem,
             &br::FramebufferCreateInfo::new(
                 &rp,
-                &[init.atlas.resource().as_transparent_ref()],
-                init.atlas.size(),
-                init.atlas.size(),
+                &[init
+                    .app_system
+                    .mask_atlas_resource_transparent_ref()
+                    .as_transparent_ref()],
+                init.app_system.mask_atlas_size(),
+                init.app_system.mask_atlas_size(),
             ),
         )
         .unwrap();
 
         let [pipeline] = init
-            .subsystem
+            .app_system
             .create_graphics_pipelines_array(&[br::GraphicsPipelineCreateInfo::new(
-                init.subsystem.require_empty_pipeline_layout(),
+                init.app_system.require_empty_pipeline_layout(),
                 rp.subpass(0),
                 &[
-                    init.subsystem
+                    init.app_system
                         .require_shader("resources/notrans.vert")
                         .on_stage(br::ShaderStage::Vertex, c"main"),
-                    init.subsystem
+                    init.app_system
                         .require_shader("resources/fillcolor_r.frag")
                         .on_stage(br::ShaderStage::Fragment, c"main")
                         .with_specialization_info(&br::SpecializationInfo::new(
@@ -167,18 +170,18 @@ impl MenuButtonView {
             .unwrap();
 
         let mut cp = init
-            .subsystem
+            .app_system
             .create_transient_graphics_command_pool()
             .unwrap();
         let [mut cb] = br::CommandBufferObject::alloc_array(
-            init.subsystem,
+            &init.app_system.subsystem,
             &br::CommandBufferFixedCountAllocateInfo::new(&mut cp, br::CommandBufferLevel::Primary),
         )
         .unwrap();
         unsafe {
             cb.begin(
                 &br::CommandBufferBeginInfo::new().onetime_submit(),
-                init.subsystem,
+                init.app_system,
             )
             .unwrap()
         }
@@ -202,24 +205,25 @@ impl MenuButtonView {
         .end_render_pass2(&br::SubpassEndInfo::new())
         .end()
         .unwrap();
-        init.subsystem
+        init.app_system
             .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&cb)])
             .unwrap();
+        drop((cp, pipeline, fb, rp, mem, vbuf));
 
-        let ct_root = init.composite_tree.register(CompositeRect {
+        let ct_root = init.app_system.register_composite_rect(CompositeRect {
             size: [
                 AnimatableFloat::Value(height * init.ui_scale_factor),
                 AnimatableFloat::Value(height * init.ui_scale_factor),
             ],
             ..Default::default()
         });
-        let ct_bg = init.composite_tree.register(CompositeRect {
+        let ct_bg = init.app_system.register_composite_rect(CompositeRect {
             relative_size_adjustment: [1.0, 1.0],
-            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            instance_slot_index: Some(0),
             composite_mode: CompositeMode::FillColor(AnimatableColor::Value([1.0, 1.0, 1.0, 0.0])),
             ..Default::default()
         });
-        let ct_icon = init.composite_tree.register(CompositeRect {
+        let ct_icon = init.app_system.register_composite_rect(CompositeRect {
             size: [
                 AnimatableFloat::Value(Self::ICON_SIZE * init.ui_scale_factor),
                 AnimatableFloat::Value(Self::ICON_SIZE * init.ui_scale_factor),
@@ -229,16 +233,16 @@ impl MenuButtonView {
                 AnimatableFloat::Value(-Self::ICON_SIZE * 0.5 * init.ui_scale_factor),
             ],
             relative_offset_adjustment: [0.5, 0.5],
-            instance_slot_index: Some(init.composite_instance_manager.alloc()),
+            instance_slot_index: Some(0),
             texatlas_rect: icon_atlas_rect,
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
             ..Default::default()
         });
 
-        init.composite_tree.add_child(ct_root, ct_bg);
-        init.composite_tree.add_child(ct_root, ct_icon);
+        init.app_system.set_composite_tree_parent(ct_bg, ct_root);
+        init.app_system.set_composite_tree_parent(ct_icon, ct_root);
 
-        let ht_root = init.ht.create(HitTestTreeData {
+        let ht_root = init.app_system.hit_tree.create(HitTestTreeData {
             width: height,
             height,
             ..Default::default()
@@ -256,13 +260,11 @@ impl MenuButtonView {
 
     pub fn mount(
         &self,
+        app_system: &mut AppSystem,
         ct_parent: CompositeTreeRef,
-        ct: &mut CompositeTree,
         ht_parent: HitTestTreeRef,
-        ht: &mut HitTestTreeManager<AppUpdateContext<'_>>,
     ) {
-        ct.add_child(ct_parent, self.ct_root);
-        ht.add_child(ht_parent, self.ht_root);
+        app_system.set_tree_parent((self.ct_root, self.ht_root), (ct_parent, ht_parent));
     }
 
     fn update(&self, composite_tree: &mut CompositeTree, current_sec: f32) {
@@ -334,11 +336,11 @@ impl BaseView {
     #[tracing::instrument(name = "BaseView::new", skip(ctx))]
     pub fn new(ctx: &mut ViewInitContext) -> Self {
         let title = "Peridot SpriteAtlas Visualizer/Editor";
-        let text_layout = TextLayout::build_simple(title, &mut ctx.fonts.ui_default);
+        let text_layout = TextLayout::build_simple(title, &mut ctx.app_system.fonts.ui_default);
         let text_atlas_rect = ctx
-            .atlas
-            .alloc(text_layout.width_px(), text_layout.height_px());
-        let bg_atlas_rect = ctx.atlas.alloc(1, 2);
+            .app_system
+            .alloc_mask_atlas_rect(text_layout.width_px(), text_layout.height_px());
+        let bg_atlas_rect = ctx.app_system.alloc_mask_atlas_rect(1, 2);
 
         let height = text_layout.height() / ctx.ui_scale_factor + Self::TITLE_SPACING * 2.0;
 
@@ -355,95 +357,78 @@ impl BaseView {
         }
         drop(ptr);
 
-        let mut cp = ctx
-            .subsystem
-            .create_transient_graphics_command_pool()
-            .unwrap();
-        let [mut cb] = br::CommandBufferObject::alloc_array(
-            &ctx.subsystem,
-            &br::CommandBufferFixedCountAllocateInfo::new(&mut cp, br::CommandBufferLevel::Primary),
-        )
-        .unwrap();
-        unsafe {
-            cb.begin(
-                &br::CommandBufferBeginInfo::new().onetime_submit(),
-                &ctx.subsystem,
-            )
-            .unwrap()
-        }
-        .pipeline_barrier_2(&br::DependencyInfo::new(
-            &[],
-            &[],
-            &[br::ImageMemoryBarrier2::new(
-                ctx.atlas.resource().image(),
-                br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
-            )
-            .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
-        ))
-        .inject(|r| {
-            let (tb, to) = ctx.staging_scratch_buffer.of(&text_stg_image_pixels);
-            let (b, o) = ctx.staging_scratch_buffer.of(&bg_stg_image_pixels);
+        ctx.app_system
+            .sync_execute_graphics_commands2(|rec| {
+                rec.pipeline_barrier_2(&br::DependencyInfo::new(
+                    &[],
+                    &[],
+                    &[ctx
+                        .app_system
+                        .barrier_for_mask_atlas_resource()
+                        .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
+                ))
+                .inject(|r| {
+                    let (tb, to) = ctx.staging_scratch_buffer.of(&text_stg_image_pixels);
+                    let (b, o) = ctx.staging_scratch_buffer.of(&bg_stg_image_pixels);
 
-            // TODO: ここ使うリソースいっしょだったらバッチするようにしたい
-            r.copy_buffer_to_image(
-                tb,
-                ctx.atlas.resource().image(),
-                br::ImageLayout::TransferDestOpt,
-                &[br::vk::VkBufferImageCopy {
-                    bufferOffset: to,
-                    bufferRowLength: text_layout.width_px(),
-                    bufferImageHeight: text_layout.height_px(),
-                    imageSubresource: br::ImageSubresourceLayers::new(
-                        br::AspectMask::COLOR,
-                        0,
-                        0..1,
-                    ),
-                    imageOffset: text_atlas_rect.lt_offset().with_z(0),
-                    imageExtent: text_atlas_rect.extent().with_depth(1),
-                }],
-            )
-            .copy_buffer_to_image(
-                b,
-                ctx.atlas.resource().image(),
-                br::ImageLayout::TransferDestOpt,
-                &[br::vk::VkBufferImageCopy {
-                    bufferOffset: o,
-                    bufferRowLength: 1,
-                    bufferImageHeight: 2,
-                    imageSubresource: br::ImageSubresourceLayers::new(
-                        br::AspectMask::COLOR,
-                        0,
-                        0..1,
-                    ),
-                    imageOffset: bg_atlas_rect.lt_offset().with_z(0),
-                    imageExtent: bg_atlas_rect.extent().with_depth(1),
-                }],
-            )
-        })
-        .pipeline_barrier_2(&br::DependencyInfo::new(
-            &[],
-            &[],
-            &[br::ImageMemoryBarrier2::new(
-                ctx.atlas.resource().image(),
-                br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
-            )
-            .from(
-                br::PipelineStageFlags2::COPY,
-                br::AccessFlags2::TRANSFER.write,
-            )
-            .to(
-                br::PipelineStageFlags2::FRAGMENT_SHADER,
-                br::AccessFlags2::SHADER_SAMPLED_READ,
-            )
-            .transit_from(br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt))],
-        ))
-        .end()
-        .unwrap();
-        ctx.subsystem
-            .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&cb)])
+                    // TODO: ここ使うリソースいっしょだったらバッチするようにしたい
+                    r.copy_buffer_to_image(
+                        tb,
+                        &ctx.app_system.mask_atlas_image_transparent_ref(),
+                        br::ImageLayout::TransferDestOpt,
+                        &[br::vk::VkBufferImageCopy {
+                            bufferOffset: to,
+                            bufferRowLength: text_layout.width_px(),
+                            bufferImageHeight: text_layout.height_px(),
+                            imageSubresource: br::ImageSubresourceLayers::new(
+                                br::AspectMask::COLOR,
+                                0,
+                                0..1,
+                            ),
+                            imageOffset: text_atlas_rect.lt_offset().with_z(0),
+                            imageExtent: text_atlas_rect.extent().with_depth(1),
+                        }],
+                    )
+                    .copy_buffer_to_image(
+                        b,
+                        &ctx.app_system.mask_atlas_image_transparent_ref(),
+                        br::ImageLayout::TransferDestOpt,
+                        &[br::vk::VkBufferImageCopy {
+                            bufferOffset: o,
+                            bufferRowLength: 1,
+                            bufferImageHeight: 2,
+                            imageSubresource: br::ImageSubresourceLayers::new(
+                                br::AspectMask::COLOR,
+                                0,
+                                0..1,
+                            ),
+                            imageOffset: bg_atlas_rect.lt_offset().with_z(0),
+                            imageExtent: bg_atlas_rect.extent().with_depth(1),
+                        }],
+                    )
+                })
+                .pipeline_barrier_2(&br::DependencyInfo::new(
+                    &[],
+                    &[],
+                    &[ctx
+                        .app_system
+                        .barrier_for_mask_atlas_resource()
+                        .from(
+                            br::PipelineStageFlags2::COPY,
+                            br::AccessFlags2::TRANSFER.write,
+                        )
+                        .to(
+                            br::PipelineStageFlags2::FRAGMENT_SHADER,
+                            br::AccessFlags2::SHADER_SAMPLED_READ,
+                        )
+                        .transit_from(
+                            br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt),
+                        )],
+                ))
+            })
             .unwrap();
 
-        let ct_root = ctx.composite_tree.register(CompositeRect {
+        let ct_root = ctx.app_system.register_composite_rect(CompositeRect {
             relative_size_adjustment: [1.0, 0.0],
             size: [
                 AnimatableFloat::Value(0.0),
@@ -451,10 +436,10 @@ impl BaseView {
             ],
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.0, 0.0, 0.0, 0.25])),
             texatlas_rect: bg_atlas_rect,
-            instance_slot_index: Some(ctx.composite_instance_manager.alloc()),
+            instance_slot_index: Some(0),
             ..Default::default()
         });
-        let ct_title = ctx.composite_tree.register(CompositeRect {
+        let ct_title = ctx.app_system.register_composite_rect(CompositeRect {
             size: [
                 AnimatableFloat::Value(text_layout.width()),
                 AnimatableFloat::Value(text_layout.height()),
@@ -465,13 +450,13 @@ impl BaseView {
             ],
             texatlas_rect: text_atlas_rect,
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
-            instance_slot_index: Some(ctx.composite_instance_manager.alloc()),
+            instance_slot_index: Some(0),
             ..Default::default()
         });
 
-        ctx.composite_tree.add_child(ct_root, ct_title);
+        ctx.app_system.set_composite_tree_parent(ct_title, ct_root);
 
-        let ht_root = ctx.ht.create(HitTestTreeData {
+        let ht_root = ctx.app_system.create_hit_tree(HitTestTreeData {
             height,
             width_adjustment_factor: 1.0,
             ..Default::default()
@@ -486,13 +471,11 @@ impl BaseView {
 
     pub fn mount(
         &self,
+        app_system: &mut AppSystem,
         ct_parent: CompositeTreeRef,
-        ct: &mut CompositeTree,
         ht_parent: HitTestTreeRef,
-        ht: &mut HitTestTreeManager<AppUpdateContext<'_>>,
     ) {
-        ct.add_child(ct_parent, self.ct_root);
-        ht.add_child(ht_parent, self.ht_root);
+        app_system.set_tree_parent((self.ct_root, self.ht_root), (ct_parent, ht_parent));
     }
 }
 
@@ -583,15 +566,15 @@ impl Presenter {
         let menu_button_view = MenuButtonView::new(&mut init.for_view, base_view.height);
 
         menu_button_view.mount(
+            init.for_view.app_system,
             base_view.ct_root,
-            init.for_view.composite_tree,
             base_view.ht_root,
-            init.for_view.ht,
         );
 
         let action_handler = Rc::new(ActionHandler { menu_button_view });
         init.for_view
-            .ht
+            .app_system
+            .hit_tree
             .set_action_handler(action_handler.menu_button_view.ht_root, &action_handler);
 
         Self {
@@ -602,20 +585,14 @@ impl Presenter {
 
     pub fn mount(
         &self,
+        app_system: &mut AppSystem,
         ct_parent: CompositeTreeRef,
-        ct: &mut CompositeTree,
         ht_parent: HitTestTreeRef,
-        ht: &mut HitTestTreeManager<AppUpdateContext<'_>>,
     ) {
-        self.base_view.mount(ct_parent, ct, ht_parent, ht);
+        self.base_view.mount(app_system, ct_parent, ht_parent);
     }
 
-    pub fn update<ActionContext>(
-        &self,
-        ct: &mut CompositeTree,
-        ht: &mut HitTestTreeManager<ActionContext>,
-        current_sec: f32,
-    ) {
+    pub fn update(&self, ct: &mut CompositeTree, current_sec: f32) {
         self.action_handler.menu_button_view.update(ct, current_sec);
     }
 

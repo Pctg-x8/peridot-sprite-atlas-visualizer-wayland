@@ -356,24 +356,35 @@ impl Default for CompositeRect {
     }
 }
 
-pub struct CompositeInstanceManager<'d> {
-    buffer: br::BufferObject<&'d Subsystem>,
-    memory: br::DeviceMemoryObject<&'d Subsystem>,
-    streaming_buffer: br::BufferObject<&'d Subsystem>,
-    streaming_memory: br::DeviceMemoryObject<&'d Subsystem>,
+/// Unbounded from gfx_device(must be externally managed)
+pub struct UnboundedCompositeInstanceManager {
+    buffer: br::vk::VkBuffer,
+    memory: br::vk::VkDeviceMemory,
+    streaming_buffer: br::vk::VkBuffer,
+    streaming_memory: br::vk::VkDeviceMemory,
     streaming_memory_requires_flush: bool,
-    buffer_stg: br::BufferObject<&'d Subsystem>,
-    memory_stg: br::DeviceMemoryObject<&'d Subsystem>,
+    buffer_stg: br::vk::VkBuffer,
+    memory_stg: br::vk::VkDeviceMemory,
     stg_mem_requires_flush: bool,
     capacity: usize,
     count: usize,
     free: BTreeSet<usize>,
 }
-impl<'d> CompositeInstanceManager<'d> {
+impl UnboundedCompositeInstanceManager {
+    pub unsafe fn drop_with_gfx_device(&mut self, gfx_device: &Subsystem) {
+        unsafe {
+            br::vkfn_wrapper::free_memory(gfx_device.native_ptr(), self.memory_stg, None);
+            br::vkfn_wrapper::destroy_buffer(gfx_device.native_ptr(), self.buffer_stg, None);
+            br::vkfn_wrapper::free_memory(gfx_device.native_ptr(), self.streaming_memory, None);
+            br::vkfn_wrapper::destroy_buffer(gfx_device.native_ptr(), self.streaming_buffer, None);
+            br::vkfn_wrapper::free_memory(gfx_device.native_ptr(), self.memory, None);
+            br::vkfn_wrapper::destroy_buffer(gfx_device.native_ptr(), self.buffer, None);
+        }
+    }
+
     const INIT_CAP: usize = 1024;
 
-    #[tracing::instrument(skip(subsystem))]
-    pub fn new(subsystem: &'d Subsystem) -> Self {
+    pub fn new(subsystem: &Subsystem) -> Self {
         let mut buffer = br::BufferObject::new(
             subsystem,
             &br::BufferCreateInfo::new(
@@ -446,6 +457,13 @@ impl<'d> CompositeInstanceManager<'d> {
             .bind(&memory_stg, 0)
             .expect("Failed to bind staging buffer memory");
 
+        let (buffer, _) = buffer.unmanage();
+        let (memory, _) = memory.unmanage();
+        let (streaming_buffer, _) = streaming_buffer.unmanage();
+        let (streaming_memory, _) = streaming_memory.unmanage();
+        let (buffer_stg, _) = buffer_stg.unmanage();
+        let (memory_stg, _) = memory_stg.unmanage();
+
         Self {
             buffer,
             memory,
@@ -476,31 +494,13 @@ impl<'d> CompositeInstanceManager<'d> {
 
     pub fn sync_buffer<'cb, E: 'cb>(&self, cr: br::CmdRecord<'cb, E>) -> br::CmdRecord<'cb, E> {
         cr.copy_buffer(
-            &self.buffer_stg,
-            &self.buffer,
+            &unsafe { br::VkHandleRef::dangling(self.buffer_stg) },
+            &unsafe { br::VkHandleRef::dangling(self.buffer) },
             &[br::BufferCopy::mirror(
                 0,
-                (core::mem::size_of::<CompositeInstanceData>() * 1024) as _,
+                (core::mem::size_of::<CompositeInstanceData>() * self.capacity) as _,
             )],
         )
-    }
-
-    pub const fn buffer_stg<'b>(&'b self) -> &'b (impl br::Buffer + use<'d>) {
-        &self.buffer_stg
-    }
-
-    pub const fn buffer<'b>(&'b self) -> &'b (impl br::Buffer + use<'d>) {
-        &self.buffer
-    }
-
-    pub const fn streaming_buffer<'b>(&'b self) -> &'b (impl br::Buffer + use<'d>) {
-        &self.streaming_buffer
-    }
-
-    pub const fn streaming_memory_exc<'b>(
-        &'b mut self,
-    ) -> &'b mut (impl br::DeviceMemoryMut + use<'d>) {
-        &mut self.streaming_memory
     }
 
     pub const fn streaming_memory_requires_flush(&self) -> bool {
@@ -511,20 +511,131 @@ impl<'d> CompositeInstanceManager<'d> {
         self.count
     }
 
-    pub const fn memory_stg<'b>(&'b self) -> &'b (impl br::DeviceMemory + use<'d>) {
-        &self.memory_stg
-    }
-
-    pub const fn memory_stg_exc<'b>(&'b mut self) -> &'b mut (impl br::DeviceMemoryMut + use<'d>) {
-        &mut self.memory_stg
-    }
-
     pub const fn memory_stg_requires_explicit_flush(&self) -> bool {
         self.stg_mem_requires_flush
     }
 
     pub const fn range_all(&self) -> core::ops::Range<usize> {
         0..core::mem::size_of::<CompositeInstanceData>() * self.count
+    }
+
+    pub const fn buffer_transparent_ref(&self) -> &br::VkHandleRef<br::vk::VkBuffer> {
+        br::VkHandleRef::from_raw_ref(&self.buffer)
+    }
+
+    pub const fn streaming_buffer_transparent_ref(&self) -> &br::VkHandleRef<br::vk::VkBuffer> {
+        br::VkHandleRef::from_raw_ref(&self.streaming_buffer)
+    }
+
+    pub const fn staging_memory_raw_handle(&self) -> br::vk::VkDeviceMemory {
+        self.memory_stg
+    }
+
+    pub unsafe fn map_staging<'s, 'g>(
+        &'s mut self,
+        gfx_device: &'g Subsystem,
+    ) -> br::Result<UnboundedCompositeInstanceMappedStagingMemory<'s, 'g>> {
+        let ptr = unsafe {
+            br::vkfn_wrapper::map_memory(
+                gfx_device.native_ptr(),
+                self.memory_stg,
+                0,
+                (core::mem::size_of::<CompositeInstanceData>() * self.count) as _,
+                0,
+            )?
+        };
+
+        Ok(UnboundedCompositeInstanceMappedStagingMemory(
+            ptr, self, gfx_device,
+        ))
+    }
+
+    pub const fn streaming_memory_raw_handle(&self) -> br::vk::VkDeviceMemory {
+        self.streaming_memory
+    }
+
+    pub unsafe fn map_streaming<'s, 'g>(
+        &'s mut self,
+        gfx_device: &'g Subsystem,
+    ) -> br::Result<UnboundedCompositeInstanceMappedStreamingMemory<'s, 'g>> {
+        let ptr = unsafe {
+            br::vkfn_wrapper::map_memory(
+                gfx_device.native_ptr(),
+                self.streaming_memory,
+                0,
+                core::mem::size_of::<CompositeStreamingData>() as _,
+                0,
+            )?
+        };
+
+        Ok(UnboundedCompositeInstanceMappedStreamingMemory(
+            ptr, self, gfx_device,
+        ))
+    }
+}
+
+pub struct UnboundedCompositeInstanceMappedStagingMemory<'m, 'g>(
+    *mut core::ffi::c_void,
+    &'m mut UnboundedCompositeInstanceManager,
+    &'g Subsystem,
+);
+impl Drop for UnboundedCompositeInstanceMappedStagingMemory<'_, '_> {
+    fn drop(&mut self) {
+        unsafe {
+            br::vkfn_wrapper::unmap_memory(self.2.native_ptr(), self.1.memory_stg);
+        }
+    }
+}
+impl UnboundedCompositeInstanceMappedStagingMemory<'_, '_> {
+    pub const fn ptr(&self) -> *mut core::ffi::c_void {
+        self.0
+    }
+}
+
+pub struct UnboundedCompositeInstanceMappedStreamingMemory<'m, 'g>(
+    *mut core::ffi::c_void,
+    &'m mut UnboundedCompositeInstanceManager,
+    &'g Subsystem,
+);
+impl Drop for UnboundedCompositeInstanceMappedStreamingMemory<'_, '_> {
+    fn drop(&mut self) {
+        unsafe {
+            br::vkfn_wrapper::unmap_memory(self.2.native_ptr(), self.1.streaming_memory);
+        }
+    }
+}
+impl UnboundedCompositeInstanceMappedStreamingMemory<'_, '_> {
+    pub const fn ptr(&self) -> *mut CompositeStreamingData {
+        self.0.cast()
+    }
+}
+
+pub struct CompositeInstanceManager<'d> {
+    gfx_device: &'d Subsystem,
+    raw: UnboundedCompositeInstanceManager,
+}
+impl Drop for CompositeInstanceManager<'_> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        unsafe {
+            self.raw.drop_with_gfx_device(self.gfx_device);
+        }
+    }
+}
+impl<'d> CompositeInstanceManager<'d> {
+    #[tracing::instrument(skip(subsystem))]
+    pub fn new(subsystem: &'d Subsystem) -> Self {
+        Self {
+            raw: UnboundedCompositeInstanceManager::new(subsystem),
+            gfx_device: subsystem,
+        }
+    }
+
+    pub const fn unbound(self) -> UnboundedCompositeInstanceManager {
+        let raw = unsafe { core::ptr::read(&self.raw) };
+        core::mem::forget(self);
+
+        raw
     }
 }
 
@@ -912,7 +1023,7 @@ impl CompositeTree {
         size: br::Extent2D,
         current_sec: f32,
         tex_size: br::Extent2D,
-        mapped_ptr: &br::MappedMemory<'_, impl br::DeviceMemoryMut + ?Sized>,
+        mapped_head: *mut core::ffi::c_void,
         event_bus: &AppEventBus,
     ) -> CompositeRenderingData {
         // let update_timer = std::time::Instant::now();
@@ -1000,9 +1111,9 @@ impl CompositeTree {
             if let Some(_) = r.instance_slot_index {
                 unsafe {
                     core::ptr::write(
-                        mapped_ptr.get_mut(
-                            core::mem::size_of::<CompositeInstanceData>() * instance_slot_index,
-                        ),
+                        mapped_head
+                            .cast::<CompositeInstanceData>()
+                            .add(instance_slot_index),
                         CompositeInstanceData {
                             pos_st: [w, h, 0.0, 0.0],
                             uv_st: [
@@ -1131,23 +1242,32 @@ impl AtlasRect {
     }
 }
 
-pub struct CompositionSurfaceAtlas<'d> {
-    resource: br::ImageViewObject<br::ImageObject<&'d Subsystem>>,
-    memory: br::DeviceMemoryObject<&'d Subsystem>,
+/// unbounded with gfx_device(must be externally managed)
+pub struct UnboundedCompositionSurfaceAtlas {
+    resource: br::vk::VkImage,
+    resource_view: br::vk::VkImageView,
+    memory: br::vk::VkDeviceMemory,
     residency_bitmap: Vec<u8>,
+    format: br::Format,
     size: u32,
-    format: br::vk::VkFormat,
     used_left: u32,
     used_top: u32,
     current_line_top: u32,
 }
-impl<'d> CompositionSurfaceAtlas<'d> {
+impl UnboundedCompositionSurfaceAtlas {
+    pub unsafe fn drop_with_gfx_device(&mut self, gfx_device: &Subsystem) {
+        unsafe {
+            br::vkfn_wrapper::destroy_image_view(gfx_device.native_ptr(), self.resource_view, None);
+            br::vkfn_wrapper::destroy_image(gfx_device.native_ptr(), self.resource, None);
+            br::vkfn_wrapper::free_memory(gfx_device.native_ptr(), self.memory, None);
+        }
+    }
+
     // TODO: できればPhysical Deviceからとれる値をつかったほうがいい
     // 1024なら大抵は問題ないとは思うが...
     const GRANULARITY: u32 = 1024;
 
-    #[tracing::instrument(skip(subsystem))]
-    pub fn new(subsystem: &'d Subsystem, size: u32, pixel_format: br::vk::VkFormat) -> Self {
+    pub fn new(subsystem: &Subsystem, size: u32, pixel_format: br::Format) -> Self {
         let bpp = match pixel_format {
             br::vk::VK_FORMAT_R8_UNORM => 1,
             _ => unimplemented!("bpp"),
@@ -1267,7 +1387,12 @@ impl<'d> CompositionSurfaceAtlas<'d> {
         }
         residency_bitmap[0] = 0x01;
 
+        let (memory, _) = memory.unmanage();
+        let (resource_view, resource) = resource.unmanage();
+        let (resource, _, _, _, _) = resource.unmanage();
+
         Self {
+            resource_view,
             resource,
             memory,
             residency_bitmap,
@@ -1279,15 +1404,19 @@ impl<'d> CompositionSurfaceAtlas<'d> {
         }
     }
 
-    pub const fn resource<'s>(&'s self) -> &'s (impl br::ImageView + br::ImageChild + use<'d>) {
-        &self.resource
+    pub const fn resource_view_transparent_ref(&self) -> &br::VkHandleRef<br::vk::VkImageView> {
+        br::VkHandleRef::from_raw_ref(&self.resource_view)
+    }
+
+    pub const fn image_transparent_ref(&self) -> &br::VkHandleRef<br::vk::VkImage> {
+        br::VkHandleRef::from_raw_ref(&self.resource)
     }
 
     pub const fn size(&self) -> u32 {
         self.size
     }
 
-    pub const fn format(&self) -> br::vk::VkFormat {
+    pub const fn format(&self) -> br::Format {
         self.format
     }
 
@@ -1328,5 +1457,33 @@ impl<'d> CompositionSurfaceAtlas<'d> {
             right: l + required_width,
             bottom: self.used_top + required_height,
         }
+    }
+}
+
+pub struct CompositionSurfaceAtlas<'d> {
+    gfx_device: &'d Subsystem,
+    raw: UnboundedCompositionSurfaceAtlas,
+}
+impl Drop for CompositionSurfaceAtlas<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            self.raw.drop_with_gfx_device(self.gfx_device);
+        }
+    }
+}
+impl<'d> CompositionSurfaceAtlas<'d> {
+    #[tracing::instrument(skip(subsystem))]
+    pub fn new(subsystem: &'d Subsystem, size: u32, pixel_format: br::vk::VkFormat) -> Self {
+        Self {
+            raw: UnboundedCompositionSurfaceAtlas::new(subsystem, size, pixel_format),
+            gfx_device: subsystem,
+        }
+    }
+
+    pub const fn unbound(self) -> UnboundedCompositionSurfaceAtlas {
+        let raw = unsafe { core::ptr::read(&self.raw) };
+        core::mem::forget(self);
+
+        raw
     }
 }

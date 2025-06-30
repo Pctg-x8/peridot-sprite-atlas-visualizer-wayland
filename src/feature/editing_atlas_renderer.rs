@@ -13,7 +13,7 @@ use image::EncodableLayout;
 use parking_lot::RwLock;
 
 use crate::{
-    AppEventBus, BLEND_STATE_SINGLE_NONE, BLEND_STATE_SINGLE_PREMULTIPLIED,
+    AppEventBus, AppSystem, BLEND_STATE_SINGLE_NONE, BLEND_STATE_SINGLE_PREMULTIPLIED,
     BufferedStagingScratchBuffer, IA_STATE_TRILIST, IA_STATE_TRISTRIP, MS_STATE_EMPTY,
     RASTER_STATE_DEFAULT_FILL_NOCULL, VI_STATE_EMPTY, VI_STATE_FLOAT4_ONLY,
     app_state::SpriteInfo,
@@ -273,19 +273,22 @@ pub struct EditingAtlasRenderer<'d> {
     sprite_image_copies: Arc<RwLock<HashMap<usize, Vec<br::vk::VkBufferImageCopy>>>>,
 }
 impl<'d> EditingAtlasRenderer<'d> {
-    #[tracing::instrument(skip(subsystem, rendered_pass, app_event_bus))]
-    pub fn new(
+    #[tracing::instrument(skip(app_system, rendered_pass, app_event_bus))]
+    pub fn new<'app_system>(
         app_event_bus: &'d AppEventBus,
-        subsystem: &'d Subsystem,
+        app_system: &'app_system AppSystem<'d, '_>,
         rendered_pass: br::SubpassRef<impl br::RenderPass>,
         main_buffer_size: br::Extent2D,
         init_atlas_size: SizePixels,
-    ) -> Self {
+    ) -> Self
+    where
+        'd: 'app_system,
+    {
         let sprite_sampler =
-            br::SamplerObject::new(subsystem, &br::SamplerCreateInfo::new()).unwrap();
+            br::SamplerObject::new(app_system.subsystem, &br::SamplerCreateInfo::new()).unwrap();
 
         let mut param_buffer = match br::BufferObject::new(
-            subsystem,
+            app_system.subsystem,
             &br::BufferCreateInfo::new_for_type::<GridParams>(
                 br::BufferUsage::UNIFORM_BUFFER | br::BufferUsage::TRANSFER_DEST,
             ),
@@ -297,12 +300,12 @@ impl<'d> EditingAtlasRenderer<'d> {
             }
         };
         let mreq = param_buffer.requirements();
-        let Some(memindex) = subsystem.find_device_local_memory_index(mreq.memoryTypeBits) else {
+        let Some(memindex) = app_system.find_device_local_memory_index(mreq.memoryTypeBits) else {
             tracing::error!("No suitable memory for param buffer");
             std::process::abort();
         };
         let param_buffer_memory = match br::DeviceMemoryObject::new(
-            subsystem,
+            app_system.subsystem,
             &br::MemoryAllocateInfo::new(mreq.size, memindex),
         ) {
             Ok(x) => x,
@@ -316,7 +319,7 @@ impl<'d> EditingAtlasRenderer<'d> {
         }
 
         let mut bg_vertex_buffer = match br::BufferObject::new(
-            subsystem,
+            app_system.subsystem,
             &br::BufferCreateInfo::new_for_type::<[[f32; 4]; 4]>(
                 br::BufferUsage::VERTEX_BUFFER | br::BufferUsage::TRANSFER_DEST,
             ),
@@ -328,12 +331,12 @@ impl<'d> EditingAtlasRenderer<'d> {
             }
         };
         let mreq = bg_vertex_buffer.requirements();
-        let Some(memindex) = subsystem.find_device_local_memory_index(mreq.memoryTypeBits) else {
+        let Some(memindex) = app_system.find_device_local_memory_index(mreq.memoryTypeBits) else {
             tracing::error!("No suitable memory for bg vertex buffer");
             std::process::abort();
         };
         let bg_vertex_buffer_memory = match br::DeviceMemoryObject::new(
-            subsystem,
+            app_system.subsystem,
             &br::MemoryAllocateInfo::new(mreq.size, memindex),
         ) {
             Ok(x) => x,
@@ -347,7 +350,7 @@ impl<'d> EditingAtlasRenderer<'d> {
         }
 
         let dsl_param = match br::DescriptorSetLayoutObject::new(
-            subsystem,
+            app_system.subsystem,
             &br::DescriptorSetLayoutCreateInfo::new(&[
                 br::DescriptorType::UniformBuffer.make_binding(0, 1)
             ]),
@@ -359,7 +362,7 @@ impl<'d> EditingAtlasRenderer<'d> {
             }
         };
         let dsl_sprite_instance = match br::DescriptorSetLayoutObject::new(
-            subsystem,
+            app_system.subsystem,
             &br::DescriptorSetLayoutCreateInfo::new(&[br::DescriptorType::CombinedImageSampler
                 .make_binding(0, 1)
                 .with_immutable_samplers(&[sprite_sampler.as_transparent_ref()])]),
@@ -371,15 +374,15 @@ impl<'d> EditingAtlasRenderer<'d> {
             }
         };
 
-        let vsh = subsystem.require_shader("resources/filltri.vert");
-        let fsh = subsystem.require_shader("resources/grid.frag");
-        let bg_vsh = subsystem.require_shader("resources/atlas_bg.vert");
-        let bg_fsh = subsystem.require_shader("resources/atlas_bg.frag");
-        let sprite_instance_vsh = subsystem.require_shader("resources/sprite_instance.vert");
-        let sprite_instance_fsh = subsystem.require_shader("resources/sprite_instance.frag");
+        let vsh = app_system.require_shader("resources/filltri.vert");
+        let fsh = app_system.require_shader("resources/grid.frag");
+        let bg_vsh = app_system.require_shader("resources/atlas_bg.vert");
+        let bg_fsh = app_system.require_shader("resources/atlas_bg.frag");
+        let sprite_instance_vsh = app_system.require_shader("resources/sprite_instance.vert");
+        let sprite_instance_fsh = app_system.require_shader("resources/sprite_instance.frag");
 
         let render_pipeline_layout = match br::PipelineLayoutObject::new(
-            subsystem,
+            app_system.subsystem,
             &br::PipelineLayoutCreateInfo::new(
                 &[dsl_param.as_transparent_ref()],
                 &[br::PushConstantRange::for_type::<[f32; 2]>(
@@ -395,7 +398,7 @@ impl<'d> EditingAtlasRenderer<'d> {
             }
         };
         let sprite_instance_render_pipeline_layout = match br::PipelineLayoutObject::new(
-            subsystem,
+            app_system.subsystem,
             &br::PipelineLayoutCreateInfo::new(
                 &[
                     dsl_param.as_transparent_ref(),
@@ -417,7 +420,7 @@ impl<'d> EditingAtlasRenderer<'d> {
             render_pipeline,
             bg_render_pipeline,
             sprite_instance_render_pipeline,
-        ] = subsystem
+        ] = app_system
             .create_graphics_pipelines_array(&[
                 br::GraphicsPipelineCreateInfo::new(
                     &render_pipeline_layout,
@@ -498,11 +501,11 @@ impl<'d> EditingAtlasRenderer<'d> {
             .unwrap();
 
         let loaded_sprite_source_atlas =
-            LoadedSpriteSourceAtlas::new(subsystem, br::vk::VK_FORMAT_R8G8B8A8_UNORM);
-        let sprite_instance_buffers = SpriteInstanceBuffers::new(subsystem);
+            LoadedSpriteSourceAtlas::new(app_system.subsystem, br::vk::VK_FORMAT_R8G8B8A8_UNORM);
+        let sprite_instance_buffers = SpriteInstanceBuffers::new(app_system.subsystem);
 
         let mut dp = match br::DescriptorPoolObject::new(
-            subsystem,
+            app_system.subsystem,
             &br::DescriptorPoolCreateInfo::new(
                 2,
                 &[
@@ -527,7 +530,7 @@ impl<'d> EditingAtlasRenderer<'d> {
                 std::process::abort();
             }
         };
-        subsystem.update_descriptor_sets(
+        app_system.subsystem.update_descriptor_sets(
             &[
                 ds_param
                     .binding_at(0)

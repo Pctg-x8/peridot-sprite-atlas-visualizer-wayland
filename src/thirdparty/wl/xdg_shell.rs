@@ -79,6 +79,35 @@ impl XdgWmBase {
         self.0
             .marshal_array_flags_void(3, 0, &mut [ffi::Argument { u: token }])
     }
+
+    pub fn add_listener<'l, L: XdgWmBaseEventListener + 'l>(
+        &'l mut self,
+        listener: &'l mut L,
+    ) -> Result<(), ()> {
+        extern "C" fn ping<L: XdgWmBaseEventListener>(
+            data: *mut core::ffi::c_void,
+            wm_base: *mut ffi::Proxy,
+            serial: u32,
+        ) {
+            let listener = unsafe { &mut *(data as *mut L) };
+
+            listener.ping(unsafe { core::mem::transmute(&mut *wm_base) }, serial)
+        }
+        #[repr(C)]
+        struct FunctionPointer {
+            ping: extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy, u32),
+        }
+        let fp: &'static FunctionPointer = &FunctionPointer { ping: ping::<L> };
+
+        unsafe {
+            self.0
+                .add_listener(fp as *const _ as _, listener as *mut _ as _)
+        }
+    }
+}
+
+pub trait XdgWmBaseEventListener {
+    fn ping(&mut self, wm_base: &mut XdgWmBase, serial: u32);
 }
 
 static XDG_POSITIONER_INTERFACE: ffi::Interface = interface(

@@ -24,6 +24,11 @@ struct WaylandShellEventHandler<'a> {
     pointer_on_surface: PointerOnSurface,
     main_surface_proxy_ptr: *mut wl::Surface,
 }
+impl wl::XdgWmBaseEventListener for WaylandShellEventHandler<'_> {
+    fn ping(&mut self, wm_base: &mut wl::XdgWmBase, serial: u32) {
+        wm_base.pong(serial);
+    }
+}
 impl wl::XdgSurfaceEventListener for WaylandShellEventHandler<'_> {
     fn configure(&mut self, _: &mut wl::XdgSurface, serial: u32) {
         self.app_event_bus
@@ -440,6 +445,9 @@ impl<'a> AppShell<'a> {
         }
         if let Err(e) = xdg_toplevel.add_listener(&mut *shell_event_handler) {
             tracing::warn!(target = "xdg_toplevel", reason = ?e, "Failed to set listener");
+        }
+        if let Err(e) = xdg_wm_base.add_listener(&mut *shell_event_handler) {
+            tracing::warn!(target = "xdg_wm_base", reason = ?e, "Failed to set listener");
         }
         if let Err(e) = wl_surface.add_listener(&mut *shell_event_handler) {
             tracing::warn!(target = "wl_surface", reason = ?e, "Failed to set listener");

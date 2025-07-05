@@ -49,7 +49,7 @@ impl ZxdgExporterV2 {
     /// Only `xdg_toplevel` equivalent surfaces may be exported, otherwise an `invalid_surface` protocol error is sent.
     #[inline]
     pub fn export_toplevel(
-        &mut self,
+        &self,
         surface: &mut super::Surface,
     ) -> Result<Owned<ZxdgExportedV2>, std::io::Error> {
         Ok(unsafe {

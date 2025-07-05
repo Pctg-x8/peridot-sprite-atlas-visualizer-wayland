@@ -41,7 +41,7 @@ unsafe impl Interface for XdgWmBase {
 }
 impl XdgWmBase {
     #[inline]
-    pub fn create_positioner(&mut self) -> Result<Owned<XdgPositioner>, std::io::Error> {
+    pub fn create_positioner(&self) -> Result<Owned<XdgPositioner>, std::io::Error> {
         let proxy_ptr = self.0.marshal_array_flags(
             1,
             XdgPositioner::def(),
@@ -55,8 +55,8 @@ impl XdgWmBase {
 
     #[inline]
     pub fn get_xdg_surface(
-        &mut self,
-        surface: &mut super::Surface,
+        &self,
+        surface: &super::Surface,
     ) -> Result<Owned<XdgSurface>, std::io::Error> {
         let proxy_ptr = self.0.marshal_array_flags(
             2,
@@ -66,7 +66,7 @@ impl XdgWmBase {
             &mut [
                 NEWID_ARG,
                 ffi::Argument {
-                    o: &mut surface.0 as *mut _ as _,
+                    o: surface.0.0.get() as _,
                 },
             ],
         )?;
@@ -214,7 +214,7 @@ impl XdgSurface {
         }
     }
     #[inline]
-    pub fn get_toplevel(&mut self) -> Result<Owned<XdgToplevel>, std::io::Error> {
+    pub fn get_toplevel(&self) -> Result<Owned<XdgToplevel>, std::io::Error> {
         let proxy_ptr = self.0.marshal_array_flags(
             1,
             XdgToplevel::def(),
@@ -228,7 +228,7 @@ impl XdgSurface {
 
     #[inline]
     pub fn set_window_geometry(
-        &mut self,
+        &self,
         x: i32,
         y: i32,
         width: i32,
@@ -247,7 +247,7 @@ impl XdgSurface {
     }
 
     #[inline]
-    pub fn ack_configure(&mut self, serial: u32) -> Result<(), std::io::Error> {
+    pub fn ack_configure(&self, serial: u32) -> Result<(), std::io::Error> {
         self.0
             .marshal_array_flags_void(4, 0, &mut [ffi::Argument { u: serial }])
     }
@@ -430,13 +430,13 @@ impl XdgToplevel {
     }
 
     #[inline]
-    pub fn set_title(&mut self, title: &core::ffi::CStr) -> Result<(), std::io::Error> {
+    pub fn set_title(&self, title: &core::ffi::CStr) -> Result<(), std::io::Error> {
         self.0
             .marshal_array_flags_void(2, 0, &mut [ffi::Argument { s: title.as_ptr() }])
     }
 
     #[inline]
-    pub fn set_app_id(&mut self, id: &core::ffi::CStr) -> Result<(), std::io::Error> {
+    pub fn set_app_id(&self, id: &core::ffi::CStr) -> Result<(), std::io::Error> {
         self.0
             .marshal_array_flags_void(3, 0, &mut [ffi::Argument { s: id.as_ptr() }])
     }

@@ -1,4 +1,7 @@
-use std::os::fd::{AsRawFd, RawFd};
+use std::{
+    cell::{Cell, UnsafeCell},
+    os::fd::{AsRawFd, RawFd},
+};
 
 use bedrock::{self as br, SurfaceCreateInfo};
 
@@ -195,13 +198,13 @@ impl wl::CallbackEventListener for WaylandShellEventHandler<'_> {
 }
 
 pub struct AppShell<'a> {
-    shell_event_handler: Box<WaylandShellEventHandler<'a>>,
+    shell_event_handler: Box<UnsafeCell<WaylandShellEventHandler<'a>>>,
     display: wl::Display,
     surface: core::ptr::NonNull<wl::Surface>,
     xdg_surface: core::ptr::NonNull<wl::XdgSurface>,
     zxdg_exporter_v2: Option<core::ptr::NonNull<wl::ZxdgExporterV2>>,
     cursor_shape_device: core::ptr::NonNull<wl::WpCursorShapeDeviceV1>,
-    frame_callback: core::ptr::NonNull<wl::Callback>,
+    frame_callback: Cell<core::ptr::NonNull<wl::Callback>>,
 }
 impl<'a> AppShell<'a> {
     #[tracing::instrument(skip(events))]
@@ -296,13 +299,7 @@ impl<'a> AppShell<'a> {
         }
         drop(registry);
 
-        let (
-            mut compositor,
-            mut xdg_wm_base,
-            mut seat,
-            mut cursor_shape_manager,
-            mut zxdg_exporter_v2,
-        );
+        let (compositor, mut xdg_wm_base, mut seat, cursor_shape_manager, zxdg_exporter_v2);
         match rl {
             RegistryListener {
                 compositor: Some(compositor1),
@@ -426,31 +423,31 @@ impl<'a> AppShell<'a> {
             }
         };
 
-        let mut shell_event_handler = Box::new(WaylandShellEventHandler {
+        let mut shell_event_handler = Box::new(UnsafeCell::new(WaylandShellEventHandler {
             app_event_bus: events,
             // 現時点ではわからないので適当な値を設定
             cached_client_size: (640, 480),
             ui_scale_factor: 2.0,
             pointer_on_surface: PointerOnSurface::None,
             main_surface_proxy_ptr: wl_surface.as_raw() as _,
-        });
+        }));
 
-        if let Err(e) = pointer.add_listener(&mut *shell_event_handler) {
+        if let Err(e) = pointer.add_listener(shell_event_handler.get_mut()) {
             tracing::warn!(target = "pointer", reason = ?e, "Failed to set listener");
         }
-        if let Err(e) = xdg_surface.add_listener(&mut *shell_event_handler) {
+        if let Err(e) = xdg_surface.add_listener(shell_event_handler.get_mut()) {
             tracing::warn!(target = "xdg_surface", reason = ?e, "Failed to set listener");
         }
-        if let Err(e) = xdg_toplevel.add_listener(&mut *shell_event_handler) {
+        if let Err(e) = xdg_toplevel.add_listener(shell_event_handler.get_mut()) {
             tracing::warn!(target = "xdg_toplevel", reason = ?e, "Failed to set listener");
         }
-        if let Err(e) = xdg_wm_base.add_listener(&mut *shell_event_handler) {
+        if let Err(e) = xdg_wm_base.add_listener(shell_event_handler.get_mut()) {
             tracing::warn!(target = "xdg_wm_base", reason = ?e, "Failed to set listener");
         }
-        if let Err(e) = wl_surface.add_listener(&mut *shell_event_handler) {
+        if let Err(e) = wl_surface.add_listener(shell_event_handler.get_mut()) {
             tracing::warn!(target = "wl_surface", reason = ?e, "Failed to set listener");
         }
-        if let Err(e) = frame.add_listener(&mut *shell_event_handler) {
+        if let Err(e) = frame.add_listener(shell_event_handler.get_mut()) {
             tracing::warn!(target = "frame", reason = ?e, "Failed to set listener");
         }
 
@@ -471,7 +468,7 @@ impl<'a> AppShell<'a> {
             surface: wl_surface.unwrap(),
             xdg_surface: xdg_surface.unwrap(),
             cursor_shape_device: cursor_shape_device.unwrap(),
-            frame_callback: frame.unwrap(),
+            frame_callback: Cell::new(frame.unwrap()),
             zxdg_exporter_v2: zxdg_exporter_v2.map(|x| x.unwrap()),
         }
     }
@@ -495,30 +492,21 @@ impl<'a> AppShell<'a> {
     }
 
     pub fn client_size(&self) -> (f32, f32) {
-        let ui_scale_factor = self.shell_event_handler.ui_scale_factor;
+        let ui_scale_factor = unsafe { (*self.shell_event_handler.get()).ui_scale_factor };
+        let (w, h) = unsafe { (*self.shell_event_handler.get()).cached_client_size };
 
-        (
-            self.shell_event_handler.cached_client_size.0 as f32 / ui_scale_factor,
-            self.shell_event_handler.cached_client_size.1 as f32 / ui_scale_factor,
-        )
+        (w as f32 / ui_scale_factor, h as f32 / ui_scale_factor)
     }
 
     #[tracing::instrument(skip(self))]
-    pub fn flush(&mut self) {
+    pub fn flush(&self) {
         if let Err(e) = self.display.flush() {
             tracing::warn!(reason = ?e, "Failed to flush display events");
         }
     }
 
     #[tracing::instrument(skip(self))]
-    pub fn process_pending_events(&mut self) {
-        if let Err(e) = self.display.dispatch() {
-            tracing::warn!(reason = ?e, "Failed to dispatch display events");
-        }
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn prepare_read_events(&mut self) -> std::io::Result<()> {
+    pub fn prepare_read_events(&self) -> std::io::Result<()> {
         loop {
             match self.display.prepare_read() {
                 Ok(_) => break,
@@ -548,12 +536,12 @@ impl<'a> AppShell<'a> {
         self.display.as_raw_fd()
     }
 
-    pub fn cancel_read_events(&mut self) {
+    pub fn cancel_read_events(&self) {
         self.display.cancel_read();
     }
 
     #[tracing::instrument(skip(self))]
-    pub fn read_and_process_events(&mut self) -> std::io::Result<()> {
+    pub fn read_and_process_events(&self) -> std::io::Result<()> {
         if let Err(e) = self.display.read_events() {
             tracing::error!(reason = ?e, "Failed to read events");
             return Err(e);
@@ -567,26 +555,27 @@ impl<'a> AppShell<'a> {
     }
 
     #[tracing::instrument(skip(self))]
-    pub fn request_next_frame(&mut self) {
-        self.frame_callback = match unsafe { self.surface.as_mut() }.frame() {
-            Ok(cb) => cb.unwrap(),
+    pub fn request_next_frame(&self) {
+        let mut next_callback = match unsafe { self.surface.as_ref() }.frame() {
+            Ok(cb) => cb,
             Err(e) => {
                 tracing::warn!(reason = ?e, "Failed to request next frame");
                 return;
             }
         };
-        if let Err(e) =
-            unsafe { self.frame_callback.as_mut() }.add_listener(&mut *self.shell_event_handler)
+        if let Err(e) = next_callback.add_listener(unsafe { &mut *self.shell_event_handler.get() })
         {
             tracing::warn!(target = "frame_callback", reason = ?e, "Failed to set listener");
         }
+
+        self.frame_callback.set(next_callback.unwrap());
     }
 
     #[tracing::instrument(skip(self))]
-    pub fn post_configure(&mut self, serial: u32) {
+    pub fn post_configure(&self, serial: u32) {
         tracing::trace!("ToplevelWindowSurfaceConfigure");
 
-        if let Err(e) = unsafe { self.xdg_surface.as_mut() }.ack_configure(serial) {
+        if let Err(e) = unsafe { self.xdg_surface.as_ref() }.ack_configure(serial) {
             tracing::warn!(reason = ?e, "Failed to ack configure");
         }
     }
@@ -600,8 +589,8 @@ impl<'a> AppShell<'a> {
     }
 
     #[tracing::instrument(skip(self))]
-    pub fn set_cursor_shape(&mut self, enter_serial: u32, shape: CursorShape) {
-        if let Err(e) = unsafe { self.cursor_shape_device.as_mut() }.set_shape(
+    pub fn set_cursor_shape(&self, enter_serial: u32, shape: CursorShape) {
+        if let Err(e) = unsafe { self.cursor_shape_device.as_ref() }.set_shape(
             enter_serial,
             match shape {
                 CursorShape::Default => WpCursorShapeDeviceV1Shape::Default,
@@ -614,6 +603,6 @@ impl<'a> AppShell<'a> {
 
     #[inline]
     pub fn ui_scale_factor(&self) -> f32 {
-        self.shell_event_handler.ui_scale_factor
+        unsafe { (*self.shell_event_handler.get()).ui_scale_factor }
     }
 }

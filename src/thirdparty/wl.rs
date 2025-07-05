@@ -2,7 +2,7 @@ use core::{
     ops::{Deref, DerefMut},
     ptr::NonNull,
 };
-use std::os::fd::AsRawFd;
+use std::{cell::UnsafeCell, os::fd::AsRawFd};
 
 mod cursor_shape;
 mod ffi;
@@ -40,18 +40,19 @@ impl DerefMut for OwnedProxy {
 }
 
 #[repr(transparent)]
-pub struct Proxy(ffi::Proxy);
+pub struct Proxy(UnsafeCell<ffi::Proxy>);
 impl Proxy {
     pub const unsafe fn from_raw_ptr_unchecked<'a>(ptr: *mut ffi::Proxy) -> &'a mut Self {
         unsafe { Self::from_raw_ref_mut(&mut *ptr) }
     }
 
     pub const unsafe fn from_raw_ref<'a>(r: &'a ffi::Proxy) -> &'a Self {
-        unsafe { core::mem::transmute(r) }
+        unimplemented!()
+        // unsafe { core::mem::transmute(r) }
     }
 
     pub const unsafe fn from_raw_ref_mut<'a>(r: &'a mut ffi::Proxy) -> &'a mut Self {
-        unsafe { core::mem::transmute(r) }
+        unsafe { core::mem::transmute(UnsafeCell::from_mut(r)) }
     }
 
     #[inline(always)]
@@ -66,14 +67,14 @@ impl Proxy {
         user_data: *mut core::ffi::c_void,
     ) -> Result<(), ()> {
         let r =
-            unsafe { ffi::wl_proxy_add_listener(self as *mut _ as _, function_table, user_data) };
+            unsafe { ffi::wl_proxy_add_listener(self.0.get_mut() as _, function_table, user_data) };
 
         if r == 0 { Ok(()) } else { Err(()) }
     }
 
     #[inline]
     fn marshal_array_flags(
-        &mut self,
+        &self,
         opcode: u32,
         interface: &ffi::Interface,
         version: u32,
@@ -82,7 +83,7 @@ impl Proxy {
     ) -> Result<NonNull<Proxy>, std::io::Error> {
         unsafe {
             NonNull::new(ffi::wl_proxy_marshal_array_flags(
-                self as *mut _ as _,
+                self.0.get(),
                 opcode,
                 interface as *const _,
                 version,
@@ -96,14 +97,14 @@ impl Proxy {
 
     #[inline]
     fn marshal_array_flags_void(
-        &mut self,
+        &self,
         opcode: u32,
         flags: u32,
         args: &mut [ffi::Argument],
     ) -> Result<(), std::io::Error> {
         unsafe {
             ffi::wl_proxy_marshal_array_flags(
-                self as *mut _ as _,
+                self.0.get(),
                 opcode,
                 core::ptr::null(),
                 self.version(),
@@ -116,8 +117,7 @@ impl Proxy {
             )
         };
 
-        let e =
-            unsafe { ffi::wl_display_get_error(ffi::wl_proxy_get_display(self as *mut _ as _)) };
+        let e = unsafe { ffi::wl_display_get_error(ffi::wl_proxy_get_display(self.0.get())) };
         if e != 0 {
             Err(std::io::Error::from_raw_os_error(e))
         } else {
@@ -205,9 +205,9 @@ impl Display {
     }
 
     #[inline]
-    pub fn get_registry(&mut self) -> Result<Owned<Registry>, std::io::Error> {
+    pub fn get_registry(&self) -> Result<Owned<Registry>, std::io::Error> {
         let proxy_ptr = unsafe {
-            Proxy::from_raw_ref_mut(core::mem::transmute(self.ffi.as_mut())).marshal_array_flags(
+            Proxy::from_raw_ptr_unchecked(self.ffi.as_ptr() as _).marshal_array_flags(
                 1,
                 Registry::def(),
                 ffi::wl_proxy_get_version(self.ffi.as_ptr() as _),
@@ -220,21 +220,21 @@ impl Display {
     }
 
     #[inline]
-    pub fn roundtrip(&mut self) -> Result<u32, ()> {
+    pub fn roundtrip(&self) -> Result<u32, ()> {
         let r = unsafe { ffi::wl_display_roundtrip(self.ffi.as_ptr()) };
 
         if r < 0 { Err(()) } else { Ok(r as _) }
     }
 
     #[inline]
-    pub fn error(&mut self) -> Option<core::ffi::c_int> {
+    pub fn error(&self) -> Option<core::ffi::c_int> {
         let r = unsafe { ffi::wl_display_get_error(self.ffi.as_ptr()) };
 
         if r == 0 { None } else { Some(r) }
     }
 
     #[inline]
-    pub fn flush(&mut self) -> Result<core::ffi::c_int, std::io::Error> {
+    pub fn flush(&self) -> Result<core::ffi::c_int, std::io::Error> {
         let r = unsafe { ffi::wl_display_flush(self.ffi.as_ptr()) };
 
         if r == -1 {
@@ -245,18 +245,7 @@ impl Display {
     }
 
     #[inline]
-    pub fn dispatch(&mut self) -> Result<core::ffi::c_int, std::io::Error> {
-        let r = unsafe { ffi::wl_display_dispatch(self.ffi.as_ptr()) };
-
-        if r == -1 {
-            Err(std::io::Error::last_os_error())
-        } else {
-            Ok(r)
-        }
-    }
-
-    #[inline]
-    pub fn dispatch_pending(&mut self) -> std::io::Result<core::ffi::c_int> {
+    pub fn dispatch_pending(&self) -> std::io::Result<core::ffi::c_int> {
         match unsafe { ffi::wl_display_dispatch_pending(self.ffi.as_ptr()) } {
             -1 => Err(std::io::Error::last_os_error()),
             r => Ok(r),
@@ -264,7 +253,7 @@ impl Display {
     }
 
     #[inline]
-    pub fn prepare_read(&mut self) -> std::io::Result<()> {
+    pub fn prepare_read(&self) -> std::io::Result<()> {
         match unsafe { ffi::wl_display_prepare_read(self.ffi.as_ptr()) } {
             -1 => Err(std::io::Error::last_os_error()),
             _ => Ok(()),
@@ -272,12 +261,12 @@ impl Display {
     }
 
     #[inline]
-    pub fn cancel_read(&mut self) {
+    pub fn cancel_read(&self) {
         unsafe { ffi::wl_display_cancel_read(self.ffi.as_ptr()) }
     }
 
     #[inline]
-    pub fn read_events(&mut self) -> std::io::Result<()> {
+    pub fn read_events(&self) -> std::io::Result<()> {
         match unsafe { ffi::wl_display_read_events(self.ffi.as_ptr()) } {
             -1 => Err(std::io::Error::last_os_error()),
             _ => Ok(()),
@@ -348,11 +337,7 @@ impl Registry {
         }
     }
 
-    pub fn bind<I: Interface>(
-        &mut self,
-        name: u32,
-        version: u32,
-    ) -> Result<Owned<I>, std::io::Error> {
+    pub fn bind<I: Interface>(&self, name: u32, version: u32) -> Result<Owned<I>, std::io::Error> {
         let proxy_ptr = self.0.marshal_array_flags(
             0,
             I::def(),
@@ -432,7 +417,7 @@ unsafe impl Interface for Compositor {
 }
 impl Compositor {
     #[inline]
-    pub fn create_surface(&mut self) -> Result<Owned<Surface>, std::io::Error> {
+    pub fn create_surface(&self) -> Result<Owned<Surface>, std::io::Error> {
         let proxy_ptr =
             self.0
                 .marshal_array_flags(0, Surface::def(), self.0.version(), 0, &mut [NEWID_ARG])?;
@@ -454,7 +439,7 @@ impl Surface {
     }
 
     #[inline]
-    pub fn frame(&mut self) -> Result<Owned<Callback>, std::io::Error> {
+    pub fn frame(&self) -> Result<Owned<Callback>, std::io::Error> {
         let proxy_ptr = self.0.marshal_array_flags(
             3,
             Callback::def(),
@@ -467,12 +452,12 @@ impl Surface {
     }
 
     #[inline]
-    pub fn commit(&mut self) -> Result<(), std::io::Error> {
+    pub fn commit(&self) -> Result<(), std::io::Error> {
         self.0.marshal_array_flags_void(6, 0, &mut [])
     }
 
     #[inline]
-    pub fn set_buffer_scale(&mut self, scale: i32) -> Result<(), std::io::Error> {
+    pub fn set_buffer_scale(&self, scale: i32) -> Result<(), std::io::Error> {
         self.0
             .marshal_array_flags_void(8, 0, &mut [ffi::Argument { i: scale }])
     }
@@ -577,7 +562,7 @@ unsafe impl Interface for Seat {
 }
 impl Seat {
     #[inline]
-    pub fn get_pointer(&mut self) -> Result<Owned<Pointer>, std::io::Error> {
+    pub fn get_pointer(&self) -> Result<Owned<Pointer>, std::io::Error> {
         let proxy_ptr =
             self.0
                 .marshal_array_flags(0, Pointer::def(), self.0.version(), 0, &mut [NEWID_ARG])?;
@@ -587,7 +572,7 @@ impl Seat {
 
     // v5
     #[inline]
-    pub unsafe fn destroy(&mut self) -> Result<(), std::io::Error> {
+    pub unsafe fn destroy(&self) -> Result<(), std::io::Error> {
         self.0.marshal_array_flags_void(3, 0, &mut [])
     }
 

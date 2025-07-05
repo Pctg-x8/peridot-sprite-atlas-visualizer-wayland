@@ -46,7 +46,7 @@ unsafe impl Interface for WpCursorShapeManagerV1 {
 }
 impl WpCursorShapeManagerV1 {
     pub fn get_pointer(
-        &mut self,
+        &self,
         pointer: &mut super::Pointer,
     ) -> Result<Owned<WpCursorShapeDeviceV1>, std::io::Error> {
         let proxy_ptr = self.0.marshal_array_flags(
@@ -107,7 +107,7 @@ unsafe impl Interface for WpCursorShapeDeviceV1 {
 impl WpCursorShapeDeviceV1 {
     #[inline]
     pub fn set_shape(
-        &mut self,
+        &self,
         serial: u32,
         shape: WpCursorShapeDeviceV1Shape,
     ) -> Result<(), std::io::Error> {

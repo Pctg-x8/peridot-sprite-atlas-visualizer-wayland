@@ -1,9 +1,10 @@
 use std::rc::Rc;
 
-use bedrock::{self as br, CommandBufferMut};
+use bedrock as br;
 
 use crate::{
-    AppEvent, AppSystem, AppUpdateContext, PresenterInitContext, ViewInitContext,
+    AppEvent, AppUpdateContext, PresenterInitContext, ViewInitContext,
+    base_system::AppBaseSystem,
     composite::{
         AnimatableColor, AnimatableFloat, CompositeMode, CompositeRect, CompositeTree,
         CompositeTreeRef,
@@ -26,84 +27,66 @@ impl ContentView {
 
     #[tracing::instrument(name = "ContentView::new", skip(init))]
     pub fn new(init: &mut ViewInitContext, content: &str) -> Self {
-        let text_layout = TextLayout::build_simple(content, &mut init.app_system.fonts.ui_default);
+        let text_layout = TextLayout::build_simple(content, &mut init.base_system.fonts.ui_default);
         let text_atlas_rect = init
-            .app_system
+            .base_system
             .alloc_mask_atlas_rect(text_layout.width_px(), text_layout.height_px());
         let text_image_pixels =
             text_layout.build_stg_image_pixel_buffer(init.staging_scratch_buffer);
 
-        let mut cp = init
-            .app_system
-            .create_transient_graphics_command_pool()
-            .unwrap();
-        let [mut cb] = br::CommandBufferObject::alloc_array(
-            &init.app_system.subsystem,
-            &br::CommandBufferFixedCountAllocateInfo::new(&mut cp, br::CommandBufferLevel::Primary),
-        )
-        .unwrap();
-        unsafe {
-            cb.begin(
-                &br::CommandBufferBeginInfo::new().onetime_submit(),
-                init.app_system,
-            )
-            .unwrap()
-        }
-        .pipeline_barrier_2(&br::DependencyInfo::new(
-            &[],
-            &[],
-            &[init
-                .app_system
-                .barrier_for_mask_atlas_resource()
-                .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
-        ))
-        .inject(|r| {
-            let (b, o) = init.staging_scratch_buffer.of(&text_image_pixels);
+        init.base_system
+            .sync_execute_graphics_commands(|rec| {
+                rec.pipeline_barrier_2(&br::DependencyInfo::new(
+                    &[],
+                    &[],
+                    &[init
+                        .base_system
+                        .barrier_for_mask_atlas_resource()
+                        .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
+                ))
+                .inject(|r| {
+                    let (b, o) = init.staging_scratch_buffer.of(&text_image_pixels);
 
-            r.copy_buffer_to_image(
-                b,
-                &init.app_system.mask_atlas_image_transparent_ref(),
-                br::ImageLayout::TransferDestOpt,
-                &[br::vk::VkBufferImageCopy {
-                    bufferOffset: o,
-                    bufferRowLength: text_layout.width_px(),
-                    bufferImageHeight: text_layout.height_px(),
-                    imageSubresource: br::ImageSubresourceLayers::new(
-                        br::AspectMask::COLOR,
-                        0,
-                        0..1,
-                    ),
-                    imageOffset: text_atlas_rect.lt_offset().with_z(0),
-                    imageExtent: text_atlas_rect.extent().with_depth(1),
-                }],
-            )
-        })
-        .pipeline_barrier_2(&br::DependencyInfo::new(
-            &[],
-            &[],
-            &[init
-                .app_system
-                .barrier_for_mask_atlas_resource()
-                .transit_from(
-                    br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt),
-                )
-                .from(
-                    br::PipelineStageFlags2::COPY,
-                    br::AccessFlags2::TRANSFER.write,
-                )
-                .to(
-                    br::PipelineStageFlags2::FRAGMENT_SHADER,
-                    br::AccessFlags2::SHADER.read,
-                )],
-        ))
-        .end()
-        .unwrap();
-        init.app_system
-            .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&cb)])
+                    r.copy_buffer_to_image(
+                        b,
+                        &init.base_system.mask_atlas_image_transparent_ref(),
+                        br::ImageLayout::TransferDestOpt,
+                        &[br::vk::VkBufferImageCopy {
+                            bufferOffset: o,
+                            bufferRowLength: text_layout.width_px(),
+                            bufferImageHeight: text_layout.height_px(),
+                            imageSubresource: br::ImageSubresourceLayers::new(
+                                br::AspectMask::COLOR,
+                                0,
+                                0..1,
+                            ),
+                            imageOffset: text_atlas_rect.lt_offset().with_z(0),
+                            imageExtent: text_atlas_rect.extent().with_depth(1),
+                        }],
+                    )
+                })
+                .pipeline_barrier_2(&br::DependencyInfo::new(
+                    &[],
+                    &[],
+                    &[init
+                        .base_system
+                        .barrier_for_mask_atlas_resource()
+                        .transit_from(
+                            br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt),
+                        )
+                        .from(
+                            br::PipelineStageFlags2::COPY,
+                            br::AccessFlags2::TRANSFER.write,
+                        )
+                        .to(
+                            br::PipelineStageFlags2::FRAGMENT_SHADER,
+                            br::AccessFlags2::SHADER.read,
+                        )],
+                ))
+            })
             .unwrap();
-        drop(cp);
 
-        let ct_root = init.app_system.register_composite_rect(CompositeRect {
+        let ct_root = init.base_system.register_composite_rect(CompositeRect {
             size: [
                 AnimatableFloat::Value(text_layout.width()),
                 AnimatableFloat::Value(text_layout.height()),
@@ -276,24 +259,24 @@ impl Presenter {
         let mask_view = popup::MaskView::new(&mut init.for_view);
 
         frame_view.mount(
-            init.for_view.app_system,
+            init.for_view.base_system,
             mask_view.ct_root(),
             mask_view.ht_root(),
         );
         content_view.mount(
             frame_view.ct_root(),
-            &mut init.for_view.app_system.composite_tree,
+            &mut init.for_view.base_system.composite_tree,
         );
         confirm_button.mount(
-            init.for_view.app_system,
+            init.for_view.base_system,
             frame_view.ct_root(),
             frame_view.ht_root(),
         );
 
         {
             let confirm_button_ct =
-                confirm_button.ct_mut(&mut init.for_view.app_system.composite_tree);
-            let confirm_button_ht = confirm_button.ht_mut(&mut init.for_view.app_system.hit_tree);
+                confirm_button.ct_mut(&mut init.for_view.base_system.composite_tree);
+            let confirm_button_ht = confirm_button.ht_mut(&mut init.for_view.base_system.hit_tree);
 
             confirm_button_ct.relative_offset_adjustment = [0.5, 0.0];
             confirm_button_ct.offset = [
@@ -317,20 +300,20 @@ impl Presenter {
         });
         action_handler
             .mask_view
-            .bind_action_handler(&action_handler, &mut init.for_view.app_system.hit_tree);
+            .bind_action_handler(&action_handler, &mut init.for_view.base_system.hit_tree);
         action_handler
             .frame_view
-            .bind_action_handler(&action_handler, &mut init.for_view.app_system.hit_tree);
+            .bind_action_handler(&action_handler, &mut init.for_view.base_system.hit_tree);
         action_handler
             .confirm_button
-            .bind_action_handler(&action_handler, &mut init.for_view.app_system.hit_tree);
+            .bind_action_handler(&action_handler, &mut init.for_view.base_system.hit_tree);
 
         Self { action_handler }
     }
 
     pub fn show(
         &self,
-        app_system: &mut AppSystem,
+        app_system: &mut AppBaseSystem,
         ct_parent: CompositeTreeRef,
         ht_parent: HitTestTreeRef,
         current_sec: f32,
@@ -346,7 +329,7 @@ impl Presenter {
             .show(&mut app_system.composite_tree, current_sec);
     }
 
-    pub fn hide(&self, app_system: &mut AppSystem, current_sec: f32) {
+    pub fn hide(&self, app_system: &mut AppBaseSystem, current_sec: f32) {
         self.action_handler
             .mask_view
             .unmount_ht(&mut app_system.hit_tree);

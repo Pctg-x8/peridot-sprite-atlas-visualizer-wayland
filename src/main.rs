@@ -1,4 +1,5 @@
 mod app_state;
+mod base_system;
 mod bg_worker;
 mod composite;
 mod coordinate;
@@ -23,12 +24,12 @@ use std::os::fd::AsRawFd;
 use std::{
     cell::{Cell, RefCell, UnsafeCell},
     collections::{BTreeSet, HashMap, VecDeque},
-    path::Path,
     rc::Rc,
     sync::Arc,
 };
 
 use app_state::{AppState, SpriteInfo};
+use base_system::AppBaseSystem;
 use bedrock::{
     self as br, CommandBufferMut, CommandPoolMut, DescriptorPoolMut, Device, DeviceMemoryMut,
     Fence, FenceMut, ImageChild, InstanceChild, MemoryBound, PhysicalDevice, RenderPass,
@@ -37,9 +38,8 @@ use bedrock::{
 use bg_worker::{BackgroundWorker, BackgroundWorkerViewFeedback};
 use composite::{
     AnimatableColor, AnimatableFloat, AnimationData, AtlasRect, CompositeInstanceData,
-    CompositeInstanceManager, CompositeMode, CompositeRect, CompositeRenderingData,
-    CompositeRenderingInstruction, CompositeStreamingData, CompositeTree,
-    CompositeTreeFloatParameterRef, CompositeTreeRef, CompositionSurfaceAtlas,
+    CompositeMode, CompositeRect, CompositeRenderingData, CompositeRenderingInstruction,
+    CompositeStreamingData, CompositeTree, CompositeTreeFloatParameterRef, CompositeTreeRef,
     RenderPassAfterOperation, RenderPassRequirements,
 };
 use coordinate::SizePixels;
@@ -51,18 +51,11 @@ use input::{EventContinueControl, PointerInputManager};
 use parking_lot::RwLock;
 use subsystem::{StagingScratchBufferManager, Subsystem};
 use text::TextLayout;
-use thirdparty::freetype::{self, FreeType};
 use trigger_cell::TriggerCell;
 
 #[cfg(windows)]
 use crate::shell::AppShell;
-use crate::{
-    composite::{
-        FloatParameter, UnboundedCompositeInstanceManager, UnboundedCompositionSurfaceAtlas,
-    },
-    quadtree::QuadTree,
-    subsystem::SubsystemShaderModuleRef,
-};
+use crate::{composite::FloatParameter, quadtree::QuadTree};
 
 pub enum AppEvent {
     ToplevelWindowConfigure {
@@ -209,298 +202,8 @@ pub trait ViewUpdate {
     fn update(&self, ct: &mut CompositeTree, ht: &mut HitTestTreeManager, current_sec: f32);
 }
 
-pub struct FontSet {
-    pub ui_default: freetype::Owned<freetype::Face>,
-}
-
-pub struct AppSystem<'subsystem> {
-    pub subsystem: &'subsystem Subsystem,
-    pub atlas: UnboundedCompositionSurfaceAtlas,
-    pub composite_tree: CompositeTree,
-    pub composite_instance_manager: UnboundedCompositeInstanceManager,
-    pub hit_tree: HitTestTreeManager<'subsystem>,
-    pub fonts: FontSet,
-    pub ft: FreeType,
-}
-impl Drop for AppSystem<'_> {
-    fn drop(&mut self) {
-        unsafe {
-            self.composite_instance_manager
-                .drop_with_gfx_device(&self.subsystem);
-            self.atlas.drop_with_gfx_device(&self.subsystem);
-        }
-    }
-}
-impl<'subsystem> AppSystem<'subsystem> {
-    fn new(subsystem: &'subsystem Subsystem) -> Self {
-        // initialize font systems
-        #[cfg(unix)]
-        thirdparty::fontconfig::init();
-        let mut ft = FreeType::new().expect("Failed to initialize FreeType");
-        let hinting = unsafe { ft.get_property::<u32>(c"cff", c"hinting-engine").unwrap() };
-        let no_stem_darkening = unsafe {
-            ft.get_property::<freetype2::FT_Bool>(c"cff", c"no-stem-darkening")
-                .unwrap()
-        };
-        tracing::debug!(hinting, no_stem_darkening, "freetype cff properties");
-        unsafe {
-            ft.set_property(c"cff", c"no-stem-darkening", &(true as freetype2::FT_Bool))
-                .unwrap();
-        }
-
-        let (primary_face_path, primary_face_index);
-        #[cfg(unix)]
-        {
-            let mut fc_pat = thirdparty::fontconfig::Pattern::new();
-            fc_pat.add_family_name(c"system-ui");
-            fc_pat.add_weight(80);
-            thirdparty::fontconfig::Config::current()
-                .unwrap()
-                .substitute(&mut fc_pat, thirdparty::fontconfig::MatchKind::Pattern);
-            fc_pat.default_substitute();
-            let fc_set = thirdparty::fontconfig::Config::current()
-                .unwrap()
-                .sort(&mut fc_pat, true)
-                .unwrap();
-            let mut primary_face_info = None;
-            for &f in fc_set.fonts() {
-                let file_path = f.get_file_path(0).unwrap();
-                let index = f.get_face_index(0).unwrap();
-
-                tracing::debug!(?file_path, index, "match font");
-
-                if primary_face_info.is_none() {
-                    primary_face_info = Some((file_path.to_owned(), index));
-                }
-            }
-            let Some((path, index)) = primary_face_info else {
-                tracing::error!("No UI face found");
-                std::process::exit(1);
-            };
-            primary_face_path = path;
-            primary_face_index = index;
-        }
-        // TODO: mock
-        #[cfg(windows)]
-        {
-            primary_face_path = c"C:\\Windows\\Fonts\\YuGothR.ttc";
-            primary_face_index = 0;
-        }
-
-        let ft_face = match ft.new_face(&primary_face_path, primary_face_index as _) {
-            Ok(x) => x,
-            Err(e) => {
-                tracing::error!(reason = ?e, "Failed to create ft face");
-                std::process::exit(1);
-            }
-        };
-
-        let composite_instance_buffer = CompositeInstanceManager::new(subsystem);
-        let composition_alphamask_surface_atlas = CompositionSurfaceAtlas::new(
-            subsystem,
-            subsystem.adapter_properties.limits.maxImageDimension2D,
-            br::vk::VK_FORMAT_R8_UNORM,
-        );
-
-        Self {
-            atlas: composition_alphamask_surface_atlas.unbound(),
-            composite_tree: CompositeTree::new(),
-            composite_instance_manager: composite_instance_buffer.unbound(),
-            hit_tree: HitTestTreeManager::new(),
-            fonts: FontSet {
-                ui_default: ft_face,
-            },
-            ft,
-            subsystem,
-        }
-    }
-
-    fn rescale_fonts(&mut self, scale: f32) {
-        if let Err(e) =
-            self.fonts
-                .ui_default
-                .set_char_size((10.0 * 64.0) as _, 0, (96.0 * scale) as _, 0)
-        {
-            tracing::warn!(reason = ?e, "Failed to set char size");
-        }
-    }
-
-    pub const fn mask_atlas_format(&self) -> br::Format {
-        self.atlas.format()
-    }
-
-    pub const fn mask_atlas_size(&self) -> u32 {
-        self.atlas.size()
-    }
-
-    pub const fn mask_atlas_resource_transparent_ref(
-        &self,
-    ) -> &br::VkHandleRef<br::vk::VkImageView> {
-        self.atlas.resource_view_transparent_ref()
-    }
-
-    pub const fn mask_atlas_image_transparent_ref(&self) -> &br::VkHandleRef<br::vk::VkImage> {
-        self.atlas.image_transparent_ref()
-    }
-
-    #[inline(always)]
-    pub fn alloc_mask_atlas_rect(
-        &mut self,
-        required_width: u32,
-        required_height: u32,
-    ) -> AtlasRect {
-        self.atlas.alloc(required_width, required_height)
-    }
-
-    #[inline(always)]
-    pub fn barrier_for_mask_atlas_resource(&self) -> br::ImageMemoryBarrier2 {
-        br::ImageMemoryBarrier2::new(
-            self.atlas.image_transparent_ref(),
-            br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
-        )
-    }
-
-    #[inline(always)]
-    pub fn register_composite_rect(&mut self, rect: CompositeRect) -> CompositeTreeRef {
-        self.composite_tree.register(rect)
-    }
-
-    #[inline(always)]
-    pub fn set_composite_tree_parent(&mut self, child: CompositeTreeRef, parent: CompositeTreeRef) {
-        self.composite_tree.add_child(parent, child);
-    }
-
-    #[inline(always)]
-    pub fn create_hit_tree(&mut self, init: HitTestTreeData<'subsystem>) -> HitTestTreeRef {
-        self.hit_tree.create(init)
-    }
-
-    #[inline(always)]
-    pub fn set_hit_tree_parent(&mut self, child: HitTestTreeRef, parent: HitTestTreeRef) {
-        self.hit_tree.add_child(parent, child);
-    }
-
-    #[inline]
-    pub fn set_tree_parent(
-        &mut self,
-        child: (CompositeTreeRef, HitTestTreeRef),
-        parent: (CompositeTreeRef, HitTestTreeRef),
-    ) {
-        self.set_composite_tree_parent(child.0, parent.0);
-        self.set_hit_tree_parent(child.1, parent.1);
-    }
-
-    #[inline(always)]
-    pub fn find_direct_memory_index(&self, index_mask: u32) -> Option<u32> {
-        self.subsystem.find_direct_memory_index(index_mask)
-    }
-
-    #[inline(always)]
-    pub fn find_device_local_memory_index(&self, index_mask: u32) -> Option<u32> {
-        self.subsystem.find_device_local_memory_index(index_mask)
-    }
-
-    #[inline(always)]
-    pub fn find_host_visible_memory_index(&self, index_mask: u32) -> Option<u32> {
-        self.subsystem.find_host_visible_memory_index(index_mask)
-    }
-
-    #[inline(always)]
-    pub fn is_coherent_memory_type(&self, index: u32) -> bool {
-        self.subsystem.is_coherent_memory_type(index)
-    }
-
-    #[inline(always)]
-    pub fn require_shader(&self, path: impl AsRef<Path>) -> SubsystemShaderModuleRef<'subsystem> {
-        self.subsystem.require_shader(path)
-    }
-
-    #[inline(always)]
-    pub fn require_empty_pipeline_layout(
-        &self,
-    ) -> &impl br::VkHandle<Handle = br::vk::VkPipelineLayout> {
-        self.subsystem.require_empty_pipeline_layout()
-    }
-
-    #[inline(always)]
-    pub fn create_graphics_pipelines_array<const N: usize>(
-        &self,
-        create_info_array: &[br::GraphicsPipelineCreateInfo; N],
-    ) -> br::Result<[br::PipelineObject<&'subsystem Subsystem>; N]> {
-        self.subsystem
-            .create_graphics_pipelines_array(create_info_array)
-    }
-
-    #[inline(always)]
-    pub fn create_transient_graphics_command_pool(&self) -> br::Result<impl br::CommandPoolMut> {
-        self.subsystem.create_transient_graphics_command_pool()
-    }
-
-    #[inline(always)]
-    pub fn sync_execute_graphics_commands2(
-        &self,
-        rec: impl for<'e> FnOnce(br::CmdRecord<'e, Subsystem>) -> br::CmdRecord<'e, Subsystem>,
-    ) -> br::Result<()> {
-        let mut cp = self.create_transient_graphics_command_pool()?;
-        let [mut cb] = br::CommandBufferObject::alloc_array(
-            self.subsystem,
-            &br::CommandBufferFixedCountAllocateInfo::new(&mut cp, br::CommandBufferLevel::Primary),
-        )?;
-        rec(unsafe {
-            cb.begin(
-                &br::CommandBufferBeginInfo::new().onetime_submit(),
-                self.subsystem,
-            )?
-        })
-        .end()?;
-
-        self.subsystem
-            .sync_execute_graphics_commands(&[br::CommandBufferSubmitInfo::new(&cb)])
-    }
-
-    #[inline(always)]
-    pub fn sync_execute_graphics_commands(
-        &self,
-        buffers: &[br::CommandBufferSubmitInfo],
-    ) -> br::Result<()> {
-        self.subsystem.sync_execute_graphics_commands(buffers)
-    }
-
-    #[tracing::instrument(skip(self), fields(memory_type_index))]
-    pub fn alloc_device_local_memory(
-        &self,
-        size: br::DeviceSize,
-        memory_type_index_mask: u32,
-    ) -> br::DeviceMemoryObject<&'subsystem Subsystem> {
-        let Some(memindex) = self.find_device_local_memory_index(memory_type_index_mask) else {
-            tracing::error!("no suitable memory");
-            std::process::exit(1);
-        };
-        tracing::Span::current().record("memory_type_index", memindex);
-
-        match br::DeviceMemoryObject::new(
-            self.subsystem,
-            &br::MemoryAllocateInfo::new(size, memindex),
-        ) {
-            Ok(x) => x,
-            Err(e) => {
-                tracing::error!(reason = ?e, "Failed to allocate device local memory");
-                std::process::exit(1);
-            }
-        }
-    }
-
-    #[inline(always)]
-    pub fn alloc_device_local_memory_for_requirements(
-        &self,
-        req: &br::vk::VkMemoryRequirements,
-    ) -> br::DeviceMemoryObject<&'subsystem Subsystem> {
-        self.alloc_device_local_memory(req.size, req.memoryTypeBits)
-    }
-}
-
 pub struct ViewInitContext<'r, 'app_system, 'subsystem> {
-    pub app_system: &'app_system mut AppSystem<'subsystem>,
+    pub base_system: &'app_system mut AppBaseSystem<'subsystem>,
     pub staging_scratch_buffer: &'r mut StagingScratchBufferManager<'subsystem>,
     pub ui_scale_factor: f32,
 }
@@ -605,13 +308,13 @@ impl CurrentSelectedSpriteMarkerView {
 
     pub fn new(init: &mut ViewInitContext) -> Self {
         let render_size_px = ((Self::CORNER_RADIUS * 2.0 + 1.0) * init.ui_scale_factor) as u32;
-        let border_image_atlas_rect = init.app_system.atlas.alloc(render_size_px, render_size_px);
+        let border_image_atlas_rect = init.base_system.atlas.alloc(render_size_px, render_size_px);
 
         let render_pass = br::RenderPassObject::new(
-            init.app_system.subsystem,
+            init.base_system.subsystem,
             &br::RenderPassCreateInfo2::new(
                 &[attachment_description_2_full_pixel_render_to_ro_texture(
-                    init.app_system.atlas.format(),
+                    init.base_system.atlas.format(),
                 )],
                 &[const_subpass_description_2_single_color_write_only::<0>()],
                 &[br::SubpassDependency2::new(
@@ -630,29 +333,29 @@ impl CurrentSelectedSpriteMarkerView {
         )
         .unwrap();
         let framebuffer = br::FramebufferObject::new(
-            init.app_system.subsystem,
+            init.base_system.subsystem,
             &br::FramebufferCreateInfo::new(
                 &render_pass,
                 &[init
-                    .app_system
+                    .base_system
                     .mask_atlas_resource_transparent_ref()
                     .as_transparent_ref()],
-                init.app_system.atlas.size(),
-                init.app_system.atlas.size(),
+                init.base_system.atlas.size(),
+                init.base_system.atlas.size(),
             ),
         )
         .unwrap();
 
         let [pipeline] = init
-            .app_system
+            .base_system
             .create_graphics_pipelines_array(&[br::GraphicsPipelineCreateInfo::new(
-                init.app_system.require_empty_pipeline_layout(),
+                init.base_system.require_empty_pipeline_layout(),
                 render_pass.subpass(0),
                 &[
-                    init.app_system
+                    init.base_system
                         .require_shader("resources/filltri.vert")
                         .on_stage(br::ShaderStage::Vertex, c"main"),
-                    init.app_system
+                    init.base_system
                         .require_shader("resources/rounded_rect_border.frag")
                         .on_stage(br::ShaderStage::Fragment, c"main")
                         .with_specialization_info(&br::SpecializationInfo::new(
@@ -673,8 +376,8 @@ impl CurrentSelectedSpriteMarkerView {
             .multisample_state(MS_STATE_EMPTY)])
             .unwrap();
 
-        init.app_system
-            .sync_execute_graphics_commands2(|rec| {
+        init.base_system
+            .sync_execute_graphics_commands(|rec| {
                 rec.begin_render_pass2(
                     &br::RenderPassBeginInfo::new(
                         &render_pass,
@@ -692,27 +395,27 @@ impl CurrentSelectedSpriteMarkerView {
         drop((pipeline, framebuffer, render_pass));
 
         let global_x_param = init
-            .app_system
+            .base_system
             .composite_tree
             .parameter_store_mut()
             .alloc_float(FloatParameter::Value(0.0));
         let global_y_param = init
-            .app_system
+            .base_system
             .composite_tree
             .parameter_store_mut()
             .alloc_float(FloatParameter::Value(0.0));
         let view_offset_x_param = init
-            .app_system
+            .base_system
             .composite_tree
             .parameter_store_mut()
             .alloc_float(FloatParameter::Value(0.0));
         let view_offset_y_param = init
-            .app_system
+            .base_system
             .composite_tree
             .parameter_store_mut()
             .alloc_float(FloatParameter::Value(0.0));
 
-        let ct_root = init.app_system.register_composite_rect(CompositeRect {
+        let ct_root = init.base_system.register_composite_rect(CompositeRect {
             offset: [
                 AnimatableFloat::Expression(Box::new(move |store| {
                     store.float_value(global_x_param) + store.float_value(view_offset_x_param)
@@ -898,9 +601,9 @@ impl SpriteListToggleButtonView {
     pub fn new(init: &mut ViewInitContext) -> Self {
         let icon_size_px = (Self::ICON_SIZE * init.ui_scale_factor).ceil() as u32;
         let icon_atlas_rect = init
-            .app_system
+            .base_system
             .alloc_mask_atlas_rect(icon_size_px, icon_size_px);
-        let circle_atlas_rect = init.app_system.alloc_mask_atlas_rect(
+        let circle_atlas_rect = init.base_system.alloc_mask_atlas_rect(
             (Self::SIZE * init.ui_scale_factor) as _,
             (Self::SIZE * init.ui_scale_factor) as _,
         );
@@ -908,7 +611,7 @@ impl SpriteListToggleButtonView {
         let bufsize = Self::ICON_VERTICES.len() * core::mem::size_of::<[f32; 2]>()
             + Self::ICON_INDICES.len() * core::mem::size_of::<u16>();
         let mut buf = br::BufferObject::new(
-            &init.app_system.subsystem,
+            &init.base_system.subsystem,
             &br::BufferCreateInfo::new(
                 bufsize,
                 br::BufferUsage::VERTEX_BUFFER | br::BufferUsage::INDEX_BUFFER,
@@ -917,11 +620,11 @@ impl SpriteListToggleButtonView {
         .unwrap();
         let mreq = buf.requirements();
         let memindex = init
-            .app_system
+            .base_system
             .find_direct_memory_index(mreq.memoryTypeBits)
             .expect("no suitable memory");
         let mut mem = br::DeviceMemoryObject::new(
-            &init.app_system.subsystem,
+            &init.base_system.subsystem,
             &br::MemoryAllocateInfo::new(mreq.size, memindex),
         )
         .unwrap();
@@ -940,9 +643,9 @@ impl SpriteListToggleButtonView {
                 Self::ICON_INDICES.len(),
             );
         }
-        if !init.app_system.is_coherent_memory_type(memindex) {
+        if !init.base_system.is_coherent_memory_type(memindex) {
             unsafe {
-                init.app_system
+                init.base_system
                     .subsystem
                     .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(
                         n,
@@ -955,7 +658,7 @@ impl SpriteListToggleButtonView {
         ptr.end();
 
         let mut msaa_buffer = br::ImageObject::new(
-            &init.app_system.subsystem,
+            &init.base_system.subsystem,
             &br::ImageCreateInfo::new(icon_atlas_rect.extent(), br::vk::VK_FORMAT_R8_UNORM)
                 .as_color_attachment()
                 .usage_with(br::ImageUsageFlags::TRANSFER_SRC)
@@ -963,7 +666,7 @@ impl SpriteListToggleButtonView {
         )
         .unwrap();
         let msaa_mem = init
-            .app_system
+            .base_system
             .alloc_device_local_memory_for_requirements(&msaa_buffer.requirements());
         msaa_buffer.bind(&msaa_mem, 0).unwrap();
         let msaa_buffer = br::ImageViewBuilder::new(
@@ -974,18 +677,13 @@ impl SpriteListToggleButtonView {
         .unwrap();
 
         let rp = br::RenderPassObject::new(
-            init.app_system.subsystem,
+            init.base_system.subsystem,
             &br::RenderPassCreateInfo2::new(
                 &[br::AttachmentDescription2::new(br::vk::VK_FORMAT_R8_UNORM)
                     .color_memory_op(br::LoadOp::Clear, br::StoreOp::Store)
                     .layout_transition(br::ImageLayout::Undefined, br::ImageLayout::TransferSrcOpt)
                     .samples(4)],
-                &[
-                    br::SubpassDescription2::new().colors(&[br::AttachmentReference2::color(
-                        0,
-                        br::ImageLayout::ColorAttachmentOpt,
-                    )]),
-                ],
+                &[const_subpass_description_2_single_color_write_only::<0>()],
                 &[br::SubpassDependency2::new(
                     br::SubpassIndex::Internal(0),
                     br::SubpassIndex::External,
@@ -1002,7 +700,7 @@ impl SpriteListToggleButtonView {
         )
         .unwrap();
         let fb = br::FramebufferObject::new(
-            init.app_system.subsystem,
+            init.base_system.subsystem,
             &br::FramebufferCreateInfo::new(
                 &rp,
                 &[msaa_buffer.as_transparent_ref()],
@@ -1012,20 +710,12 @@ impl SpriteListToggleButtonView {
         )
         .unwrap();
         let rp_direct = br::RenderPassObject::new(
-            init.app_system.subsystem,
+            init.base_system.subsystem,
             &br::RenderPassCreateInfo2::new(
-                &[br::AttachmentDescription2::new(br::vk::VK_FORMAT_R8_UNORM)
-                    .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store)
-                    .layout_transition(
-                        br::ImageLayout::Undefined,
-                        br::ImageLayout::ShaderReadOnlyOpt,
-                    )],
-                &[
-                    br::SubpassDescription2::new().colors(&[br::AttachmentReference2::color(
-                        0,
-                        br::ImageLayout::ColorAttachmentOpt,
-                    )]),
-                ],
+                &[attachment_description_2_full_pixel_render_to_ro_texture(
+                    br::vk::VK_FORMAT_R8_UNORM,
+                )],
+                &[const_subpass_description_2_single_color_write_only::<0>()],
                 &[br::SubpassDependency2::new(
                     br::SubpassIndex::Internal(0),
                     br::SubpassIndex::External,
@@ -1042,15 +732,15 @@ impl SpriteListToggleButtonView {
         )
         .unwrap();
         let fb_direct = br::FramebufferObject::new(
-            init.app_system.subsystem,
+            init.base_system.subsystem,
             &br::FramebufferCreateInfo::new(
                 &rp_direct,
                 &[init
-                    .app_system
+                    .base_system
                     .mask_atlas_resource_transparent_ref()
                     .as_transparent_ref()],
-                init.app_system.mask_atlas_size(),
-                init.app_system.mask_atlas_size(),
+                init.base_system.mask_atlas_size(),
+                init.base_system.mask_atlas_size(),
             ),
         )
         .unwrap();
@@ -1061,16 +751,16 @@ impl SpriteListToggleButtonView {
             pub softness: f32,
         }
         let [pipeline, pipeline_circle] = init
-            .app_system
+            .base_system
             .create_graphics_pipelines_array(&[
                 br::GraphicsPipelineCreateInfo::new(
-                    init.app_system.require_empty_pipeline_layout(),
+                    init.base_system.require_empty_pipeline_layout(),
                     rp.subpass(0),
                     &[
-                        init.app_system
+                        init.base_system
                             .require_shader("resources/notrans.vert")
                             .on_stage(br::ShaderStage::Vertex, c"main"),
-                        init.app_system
+                        init.base_system
                             .require_shader("resources/fillcolor_r.frag")
                             .on_stage(br::ShaderStage::Fragment, c"main")
                             .with_specialization_info(&br::SpecializationInfo::new(
@@ -1093,13 +783,13 @@ impl SpriteListToggleButtonView {
                     &br::PipelineMultisampleStateCreateInfo::new().rasterization_samples(4),
                 ),
                 br::GraphicsPipelineCreateInfo::new(
-                    init.app_system.require_empty_pipeline_layout(),
+                    init.base_system.require_empty_pipeline_layout(),
                     rp_direct.subpass(0),
                     &[
-                        init.app_system
+                        init.base_system
                             .require_shader("resources/filltri.vert")
                             .on_stage(br::ShaderStage::Vertex, c"main"),
-                        init.app_system
+                        init.base_system
                             .require_shader("resources/aa_circle.frag")
                             .on_stage(br::ShaderStage::Fragment, c"main")
                             .with_specialization_info(&br::SpecializationInfo::new(
@@ -1119,8 +809,8 @@ impl SpriteListToggleButtonView {
             ])
             .unwrap();
 
-        init.app_system
-            .sync_execute_graphics_commands2(|rec| {
+        init.base_system
+            .sync_execute_graphics_commands(|rec| {
                 rec.begin_render_pass2(
                     &br::RenderPassBeginInfo::new(
                         &rp,
@@ -1155,14 +845,14 @@ impl SpriteListToggleButtonView {
                     &[],
                     &[],
                     &[init
-                        .app_system
+                        .base_system
                         .barrier_for_mask_atlas_resource()
                         .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
                 ))
                 .resolve_image(
                     msaa_buffer.image(),
                     br::ImageLayout::TransferSrcOpt,
-                    init.app_system.mask_atlas_image_transparent_ref(),
+                    init.base_system.mask_atlas_image_transparent_ref(),
                     br::ImageLayout::TransferDestOpt,
                     &[br::vk::VkImageResolve {
                         srcSubresource: br::ImageSubresourceLayers::new(
@@ -1184,7 +874,7 @@ impl SpriteListToggleButtonView {
                     &[],
                     &[],
                     &[init
-                        .app_system
+                        .base_system
                         .barrier_for_mask_atlas_resource()
                         .from(
                             br::PipelineStageFlags2::RESOLVE,
@@ -1213,7 +903,7 @@ impl SpriteListToggleButtonView {
             buf,
         ));
 
-        let ct_root = init.app_system.register_composite_rect(CompositeRect {
+        let ct_root = init.base_system.register_composite_rect(CompositeRect {
             size: [
                 AnimatableFloat::Value(Self::SIZE * init.ui_scale_factor),
                 AnimatableFloat::Value(Self::SIZE * init.ui_scale_factor),
@@ -1228,7 +918,7 @@ impl SpriteListToggleButtonView {
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 0.0])),
             ..Default::default()
         });
-        let ct_icon = init.app_system.register_composite_rect(CompositeRect {
+        let ct_icon = init.base_system.register_composite_rect(CompositeRect {
             offset: [
                 AnimatableFloat::Value(-Self::ICON_SIZE * 0.5 * init.ui_scale_factor),
                 AnimatableFloat::Value(-Self::ICON_SIZE * 0.5 * init.ui_scale_factor),
@@ -1244,9 +934,9 @@ impl SpriteListToggleButtonView {
             ..Default::default()
         });
 
-        init.app_system.set_composite_tree_parent(ct_icon, ct_root);
+        init.base_system.set_composite_tree_parent(ct_icon, ct_root);
 
-        let ht_root = init.app_system.create_hit_tree(HitTestTreeData {
+        let ht_root = init.base_system.create_hit_tree(HitTestTreeData {
             width: Self::SIZE,
             height: Self::SIZE,
             top: 8.0,
@@ -1270,14 +960,14 @@ impl SpriteListToggleButtonView {
 
     pub fn mount(
         &self,
-        app_system: &mut AppSystem,
+        app_system: &mut AppBaseSystem,
         ct_parent: CompositeTreeRef,
         ht_parent: HitTestTreeRef,
     ) {
         app_system.set_tree_parent((self.ct_root, self.ht_root), (ct_parent, ht_parent));
     }
 
-    pub fn update(&self, app_system: &mut AppSystem, current_sec: f32) {
+    pub fn update(&self, app_system: &mut AppBaseSystem, current_sec: f32) {
         let ui_scale_factor = self.ui_scale_factor.get();
 
         if let Some(place_inner) = self.place_inner.get_if_triggered() {
@@ -1408,22 +1098,22 @@ impl SpriteListCellView {
     #[tracing::instrument(name = "SpriteListCellView::new", skip(init))]
     pub fn new(init: &mut ViewInitContext, init_label: &str, init_top: f32) -> Self {
         let label_layout =
-            TextLayout::build_simple(init_label, &mut init.app_system.fonts.ui_default);
+            TextLayout::build_simple(init_label, &mut init.base_system.fonts.ui_default);
         let label_atlas_rect = init
-            .app_system
+            .base_system
             .alloc_mask_atlas_rect(label_layout.width_px(), label_layout.height_px());
         let label_stg_image_pixels =
             label_layout.build_stg_image_pixel_buffer(init.staging_scratch_buffer);
-        let bg_atlas_rect = init.app_system.alloc_mask_atlas_rect(
+        let bg_atlas_rect = init.base_system.alloc_mask_atlas_rect(
             ((Self::CORNER_RADIUS * 2.0 + 1.0) * init.ui_scale_factor) as _,
             ((Self::CORNER_RADIUS * 2.0 + 1.0) * init.ui_scale_factor) as _,
         );
 
         let render_pass = br::RenderPassObject::new(
-            init.app_system.subsystem,
+            init.base_system.subsystem,
             &br::RenderPassCreateInfo2::new(
                 &[
-                    br::AttachmentDescription2::new(init.app_system.mask_atlas_format())
+                    br::AttachmentDescription2::new(init.base_system.mask_atlas_format())
                         .with_layout_to(br::ImageLayout::ShaderReadOnlyOpt.from_undefined())
                         .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store),
                 ],
@@ -1445,29 +1135,29 @@ impl SpriteListCellView {
         )
         .unwrap();
         let framebuffer = br::FramebufferObject::new(
-            init.app_system.subsystem,
+            init.base_system.subsystem,
             &br::FramebufferCreateInfo::new(
                 &render_pass,
                 &[init
-                    .app_system
+                    .base_system
                     .mask_atlas_resource_transparent_ref()
                     .as_transparent_ref()],
-                init.app_system.mask_atlas_size(),
-                init.app_system.mask_atlas_size(),
+                init.base_system.mask_atlas_size(),
+                init.base_system.mask_atlas_size(),
             ),
         )
         .unwrap();
 
         let [pipeline] = init
-            .app_system
+            .base_system
             .create_graphics_pipelines_array(&[br::GraphicsPipelineCreateInfo::new(
-                init.app_system.require_empty_pipeline_layout(),
+                init.base_system.require_empty_pipeline_layout(),
                 render_pass.subpass(0),
                 &[
-                    init.app_system
+                    init.base_system
                         .require_shader("resources/filltri.vert")
                         .on_stage(br::ShaderStage::Vertex, c"main"),
-                    init.app_system
+                    init.base_system
                         .require_shader("resources/rounded_rect.frag")
                         .on_stage(br::ShaderStage::Fragment, c"main"),
                 ],
@@ -1483,13 +1173,13 @@ impl SpriteListCellView {
             .multisample_state(MS_STATE_EMPTY)])
             .unwrap();
 
-        init.app_system
-            .sync_execute_graphics_commands2(|rec| {
+        init.base_system
+            .sync_execute_graphics_commands(|rec| {
                 rec.pipeline_barrier_2(&br::DependencyInfo::new(
                     &[],
                     &[],
                     &[init
-                        .app_system
+                        .base_system
                         .barrier_for_mask_atlas_resource()
                         .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
                 ))
@@ -1498,7 +1188,7 @@ impl SpriteListCellView {
 
                     r.copy_buffer_to_image(
                         b,
-                        init.app_system.mask_atlas_image_transparent_ref(),
+                        init.base_system.mask_atlas_image_transparent_ref(),
                         br::ImageLayout::TransferDestOpt,
                         &[br::vk::VkBufferImageCopy {
                             bufferOffset: o,
@@ -1518,7 +1208,7 @@ impl SpriteListCellView {
                     &[],
                     &[],
                     &[init
-                        .app_system
+                        .base_system
                         .barrier_for_mask_atlas_resource()
                         .from(
                             br::PipelineStageFlags2::COPY,
@@ -1548,7 +1238,7 @@ impl SpriteListCellView {
             .unwrap();
         drop((pipeline, framebuffer, render_pass));
 
-        let ct_root = init.app_system.register_composite_rect(CompositeRect {
+        let ct_root = init.base_system.register_composite_rect(CompositeRect {
             offset: [
                 AnimatableFloat::Value(Self::MARGIN_H * init.ui_scale_factor),
                 AnimatableFloat::Value(init_top * init.ui_scale_factor),
@@ -1560,7 +1250,7 @@ impl SpriteListCellView {
             ],
             ..Default::default()
         });
-        let ct_label = init.app_system.register_composite_rect(CompositeRect {
+        let ct_label = init.base_system.register_composite_rect(CompositeRect {
             offset: [
                 AnimatableFloat::Value(Self::LABEL_MARGIN_LEFT * init.ui_scale_factor),
                 AnimatableFloat::Value(-label_layout.height() * 0.5),
@@ -1575,7 +1265,7 @@ impl SpriteListCellView {
             texatlas_rect: label_atlas_rect,
             ..Default::default()
         });
-        let ct_bg = init.app_system.register_composite_rect(CompositeRect {
+        let ct_bg = init.base_system.register_composite_rect(CompositeRect {
             relative_size_adjustment: [1.0, 1.0],
             instance_slot_index: Some(0),
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 0.25])),
@@ -1583,7 +1273,7 @@ impl SpriteListCellView {
             slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
             ..Default::default()
         });
-        let ct_bg_selected = init.app_system.register_composite_rect(CompositeRect {
+        let ct_bg_selected = init.base_system.register_composite_rect(CompositeRect {
             relative_size_adjustment: [1.0, 1.0],
             instance_slot_index: Some(0),
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.6, 0.8, 1.0, 0.0])),
@@ -1592,10 +1282,11 @@ impl SpriteListCellView {
             ..Default::default()
         });
 
-        init.app_system
+        init.base_system
             .set_composite_tree_parent(ct_bg_selected, ct_root);
-        init.app_system.set_composite_tree_parent(ct_bg, ct_root);
-        init.app_system.set_composite_tree_parent(ct_label, ct_root);
+        init.base_system.set_composite_tree_parent(ct_bg, ct_root);
+        init.base_system
+            .set_composite_tree_parent(ct_label, ct_root);
 
         Self {
             ct_root,
@@ -1639,17 +1330,17 @@ impl SpriteListPaneView {
     pub fn new(init: &mut ViewInitContext, header_height: f32) -> Self {
         let render_size_px = ((Self::CORNER_RADIUS * 2.0 + 1.0) * init.ui_scale_factor) as u32;
         let frame_image_atlas_rect = init
-            .app_system
+            .base_system
             .alloc_mask_atlas_rect(render_size_px, render_size_px);
 
         let title_blur_pixels =
             (Self::BLUR_AMOUNT_ONEDIR as f32 * init.ui_scale_factor).ceil() as _;
         let title_layout =
-            TextLayout::build_simple("Sprites", &mut init.app_system.fonts.ui_default);
+            TextLayout::build_simple("Sprites", &mut init.base_system.fonts.ui_default);
         let title_atlas_rect = init
-            .app_system
+            .base_system
             .alloc_mask_atlas_rect(title_layout.width_px(), title_layout.height_px());
-        let title_blurred_atlas_rect = init.app_system.alloc_mask_atlas_rect(
+        let title_blurred_atlas_rect = init.base_system.alloc_mask_atlas_rect(
             title_layout.width_px() + (title_blur_pixels * 2 + 1),
             title_layout.height_px() + (title_blur_pixels * 2 + 1),
         );
@@ -1657,7 +1348,7 @@ impl SpriteListPaneView {
             title_layout.build_stg_image_pixel_buffer(init.staging_scratch_buffer);
 
         let mut title_blurred_work_image = br::ImageObject::new(
-            init.app_system.subsystem,
+            init.base_system.subsystem,
             &br::ImageCreateInfo::new(
                 title_blurred_atlas_rect.extent(),
                 br::vk::VK_FORMAT_R8_UNORM,
@@ -1667,7 +1358,7 @@ impl SpriteListPaneView {
         )
         .unwrap();
         let title_blurred_work_image_mem = init
-            .app_system
+            .base_system
             .alloc_device_local_memory_for_requirements(&title_blurred_work_image.requirements());
         title_blurred_work_image
             .bind(&title_blurred_work_image_mem, 0)
@@ -1680,10 +1371,10 @@ impl SpriteListPaneView {
         .unwrap();
 
         let render_pass = br::RenderPassObject::new(
-            init.app_system.subsystem,
+            init.base_system.subsystem,
             &br::RenderPassCreateInfo2::new(
                 &[
-                    br::AttachmentDescription2::new(init.app_system.mask_atlas_format())
+                    br::AttachmentDescription2::new(init.base_system.mask_atlas_format())
                         .with_layout_to(br::ImageLayout::ShaderReadOnlyOpt.from_undefined())
                         .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store),
                 ],
@@ -1705,20 +1396,20 @@ impl SpriteListPaneView {
         )
         .unwrap();
         let framebuffer = br::FramebufferObject::new(
-            init.app_system.subsystem,
+            init.base_system.subsystem,
             &br::FramebufferCreateInfo::new(
                 &render_pass,
                 &[init
-                    .app_system
+                    .base_system
                     .mask_atlas_resource_transparent_ref()
                     .as_transparent_ref()],
-                init.app_system.mask_atlas_size(),
-                init.app_system.mask_atlas_size(),
+                init.base_system.mask_atlas_size(),
+                init.base_system.mask_atlas_size(),
             ),
         )
         .unwrap();
         let title_blurred_work_framebuffer = br::FramebufferObject::new(
-            init.app_system.subsystem,
+            init.base_system.subsystem,
             &br::FramebufferCreateInfo::new(
                 &render_pass,
                 &[title_blurred_work_image_view.as_transparent_ref()],
@@ -1729,10 +1420,10 @@ impl SpriteListPaneView {
         .unwrap();
 
         let vsh_blur = init
-            .app_system
+            .base_system
             .require_shader("resources/filltri_uvmod.vert");
         let fsh_blur = init
-            .app_system
+            .base_system
             .require_shader("resources/blit_axis_convolved.frag");
         #[derive(br::SpecializationConstants)]
         struct ConvolutionFragmentShaderParams {
@@ -1740,17 +1431,18 @@ impl SpriteListPaneView {
             max_count: u32,
         }
 
-        let smp = br::SamplerObject::new(&init.app_system.subsystem, &br::SamplerCreateInfo::new())
-            .unwrap();
+        let smp =
+            br::SamplerObject::new(&init.base_system.subsystem, &br::SamplerCreateInfo::new())
+                .unwrap();
         let dsl_tex1 = br::DescriptorSetLayoutObject::new(
-            init.app_system.subsystem,
+            init.base_system.subsystem,
             &br::DescriptorSetLayoutCreateInfo::new(&[br::DescriptorType::CombinedImageSampler
                 .make_binding(0, 1)
                 .with_immutable_samplers(&[smp.as_transparent_ref()])]),
         )
         .unwrap();
         let mut dp = br::DescriptorPoolObject::new(
-            init.app_system.subsystem,
+            init.base_system.subsystem,
             &br::DescriptorPoolCreateInfo::new(
                 2,
                 &[br::DescriptorType::CombinedImageSampler.make_size(2)],
@@ -1760,13 +1452,13 @@ impl SpriteListPaneView {
         let [ds_title, ds_title2] = dp
             .alloc_array(&[dsl_tex1.as_transparent_ref(), dsl_tex1.as_transparent_ref()])
             .unwrap();
-        init.app_system.subsystem.update_descriptor_sets(
+        init.base_system.subsystem.update_descriptor_sets(
             &[
                 ds_title
                     .binding_at(0)
                     .write(br::DescriptorContents::CombinedImageSampler(vec![
                         br::DescriptorImageInfo::new(
-                            &init.app_system.mask_atlas_resource_transparent_ref(),
+                            &init.base_system.mask_atlas_resource_transparent_ref(),
                             br::ImageLayout::ShaderReadOnlyOpt,
                         ),
                     ])),
@@ -1783,7 +1475,7 @@ impl SpriteListPaneView {
         );
 
         let blur_pipeline_layout = br::PipelineLayoutObject::new(
-            init.app_system.subsystem,
+            init.base_system.subsystem,
             &br::PipelineLayoutCreateInfo::new(
                 &[dsl_tex1.as_transparent_ref()],
                 &[
@@ -1805,16 +1497,16 @@ impl SpriteListPaneView {
         )
         .unwrap();
         let [pipeline, pipeline_blur1, pipeline_blur] = init
-            .app_system
+            .base_system
             .create_graphics_pipelines_array(&[
                 br::GraphicsPipelineCreateInfo::new(
-                    init.app_system.require_empty_pipeline_layout(),
+                    init.base_system.require_empty_pipeline_layout(),
                     render_pass.subpass(0),
                     &[
-                        init.app_system
+                        init.base_system
                             .require_shader("resources/filltri.vert")
                             .on_stage(br::ShaderStage::Vertex, c"main"),
-                        init.app_system
+                        init.base_system
                             .require_shader("resources/rounded_rect.frag")
                             .on_stage(br::ShaderStage::Fragment, c"main"),
                     ],
@@ -1890,25 +1582,25 @@ impl SpriteListPaneView {
         let mut fsh_v_params = vec![0.0f32; title_blur_pixels as usize + 6];
         // uv_limit
         fsh_h_params[0] = init
-            .app_system
+            .base_system
             .atlas
             .uv_from_pixels(title_atlas_rect.left as _);
         fsh_h_params[1] = init
-            .app_system
+            .base_system
             .atlas
             .uv_from_pixels(title_atlas_rect.top as _);
         fsh_h_params[2] = init
-            .app_system
+            .base_system
             .atlas
             .uv_from_pixels(title_atlas_rect.right as _);
         fsh_h_params[3] = init
-            .app_system
+            .base_system
             .atlas
             .uv_from_pixels(title_atlas_rect.bottom as _);
         fsh_v_params[2] = 1.0;
         fsh_v_params[3] = 1.0;
         // uv_step
-        fsh_h_params[4] = 1.0 / init.app_system.mask_atlas_size() as f32;
+        fsh_h_params[4] = 1.0 / init.base_system.mask_atlas_size() as f32;
         fsh_v_params[5] = 1.0 / title_blurred_atlas_rect.height() as f32;
         // factors
         let mut t = 0.0;
@@ -1924,13 +1616,13 @@ impl SpriteListPaneView {
             fsh_v_params[n + 6] /= t;
         }
 
-        init.app_system
-            .sync_execute_graphics_commands2(|rec| {
+        init.base_system
+            .sync_execute_graphics_commands(|rec| {
                 rec.pipeline_barrier_2(&br::DependencyInfo::new(
                     &[],
                     &[],
                     &[init
-                        .app_system
+                        .base_system
                         .barrier_for_mask_atlas_resource()
                         .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
                 ))
@@ -1939,7 +1631,7 @@ impl SpriteListPaneView {
 
                     r.copy_buffer_to_image(
                         b,
-                        init.app_system.mask_atlas_image_transparent_ref(),
+                        init.base_system.mask_atlas_image_transparent_ref(),
                         br::ImageLayout::TransferDestOpt,
                         &[br::vk::VkBufferImageCopy {
                             bufferOffset: o,
@@ -1959,7 +1651,7 @@ impl SpriteListPaneView {
                     &[],
                     &[],
                     &[init
-                        .app_system
+                        .base_system
                         .barrier_for_mask_atlas_resource()
                         .from(
                             br::PipelineStageFlags2::COPY,
@@ -2009,16 +1701,16 @@ impl SpriteListPaneView {
                     br::vk::VK_SHADER_STAGE_VERTEX_BIT,
                     0,
                     &[
-                        init.app_system.atlas.uv_from_pixels(
+                        init.base_system.atlas.uv_from_pixels(
                             (title_atlas_rect.width() + title_blur_pixels * 2 + 1) as _,
                         ),
-                        init.app_system.atlas.uv_from_pixels(
+                        init.base_system.atlas.uv_from_pixels(
                             (title_atlas_rect.height() + title_blur_pixels * 2 + 1) as _,
                         ),
-                        init.app_system.atlas.uv_from_pixels(
+                        init.base_system.atlas.uv_from_pixels(
                             title_atlas_rect.left as f32 - title_blur_pixels as f32,
                         ),
-                        init.app_system
+                        init.base_system
                             .atlas
                             .uv_from_pixels(title_atlas_rect.top as f32 - title_blur_pixels as f32),
                     ],
@@ -2083,7 +1775,7 @@ impl SpriteListPaneView {
             title_blurred_work_image_mem,
         ));
 
-        let ct_root = init.app_system.register_composite_rect(CompositeRect {
+        let ct_root = init.base_system.register_composite_rect(CompositeRect {
             offset: [
                 AnimatableFloat::Value(Self::FLOATING_MARGIN * init.ui_scale_factor),
                 AnimatableFloat::Value(header_height * init.ui_scale_factor),
@@ -2104,7 +1796,7 @@ impl SpriteListPaneView {
             ),
             ..Default::default()
         });
-        let ct_title_blurred = init.app_system.register_composite_rect(CompositeRect {
+        let ct_title_blurred = init.base_system.register_composite_rect(CompositeRect {
             instance_slot_index: Some(0),
             offset: [
                 AnimatableFloat::Value(-(title_blurred_atlas_rect.width() as f32 * 0.5)),
@@ -2121,7 +1813,7 @@ impl SpriteListPaneView {
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.1, 0.1, 0.1, 1.0])),
             ..Default::default()
         });
-        let ct_title = init.app_system.register_composite_rect(CompositeRect {
+        let ct_title = init.base_system.register_composite_rect(CompositeRect {
             instance_slot_index: Some(0),
             offset: [
                 AnimatableFloat::Value(-(title_atlas_rect.width() as f32 * 0.5)),
@@ -2137,11 +1829,12 @@ impl SpriteListPaneView {
             ..Default::default()
         });
 
-        init.app_system
+        init.base_system
             .set_composite_tree_parent(ct_title_blurred, ct_root);
-        init.app_system.set_composite_tree_parent(ct_title, ct_root);
+        init.base_system
+            .set_composite_tree_parent(ct_title, ct_root);
 
-        let ht_frame = init.app_system.create_hit_tree(HitTestTreeData {
+        let ht_frame = init.base_system.create_hit_tree(HitTestTreeData {
             top: header_height,
             left: Self::FLOATING_MARGIN,
             width: Self::INIT_WIDTH,
@@ -2149,7 +1842,7 @@ impl SpriteListPaneView {
             height_adjustment_factor: 1.0,
             ..Default::default()
         });
-        let ht_resize_area = init.app_system.create_hit_tree(HitTestTreeData {
+        let ht_resize_area = init.base_system.create_hit_tree(HitTestTreeData {
             left: -Self::RESIZE_AREA_WIDTH * 0.5,
             left_adjustment_factor: 1.0,
             width: Self::RESIZE_AREA_WIDTH,
@@ -2157,7 +1850,7 @@ impl SpriteListPaneView {
             ..Default::default()
         });
 
-        init.app_system
+        init.base_system
             .set_hit_tree_parent(ht_resize_area, ht_frame);
 
         Self {
@@ -2176,14 +1869,14 @@ impl SpriteListPaneView {
 
     pub fn mount(
         &self,
-        app_system: &mut AppSystem,
+        app_system: &mut AppBaseSystem,
         ct_parent: CompositeTreeRef,
         ht_parent: HitTestTreeRef,
     ) {
         app_system.set_tree_parent((self.ct_root, self.ht_frame), (ct_parent, ht_parent));
     }
 
-    pub fn update(&self, app_system: &mut AppSystem, current_sec: f32) {
+    pub fn update(&self, app_system: &mut AppBaseSystem, current_sec: f32) {
         if let Some(shown) = self.shown.get_if_triggered() {
             if shown {
                 app_system.composite_tree.get_mut(self.ct_root).offset[0] =
@@ -2419,9 +2112,9 @@ impl SpriteListPanePresenter {
 
         let cell_view = SpriteListCellView::new(&mut init.for_view, "sprite cell", 32.0);
 
-        toggle_button_view.mount(init.for_view.app_system, view.ct_root, view.ht_frame);
+        toggle_button_view.mount(init.for_view.base_system, view.ct_root, view.ht_frame);
 
-        cell_view.mount(view.ct_root, &mut init.for_view.app_system.composite_tree);
+        cell_view.mount(view.ct_root, &mut init.for_view.base_system.composite_tree);
 
         let ht_action_handler = Rc::new(SpriteListPaneActionHandler {
             view: view.clone(),
@@ -2431,15 +2124,15 @@ impl SpriteListPanePresenter {
             shown: Cell::new(true),
         });
         init.for_view
-            .app_system
+            .base_system
             .hit_tree
             .set_action_handler(view.ht_frame, &ht_action_handler);
         init.for_view
-            .app_system
+            .base_system
             .hit_tree
             .set_action_handler(view.ht_resize_area, &ht_action_handler);
         init.for_view
-            .app_system
+            .base_system
             .hit_tree
             .set_action_handler(toggle_button_view.ht_root, &ht_action_handler);
 
@@ -2452,14 +2145,14 @@ impl SpriteListPanePresenter {
 
     pub fn mount(
         &self,
-        app_system: &mut AppSystem,
+        app_system: &mut AppBaseSystem,
         ct_parent: CompositeTreeRef,
         ht_parent: HitTestTreeRef,
     ) {
         self.view.mount(app_system, ct_parent, ht_parent);
     }
 
-    pub fn update(&self, app_system: &mut AppSystem, current_sec: f32) {
+    pub fn update(&self, app_system: &mut AppBaseSystem, current_sec: f32) {
         self.ht_action_handler.view.update(app_system, current_sec);
         self.ht_action_handler
             .toggle_button_view
@@ -3110,7 +2803,7 @@ fn main() {
     };
 
     let subsystem = Subsystem::init();
-    let mut app_system = AppSystem::new(&subsystem);
+    let mut app_system = AppBaseSystem::new(&subsystem);
     let mut app_state = RefCell::new(AppState::new());
     let mut app_shell = shell::AppShell::new(&events);
     app_system.rescale_fonts(app_shell.ui_scale_factor());
@@ -3779,7 +3472,7 @@ fn main() {
     tracing::info!(value = app_shell.ui_scale_factor(), "initial ui scale");
     let mut init_context = PresenterInitContext {
         for_view: ViewInitContext {
-            app_system: &mut app_system,
+            base_system: &mut app_system,
             staging_scratch_buffer: &mut staging_scratch_buffer_locked,
             ui_scale_factor: app_shell.ui_scale_factor(),
         },
@@ -3787,7 +3480,7 @@ fn main() {
     };
 
     let editing_atlas_renderer = Rc::new(RefCell::new(EditingAtlasRenderer::new(
-        init_context.for_view.app_system,
+        init_context.for_view.base_system,
         main_rp_final.subpass(0),
         sc.size,
         SizePixels {
@@ -5629,7 +5322,7 @@ fn main() {
                     let p = uikit::message_dialog::Presenter::new(
                         &mut PresenterInitContext {
                             for_view: ViewInitContext {
-                                app_system: &mut app_system,
+                                base_system: &mut app_system,
                                 staging_scratch_buffer: &mut staging_scratch_buffer_locked,
                                 ui_scale_factor: app_shell.ui_scale_factor(),
                             },

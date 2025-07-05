@@ -13,10 +13,11 @@ use image::EncodableLayout;
 use parking_lot::RwLock;
 
 use crate::{
-    AppEventBus, AppSystem, BLEND_STATE_SINGLE_NONE, BLEND_STATE_SINGLE_PREMULTIPLIED,
+    AppEventBus, BLEND_STATE_SINGLE_NONE, BLEND_STATE_SINGLE_PREMULTIPLIED,
     BufferedStagingScratchBuffer, IA_STATE_TRILIST, IA_STATE_TRISTRIP, MS_STATE_EMPTY,
     RASTER_STATE_DEFAULT_FILL_NOCULL, VI_STATE_EMPTY, VI_STATE_FLOAT4_ONLY,
     app_state::SpriteInfo,
+    base_system::AppBaseSystem,
     bg_worker::{BackgroundWork, BackgroundWorkerEnqueueAccess},
     coordinate::SizePixels,
     subsystem::{
@@ -274,7 +275,7 @@ pub struct EditingAtlasRenderer<'d> {
 impl<'d> EditingAtlasRenderer<'d> {
     #[tracing::instrument(skip(app_system, rendered_pass))]
     pub fn new<'app_system>(
-        app_system: &'app_system AppSystem<'d>,
+        app_system: &'app_system AppBaseSystem<'d>,
         rendered_pass: br::SubpassRef<impl br::RenderPass>,
         main_buffer_size: br::Extent2D,
         init_atlas_size: SizePixels,

@@ -1,10 +1,10 @@
 use std::{cell::Cell, path::Path, rc::Rc};
 
 use crate::{
-    AppEvent, AppSystem, AppUpdateContext, BLEND_STATE_SINGLE_NONE, FillcolorRConstants,
-    IA_STATE_TRIFAN, IA_STATE_TRILIST, MS_STATE_EMPTY, PresenterInitContext,
-    RASTER_STATE_DEFAULT_FILL_NOCULL, RoundedRectConstants, VI_STATE_EMPTY, VI_STATE_FLOAT2_ONLY,
-    ViewInitContext,
+    AppEvent, AppUpdateContext, BLEND_STATE_SINGLE_NONE, FillcolorRConstants, IA_STATE_TRIFAN,
+    IA_STATE_TRILIST, MS_STATE_EMPTY, PresenterInitContext, RASTER_STATE_DEFAULT_FILL_NOCULL,
+    RoundedRectConstants, VI_STATE_EMPTY, VI_STATE_FLOAT2_ONLY, ViewInitContext,
+    base_system::AppBaseSystem,
     composite::{
         AnimatableColor, AnimatableFloat, AnimationData, CompositeMode, CompositeRect,
         CompositeTreeFloatParameterRef, CompositeTreeRef, FloatParameter,
@@ -63,18 +63,18 @@ impl CommandButtonView {
         show_delay_sec: f32,
         command: Command,
     ) -> Self {
-        let label_layout = TextLayout::build_simple(label, &mut init.app_system.fonts.ui_default);
+        let label_layout = TextLayout::build_simple(label, &mut init.base_system.fonts.ui_default);
 
-        let bg_atlas_rect = init.app_system.alloc_mask_atlas_rect(
+        let bg_atlas_rect = init.base_system.alloc_mask_atlas_rect(
             ((Self::BUTTON_HEIGHT + 1.0) * init.ui_scale_factor) as u32,
             ((Self::BUTTON_HEIGHT + 1.0) * init.ui_scale_factor) as u32,
         );
-        let icon_atlas_rect = init.app_system.alloc_mask_atlas_rect(
+        let icon_atlas_rect = init.base_system.alloc_mask_atlas_rect(
             (Self::ICON_SIZE * init.ui_scale_factor) as _,
             (Self::ICON_SIZE * init.ui_scale_factor) as _,
         );
         let label_atlas_rect = init
-            .app_system
+            .base_system
             .alloc_mask_atlas_rect(label_layout.width_px(), label_layout.height_px());
 
         let icon_svg_content = match std::fs::read_to_string(icon_path) {
@@ -151,7 +151,7 @@ impl CommandButtonView {
 
         // rasterize icon svg
         let mut stencil_buffer = br::ImageObject::new(
-            init.app_system.subsystem,
+            init.base_system.subsystem,
             &br::ImageCreateInfo::new(icon_atlas_rect.extent(), br::vk::VK_FORMAT_S8_UINT)
                 .as_depth_stencil_attachment()
                 .as_transient_attachment()
@@ -159,7 +159,7 @@ impl CommandButtonView {
         )
         .unwrap();
         let stencil_buffer_mem = init
-            .app_system
+            .base_system
             .alloc_device_local_memory_for_requirements(&stencil_buffer.requirements());
         stencil_buffer.bind(&stencil_buffer_mem, 0).unwrap();
         let stencil_buffer = br::ImageViewBuilder::new(
@@ -170,7 +170,7 @@ impl CommandButtonView {
         .unwrap();
 
         let mut ms_color_buffer = br::ImageObject::new(
-            init.app_system.subsystem,
+            init.base_system.subsystem,
             &br::ImageCreateInfo::new(icon_atlas_rect.extent(), br::vk::VK_FORMAT_R8_UNORM)
                 .as_color_attachment()
                 .usage_with(br::ImageUsageFlags::TRANSFER_SRC)
@@ -178,7 +178,7 @@ impl CommandButtonView {
         )
         .unwrap();
         let ms_color_buffer_mem = init
-            .app_system
+            .base_system
             .alloc_device_local_memory_for_requirements(&ms_color_buffer.requirements());
         ms_color_buffer.bind(&ms_color_buffer_mem, 0).unwrap();
         let ms_color_buffer = br::ImageViewBuilder::new(
@@ -189,7 +189,7 @@ impl CommandButtonView {
         .unwrap();
 
         let render_pass = br::RenderPassObject::new(
-            init.app_system.subsystem,
+            init.base_system.subsystem,
             &br::RenderPassCreateInfo2::new(
                 &[
                     br::AttachmentDescription2::new(br::vk::VK_FORMAT_R8_UNORM)
@@ -240,7 +240,7 @@ impl CommandButtonView {
         )
         .unwrap();
         let fb = br::FramebufferObject::new(
-            init.app_system.subsystem,
+            init.base_system.subsystem,
             &br::FramebufferCreateInfo::new(
                 &render_pass,
                 &[
@@ -254,10 +254,10 @@ impl CommandButtonView {
         .unwrap();
 
         let round_rect_rp = br::RenderPassObject::new(
-            init.app_system.subsystem,
+            init.base_system.subsystem,
             &br::RenderPassCreateInfo2::new(
                 &[
-                    br::AttachmentDescription2::new(init.app_system.mask_atlas_format())
+                    br::AttachmentDescription2::new(init.base_system.mask_atlas_format())
                         .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store)
                         .with_layout_to(br::ImageLayout::TransferDestOpt.from_undefined()),
                 ],
@@ -268,15 +268,15 @@ impl CommandButtonView {
         )
         .unwrap();
         let round_rect_fb = br::FramebufferObject::new(
-            init.app_system.subsystem,
+            init.base_system.subsystem,
             &br::FramebufferCreateInfo::new(
                 &round_rect_rp,
                 &[init
-                    .app_system
+                    .base_system
                     .mask_atlas_resource_transparent_ref()
                     .as_transparent_ref()],
-                init.app_system.mask_atlas_size(),
-                init.app_system.mask_atlas_size(),
+                init.base_system.mask_atlas_size(),
+                init.base_system.mask_atlas_size(),
             ),
         )
         .unwrap();
@@ -312,17 +312,17 @@ impl CommandButtonView {
             curve_stencil_shape_pipeline,
             colorize_pipeline,
         ] = init
-            .app_system
+            .base_system
             .create_graphics_pipelines_array(&[
                 // round rect pipeline
                 br::GraphicsPipelineCreateInfo::new(
-                    init.app_system.require_empty_pipeline_layout(),
+                    init.base_system.require_empty_pipeline_layout(),
                     round_rect_rp.subpass(0),
                     &[
-                        init.app_system
+                        init.base_system
                             .require_shader("resources/filltri.vert")
                             .on_stage(br::ShaderStage::Vertex, c"main"),
-                        init.app_system
+                        init.base_system
                             .require_shader("resources/rounded_rect.frag")
                             .on_stage(br::ShaderStage::Fragment, c"main")
                             .with_specialization_info(&br::SpecializationInfo::new(
@@ -343,13 +343,13 @@ impl CommandButtonView {
                 .multisample_state(MS_STATE_EMPTY),
                 // first stencil shape pipeline
                 br::GraphicsPipelineCreateInfo::new(
-                    init.app_system.require_empty_pipeline_layout(),
+                    init.base_system.require_empty_pipeline_layout(),
                     render_pass.subpass(0),
                     &[
-                        init.app_system
+                        init.base_system
                             .require_shader("resources/normalized_01_2d.vert")
                             .on_stage(br::ShaderStage::Vertex, c"main"),
-                        init.app_system
+                        init.base_system
                             .require_shader("resources/stencil_only.frag")
                             .on_stage(br::ShaderStage::Fragment, c"main"),
                     ],
@@ -370,13 +370,13 @@ impl CommandButtonView {
                 ),
                 // curve stencil shape
                 br::GraphicsPipelineCreateInfo::new(
-                    init.app_system.require_empty_pipeline_layout(),
+                    init.base_system.require_empty_pipeline_layout(),
                     render_pass.subpass(0),
                     &[
-                        init.app_system
+                        init.base_system
                             .require_shader("resources/normalized_01_2d_with_uv.vert")
                             .on_stage(br::ShaderStage::Vertex, c"main"),
-                        init.app_system
+                        init.base_system
                             .require_shader("resources/stencil_loop_blinn_curve.frag")
                             .on_stage(br::ShaderStage::Fragment, c"main"),
                     ],
@@ -415,13 +415,13 @@ impl CommandButtonView {
                 ),
                 // colorize pipeline
                 br::GraphicsPipelineCreateInfo::new(
-                    init.app_system.require_empty_pipeline_layout(),
+                    init.base_system.require_empty_pipeline_layout(),
                     render_pass.subpass(1),
                     &[
-                        init.app_system
+                        init.base_system
                             .require_shader("resources/filltri.vert")
                             .on_stage(br::ShaderStage::Vertex, c"main"),
-                        init.app_system
+                        init.base_system
                             .require_shader("resources/fillcolor_r.frag")
                             .on_stage(br::ShaderStage::Fragment, c"main")
                             .with_specialization_info(&br::SpecializationInfo::new(
@@ -755,7 +755,7 @@ impl CommandButtonView {
 
         let curve_triangle_points_offset = trifan_points.len() * core::mem::size_of::<[f32; 2]>();
         let mut vbuf = br::BufferObject::new(
-            init.app_system.subsystem,
+            init.base_system.subsystem,
             &br::BufferCreateInfo::new(
                 curve_triangle_points_offset
                     + curve_triangle_points.len() * core::mem::size_of::<[f32; 4]>(),
@@ -765,17 +765,17 @@ impl CommandButtonView {
         .unwrap();
         let req = vbuf.requirements();
         let memindex = init
-            .app_system
+            .base_system
             .find_direct_memory_index(req.memoryTypeBits)
             .unwrap();
         let mut mem = br::DeviceMemoryObject::new(
-            init.app_system.subsystem,
+            init.base_system.subsystem,
             &br::MemoryAllocateInfo::new(req.size, memindex),
         )
         .unwrap();
         vbuf.bind(&mem, 0).unwrap();
         let h = mem.native_ptr();
-        let requires_flush = !init.app_system.is_coherent_memory_type(memindex);
+        let requires_flush = !init.base_system.is_coherent_memory_type(memindex);
         let ptr = mem.map(0..req.size as _).unwrap();
         unsafe {
             core::ptr::copy_nonoverlapping(
@@ -791,7 +791,7 @@ impl CommandButtonView {
         }
         if requires_flush {
             unsafe {
-                init.app_system
+                init.base_system
                     .subsystem
                     .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(h, 0, req.size)])
                     .unwrap();
@@ -804,8 +804,8 @@ impl CommandButtonView {
         let label_image_pixels =
             label_layout.build_stg_image_pixel_buffer(init.staging_scratch_buffer);
 
-        init.app_system
-            .sync_execute_graphics_commands2(|rec| {
+        init.base_system
+            .sync_execute_graphics_commands(|rec| {
                 rec.begin_render_pass2(
                     &br::RenderPassBeginInfo::new(
                         &round_rect_rp,
@@ -868,7 +868,7 @@ impl CommandButtonView {
                     &[],
                     &[],
                     &[init
-                        .app_system
+                        .base_system
                         .barrier_for_mask_atlas_resource()
                         .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())
                         .of_execution(
@@ -879,7 +879,7 @@ impl CommandButtonView {
                 .resolve_image(
                     ms_color_buffer.image(),
                     br::ImageLayout::TransferSrcOpt,
-                    &init.app_system.mask_atlas_image_transparent_ref(),
+                    &init.base_system.mask_atlas_image_transparent_ref(),
                     br::ImageLayout::TransferDestOpt,
                     &[br::vk::VkImageResolve {
                         srcSubresource: br::ImageSubresourceLayers::new(
@@ -902,7 +902,7 @@ impl CommandButtonView {
 
                     r.copy_buffer_to_image(
                         b,
-                        &init.app_system.mask_atlas_image_transparent_ref(),
+                        &init.base_system.mask_atlas_image_transparent_ref(),
                         br::ImageLayout::TransferDestOpt,
                         &[br::vk::VkBufferImageCopy {
                             bufferOffset: o,
@@ -922,7 +922,7 @@ impl CommandButtonView {
                     &[],
                     &[],
                     &[init
-                        .app_system
+                        .base_system
                         .barrier_for_mask_atlas_resource()
                         .transit_from(
                             br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt),
@@ -956,16 +956,16 @@ impl CommandButtonView {
         ));
 
         let ct_bg_alpha_rate_shown = init
-            .app_system
+            .base_system
             .composite_tree
             .parameter_store_mut()
             .alloc_float(FloatParameter::Value(0.0));
         let ct_bg_alpha_rate_pointer = init
-            .app_system
+            .base_system
             .composite_tree
             .parameter_store_mut()
             .alloc_float(FloatParameter::Value(0.0));
-        let ct_root = init.app_system.register_composite_rect(CompositeRect {
+        let ct_root = init.base_system.register_composite_rect(CompositeRect {
             offset: [
                 AnimatableFloat::Value(left * init.ui_scale_factor),
                 AnimatableFloat::Value(top * init.ui_scale_factor),
@@ -991,7 +991,7 @@ impl CommandButtonView {
             ))),
             ..Default::default()
         });
-        let ct_icon = init.app_system.register_composite_rect(CompositeRect {
+        let ct_icon = init.base_system.register_composite_rect(CompositeRect {
             size: [
                 AnimatableFloat::Value(Self::ICON_SIZE * init.ui_scale_factor),
                 AnimatableFloat::Value(Self::ICON_SIZE * init.ui_scale_factor),
@@ -1008,7 +1008,7 @@ impl CommandButtonView {
             )),
             ..Default::default()
         });
-        let ct_label = init.app_system.register_composite_rect(CompositeRect {
+        let ct_label = init.base_system.register_composite_rect(CompositeRect {
             size: [
                 AnimatableFloat::Value(label_layout.width()),
                 AnimatableFloat::Value(label_layout.height()),
@@ -1029,10 +1029,11 @@ impl CommandButtonView {
             ..Default::default()
         });
 
-        init.app_system.set_composite_tree_parent(ct_icon, ct_root);
-        init.app_system.set_composite_tree_parent(ct_label, ct_root);
+        init.base_system.set_composite_tree_parent(ct_icon, ct_root);
+        init.base_system
+            .set_composite_tree_parent(ct_label, ct_root);
 
-        let ht_root = init.app_system.create_hit_tree(HitTestTreeData {
+        let ht_root = init.base_system.create_hit_tree(HitTestTreeData {
             left,
             top,
             width: (Self::ICON_SIZE + Self::ICON_LABEL_GAP + Self::HPADDING * 2.0)
@@ -1062,14 +1063,14 @@ impl CommandButtonView {
 
     pub fn mount(
         &self,
-        app_system: &mut AppSystem,
+        app_system: &mut AppBaseSystem,
         ct_parent: CompositeTreeRef,
         ht_parent: HitTestTreeRef,
     ) {
         app_system.set_tree_parent((self.ct_root, self.ht_root), (ct_parent, ht_parent));
     }
 
-    pub fn update(&self, app_system: &mut AppSystem, current_sec: f32) {
+    pub fn update(&self, app_system: &mut AppBaseSystem, current_sec: f32) {
         if let Some(shown) = self.shown.get_if_triggered() {
             if shown {
                 app_system.composite_tree.parameter_store_mut().set_float(
@@ -1247,14 +1248,14 @@ struct BaseView {
 impl BaseView {
     #[tracing::instrument(name = "AppMenuBaseView::new", skip(init))]
     pub fn new(init: &mut ViewInitContext) -> Self {
-        let ct_root = init.app_system.register_composite_rect(CompositeRect {
+        let ct_root = init.base_system.register_composite_rect(CompositeRect {
             relative_size_adjustment: [1.0, 1.0],
             instance_slot_index: Some(0),
             composite_mode: CompositeMode::FillColor(AnimatableColor::Value([0.0, 0.0, 0.0, 0.0])),
             ..Default::default()
         });
 
-        let ht_root = init.app_system.create_hit_tree(HitTestTreeData {
+        let ht_root = init.base_system.create_hit_tree(HitTestTreeData {
             width_adjustment_factor: 1.0,
             height_adjustment_factor: 1.0,
             ..Default::default()
@@ -1269,14 +1270,14 @@ impl BaseView {
 
     pub fn mount(
         &self,
-        app_system: &mut AppSystem,
+        app_system: &mut AppBaseSystem,
         ct_parent: CompositeTreeRef,
         ht_parent: HitTestTreeRef,
     ) {
         app_system.set_tree_parent((self.ct_root, self.ht_root), (ct_parent, ht_parent));
     }
 
-    pub fn update(&self, app_system: &mut AppSystem, current_sec: f32) {
+    pub fn update(&self, app_system: &mut AppBaseSystem, current_sec: f32) {
         if let Some(shown) = self.shown.get_if_triggered() {
             if shown {
                 app_system
@@ -1516,12 +1517,12 @@ impl Presenter {
         ));
 
         add_button.mount(
-            init.for_view.app_system,
+            init.for_view.base_system,
             base_view.ct_root,
             base_view.ht_root,
         );
         save_button.mount(
-            init.for_view.app_system,
+            init.for_view.base_system,
             base_view.ct_root,
             base_view.ht_root,
         );
@@ -1570,15 +1571,15 @@ impl Presenter {
             }
         });
         init.for_view
-            .app_system
+            .base_system
             .hit_tree
             .set_action_handler(base_view.ht_root, &action_handler);
         init.for_view
-            .app_system
+            .base_system
             .hit_tree
             .set_action_handler(add_button.ht_root, &action_handler);
         init.for_view
-            .app_system
+            .base_system
             .hit_tree
             .set_action_handler(save_button.ht_root, &action_handler);
 
@@ -1590,14 +1591,14 @@ impl Presenter {
 
     pub fn mount(
         &self,
-        app_system: &mut AppSystem,
+        app_system: &mut AppBaseSystem,
         ct_parent: CompositeTreeRef,
         ht_parent: HitTestTreeRef,
     ) {
         self.base_view.mount(app_system, ct_parent, ht_parent);
     }
 
-    pub fn update(&self, app_system: &mut AppSystem, current_sec: f32) {
+    pub fn update(&self, app_system: &mut AppBaseSystem, current_sec: f32) {
         self.base_view.update(app_system, current_sec);
         for v in self.action_handler.item_views.iter() {
             v.update(app_system, current_sec);

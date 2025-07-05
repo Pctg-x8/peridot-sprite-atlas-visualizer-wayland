@@ -363,7 +363,7 @@ impl Subsystem {
                 &br::PhysicalDeviceFeatures2::new(br::vk::VkPhysicalDeviceFeatures {
                     sparseBinding: true as _,
                     sparseResidencyImage2D: true as _,
-                    ..Default::default()
+                    ..unsafe { core::mem::MaybeUninit::zeroed().assume_init() }
                 })
                 .with_next(&mut br::vk::VkPhysicalDeviceSynchronization2Features {
                     sType:
@@ -1123,6 +1123,14 @@ impl UnsafeStagingScratchBufferManagerRaw {
 pub struct StagingScratchBufferManager<'g> {
     gfx_device_ref: &'g Subsystem,
     raw: UnsafeStagingScratchBufferManagerRaw,
+}
+impl Drop for StagingScratchBufferManager<'_> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        unsafe {
+            self.raw.drop_with_gfx_device(self.gfx_device_ref);
+        }
+    }
 }
 impl<'g> StagingScratchBufferManager<'g> {
     #[tracing::instrument(name = "StagingScratchBufferManager::new", skip(gfx_device))]

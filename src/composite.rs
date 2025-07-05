@@ -2,7 +2,9 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use bedrock::{self as br, Image, ImageChild, MemoryBound, TypedVulkanStructure, VkHandle};
+use bedrock::{
+    self as br, Image, ImageChild, MemoryBound, TypedVulkanStructure, VkHandle, VkObject,
+};
 
 use crate::{AppEvent, AppEventBus, mathext::Matrix4, subsystem::Subsystem};
 
@@ -540,7 +542,7 @@ impl UnboundedCompositeInstanceManager {
                 gfx_device.native_ptr(),
                 self.memory_stg,
                 0,
-                (core::mem::size_of::<CompositeInstanceData>() * self.count) as _,
+                (core::mem::size_of::<CompositeInstanceData>() * self.capacity) as _,
                 0,
             )?
         };

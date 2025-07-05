@@ -2,9 +2,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use bedrock::{
-    self as br, Image, ImageChild, MemoryBound, TypedVulkanStructure, VkHandle, VkObject,
-};
+use bedrock::{self as br, Image, ImageChild, MemoryBound, TypedVulkanStructure, VkHandle};
 
 use crate::{AppEvent, AppEventBus, mathext::Matrix4, subsystem::Subsystem};
 
@@ -391,7 +389,7 @@ impl UnboundedCompositeInstanceManager {
             subsystem,
             &br::BufferCreateInfo::new(
                 core::mem::size_of::<CompositeInstanceData>() * Self::INIT_CAP,
-                br::BufferUsage::STORAGE_BUFFER.transfer_dest(),
+                br::BufferUsage::STORAGE_BUFFER | br::BufferUsage::TRANSFER_DEST,
             ),
         )
         .expect("Failed to create composite instance buffer");

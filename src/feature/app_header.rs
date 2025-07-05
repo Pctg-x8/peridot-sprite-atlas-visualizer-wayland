@@ -166,7 +166,7 @@ impl MenuButtonView {
                 RASTER_STATE_DEFAULT_FILL_NOCULL,
                 BLEND_STATE_SINGLE_NONE,
             )
-            .multisample_state(MS_STATE_EMPTY)])
+            .set_multisample_state(MS_STATE_EMPTY)])
             .unwrap();
 
         init.base_system

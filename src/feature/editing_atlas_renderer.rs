@@ -439,7 +439,7 @@ impl<'d> EditingAtlasRenderer<'d> {
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
                     BLEND_STATE_SINGLE_NONE,
                 )
-                .multisample_state(MS_STATE_EMPTY),
+                .set_multisample_state(MS_STATE_EMPTY),
                 br::GraphicsPipelineCreateInfo::new(
                     &render_pipeline_layout,
                     rendered_pass,
@@ -458,7 +458,7 @@ impl<'d> EditingAtlasRenderer<'d> {
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
                     BLEND_STATE_SINGLE_NONE,
                 )
-                .multisample_state(MS_STATE_EMPTY),
+                .set_multisample_state(MS_STATE_EMPTY),
                 br::GraphicsPipelineCreateInfo::new(
                     &sprite_instance_render_pipeline_layout,
                     rendered_pass,
@@ -495,7 +495,7 @@ impl<'d> EditingAtlasRenderer<'d> {
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
                     BLEND_STATE_SINGLE_PREMULTIPLIED,
                 )
-                .multisample_state(MS_STATE_EMPTY),
+                .set_multisample_state(MS_STATE_EMPTY),
             ])
             .unwrap();
 
@@ -927,7 +927,7 @@ impl<'d> EditingAtlasRenderer<'d> {
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
                     BLEND_STATE_SINGLE_NONE,
                 )
-                .multisample_state(MS_STATE_EMPTY),
+                .set_multisample_state(MS_STATE_EMPTY),
                 br::GraphicsPipelineCreateInfo::new(
                     &self.render_pipeline_layout,
                     rendered_pass,
@@ -946,7 +946,7 @@ impl<'d> EditingAtlasRenderer<'d> {
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
                     BLEND_STATE_SINGLE_NONE,
                 )
-                .multisample_state(MS_STATE_EMPTY),
+                .set_multisample_state(MS_STATE_EMPTY),
                 br::GraphicsPipelineCreateInfo::new(
                     &self.sprite_instance_render_pipeline_layout,
                     rendered_pass,
@@ -985,7 +985,7 @@ impl<'d> EditingAtlasRenderer<'d> {
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
                     BLEND_STATE_SINGLE_PREMULTIPLIED,
                 )
-                .multisample_state(MS_STATE_EMPTY),
+                .set_multisample_state(MS_STATE_EMPTY),
             ])
             .unwrap();
 

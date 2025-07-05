@@ -113,7 +113,7 @@ impl CommonButtonView {
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
                     BLEND_STATE_SINGLE_NONE,
                 )
-                .multisample_state(MS_STATE_EMPTY),
+                .set_multisample_state(MS_STATE_EMPTY),
                 br::GraphicsPipelineCreateInfo::new(
                     init.base_system.require_empty_pipeline_layout(),
                     render_pass.subpass(0),
@@ -141,7 +141,7 @@ impl CommonButtonView {
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
                     BLEND_STATE_SINGLE_NONE,
                 )
-                .multisample_state(MS_STATE_EMPTY),
+                .set_multisample_state(MS_STATE_EMPTY),
             ])
             .unwrap();
 

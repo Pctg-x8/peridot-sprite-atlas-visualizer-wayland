@@ -373,7 +373,7 @@ impl CurrentSelectedSpriteMarkerView {
                 RASTER_STATE_DEFAULT_FILL_NOCULL,
                 BLEND_STATE_SINGLE_NONE,
             )
-            .multisample_state(MS_STATE_EMPTY)])
+            .set_multisample_state(MS_STATE_EMPTY)])
             .unwrap();
 
         init.base_system
@@ -779,7 +779,7 @@ impl SpriteListToggleButtonView {
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
                     BLEND_STATE_SINGLE_NONE,
                 )
-                .multisample_state(
+                .set_multisample_state(
                     &br::PipelineMultisampleStateCreateInfo::new().rasterization_samples(4),
                 ),
                 br::GraphicsPipelineCreateInfo::new(
@@ -805,7 +805,7 @@ impl SpriteListToggleButtonView {
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
                     BLEND_STATE_SINGLE_NONE,
                 )
-                .multisample_state(MS_STATE_EMPTY),
+                .set_multisample_state(MS_STATE_EMPTY),
             ])
             .unwrap();
 
@@ -1170,7 +1170,7 @@ impl SpriteListCellView {
                 RASTER_STATE_DEFAULT_FILL_NOCULL,
                 BLEND_STATE_SINGLE_NONE,
             )
-            .multisample_state(MS_STATE_EMPTY)])
+            .set_multisample_state(MS_STATE_EMPTY)])
             .unwrap();
 
         init.base_system
@@ -1519,7 +1519,7 @@ impl SpriteListPaneView {
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
                     BLEND_STATE_SINGLE_NONE,
                 )
-                .multisample_state(MS_STATE_EMPTY),
+                .set_multisample_state(MS_STATE_EMPTY),
                 br::GraphicsPipelineCreateInfo::new(
                     &blur_pipeline_layout,
                     render_pass.subpass(0),
@@ -1547,7 +1547,7 @@ impl SpriteListPaneView {
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
                     BLEND_STATE_SINGLE_NONE,
                 )
-                .multisample_state(MS_STATE_EMPTY),
+                .set_multisample_state(MS_STATE_EMPTY),
                 br::GraphicsPipelineCreateInfo::new(
                     &blur_pipeline_layout,
                     render_pass.subpass(0),
@@ -1570,7 +1570,7 @@ impl SpriteListPaneView {
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
                     BLEND_STATE_SINGLE_NONE,
                 )
-                .multisample_state(MS_STATE_EMPTY),
+                .set_multisample_state(MS_STATE_EMPTY),
             ])
             .unwrap();
 
@@ -3339,7 +3339,7 @@ fn main() {
                 &composite_raster_state,
                 &composite_blend_state,
             )
-            .multisample_state(MS_STATE_EMPTY),
+            .set_multisample_state(MS_STATE_EMPTY),
             br::GraphicsPipelineCreateInfo::new(
                 &composite_pipeline_layout,
                 main_rp_final.subpass(0),
@@ -3355,7 +3355,7 @@ fn main() {
                 &composite_raster_state,
                 &composite_blend_state,
             )
-            .multisample_state(MS_STATE_EMPTY),
+            .set_multisample_state(MS_STATE_EMPTY),
             br::GraphicsPipelineCreateInfo::new(
                 &composite_pipeline_layout,
                 main_rp_continue_grabbed.subpass(0),
@@ -3371,7 +3371,7 @@ fn main() {
                 &composite_raster_state,
                 &composite_blend_state,
             )
-            .multisample_state(MS_STATE_EMPTY),
+            .set_multisample_state(MS_STATE_EMPTY),
             br::GraphicsPipelineCreateInfo::new(
                 &composite_pipeline_layout,
                 main_rp_continue_final.subpass(0),
@@ -3387,7 +3387,7 @@ fn main() {
                 &composite_raster_state,
                 &composite_blend_state,
             )
-            .multisample_state(MS_STATE_EMPTY),
+            .set_multisample_state(MS_STATE_EMPTY),
         ])
         .unwrap();
     let blur_sample_viewport_scissors = (0..BLUR_SAMPLE_STEPS + 1)
@@ -3424,7 +3424,7 @@ fn main() {
                         RASTER_STATE_DEFAULT_FILL_NOCULL,
                         BLEND_STATE_SINGLE_NONE,
                     )
-                    .multisample_state(MS_STATE_EMPTY)
+                    .set_multisample_state(MS_STATE_EMPTY)
                 })
                 .collect::<Vec<_>>(),
         )
@@ -3446,7 +3446,7 @@ fn main() {
                         RASTER_STATE_DEFAULT_FILL_NOCULL,
                         BLEND_STATE_SINGLE_NONE,
                     )
-                    .multisample_state(MS_STATE_EMPTY)
+                    .set_multisample_state(MS_STATE_EMPTY)
                 })
                 .collect::<Vec<_>>(),
         )
@@ -5098,7 +5098,7 @@ fn main() {
                                         &composite_raster_state,
                                         &composite_blend_state,
                                     )
-                                    .multisample_state(MS_STATE_EMPTY),
+                                    .set_multisample_state(MS_STATE_EMPTY),
                                     br::GraphicsPipelineCreateInfo::new(
                                         &composite_pipeline_layout,
                                         main_rp_final.subpass(0),
@@ -5114,7 +5114,7 @@ fn main() {
                                         &composite_raster_state,
                                         &composite_blend_state,
                                     )
-                                    .multisample_state(MS_STATE_EMPTY),
+                                    .set_multisample_state(MS_STATE_EMPTY),
                                     br::GraphicsPipelineCreateInfo::new(
                                         &composite_pipeline_layout,
                                         main_rp_continue_grabbed.subpass(0),
@@ -5130,7 +5130,7 @@ fn main() {
                                         &composite_raster_state,
                                         &composite_blend_state,
                                     )
-                                    .multisample_state(MS_STATE_EMPTY),
+                                    .set_multisample_state(MS_STATE_EMPTY),
                                     br::GraphicsPipelineCreateInfo::new(
                                         &composite_pipeline_layout,
                                         main_rp_continue_final.subpass(0),
@@ -5146,7 +5146,7 @@ fn main() {
                                         &composite_raster_state,
                                         &composite_blend_state,
                                     )
-                                    .multisample_state(MS_STATE_EMPTY),
+                                    .set_multisample_state(MS_STATE_EMPTY),
                                 ])
                                 .unwrap();
                             composite_pipeline_grabbed = composite_pipeline_grabbed1;
@@ -5193,7 +5193,7 @@ fn main() {
                                                 RASTER_STATE_DEFAULT_FILL_NOCULL,
                                                 BLEND_STATE_SINGLE_NONE,
                                             )
-                                            .multisample_state(MS_STATE_EMPTY)
+                                            .set_multisample_state(MS_STATE_EMPTY)
                                         })
                                         .collect::<Vec<_>>(),
                                 )
@@ -5215,7 +5215,7 @@ fn main() {
                                                 RASTER_STATE_DEFAULT_FILL_NOCULL,
                                                 BLEND_STATE_SINGLE_NONE,
                                             )
-                                            .multisample_state(MS_STATE_EMPTY)
+                                            .set_multisample_state(MS_STATE_EMPTY)
                                         })
                                         .collect::<Vec<_>>(),
                                 )

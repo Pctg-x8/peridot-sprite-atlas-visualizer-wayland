@@ -340,7 +340,7 @@ impl CommandButtonView {
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
                     BLEND_STATE_SINGLE_NONE,
                 )
-                .multisample_state(MS_STATE_EMPTY),
+                .set_multisample_state(MS_STATE_EMPTY),
                 // first stencil shape pipeline
                 br::GraphicsPipelineCreateInfo::new(
                     init.base_system.require_empty_pipeline_layout(),
@@ -359,13 +359,13 @@ impl CommandButtonView {
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
                     BLEND_STATE_SINGLE_NONE,
                 )
-                .depth_stencil_state(
+                .set_depth_stencil_state(
                     &br::PipelineDepthStencilStateCreateInfo::new()
                         .stencil_test(true)
                         .stencil_state_back(sop_invert_always.clone())
                         .stencil_state_front(sop_invert_always.clone()),
                 )
-                .multisample_state(
+                .set_multisample_state(
                     &br::PipelineMultisampleStateCreateInfo::new().rasterization_samples(4),
                 ),
                 // curve stencil shape
@@ -404,13 +404,13 @@ impl CommandButtonView {
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
                     BLEND_STATE_SINGLE_NONE,
                 )
-                .depth_stencil_state(
+                .set_depth_stencil_state(
                     &br::PipelineDepthStencilStateCreateInfo::new()
                         .stencil_test(true)
                         .stencil_state_back(sop_invert_always.clone())
                         .stencil_state_front(sop_invert_always),
                 )
-                .multisample_state(
+                .set_multisample_state(
                     &br::PipelineMultisampleStateCreateInfo::new().rasterization_samples(4),
                 ),
                 // colorize pipeline
@@ -434,13 +434,13 @@ impl CommandButtonView {
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
                     BLEND_STATE_SINGLE_NONE,
                 )
-                .depth_stencil_state(
+                .set_depth_stencil_state(
                     &br::PipelineDepthStencilStateCreateInfo::new()
                         .stencil_test(true)
                         .stencil_state_back(sop_testonly_equal_1.clone())
                         .stencil_state_front(sop_testonly_equal_1),
                 )
-                .multisample_state(
+                .set_multisample_state(
                     &br::PipelineMultisampleStateCreateInfo::new()
                         .rasterization_samples(4)
                         .enable_alpha_to_coverage(),

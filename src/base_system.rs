@@ -8,7 +8,7 @@ use crate::{
     },
     hittest::{HitTestTreeData, HitTestTreeManager, HitTestTreeRef},
     subsystem::{Subsystem, SubsystemShaderModuleRef},
-    thirdparty::freetype::{self, FreeType},
+    thirdparty::freetype,
 };
 
 use bedrock::{self as br, CommandBufferMut};
@@ -24,7 +24,6 @@ pub struct AppBaseSystem<'subsystem> {
     pub composite_instance_manager: UnboundedCompositeInstanceManager,
     pub hit_tree: HitTestTreeManager<'subsystem>,
     pub fonts: FontSet,
-    pub ft: FreeType,
 }
 impl Drop for AppBaseSystem<'_> {
     fn drop(&mut self) {
@@ -40,17 +39,6 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         // initialize font systems
         #[cfg(unix)]
         crate::thirdparty::fontconfig::init();
-        let mut ft = FreeType::new().expect("Failed to initialize FreeType");
-        let hinting = unsafe { ft.get_property::<u32>(c"cff", c"hinting-engine").unwrap() };
-        let no_stem_darkening = unsafe {
-            ft.get_property::<freetype2::FT_Bool>(c"cff", c"no-stem-darkening")
-                .unwrap()
-        };
-        tracing::debug!(hinting, no_stem_darkening, "freetype cff properties");
-        unsafe {
-            ft.set_property(c"cff", c"no-stem-darkening", &(true as freetype2::FT_Bool))
-                .unwrap();
-        }
 
         let (primary_face_path, primary_face_index);
         #[cfg(unix)]
@@ -94,7 +82,11 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
             primary_face_index = 0;
         }
 
-        let ft_face = match ft.new_face(&primary_face_path, primary_face_index as _) {
+        let ft_face = match subsystem
+            .ft
+            .write()
+            .new_face(&primary_face_path, primary_face_index as _)
+        {
             Ok(x) => x,
             Err(e) => {
                 tracing::error!(reason = ?e, "Failed to create ft face");
@@ -117,7 +109,6 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
             fonts: FontSet {
                 ui_default: ft_face,
             },
-            ft,
             subsystem,
         }
     }

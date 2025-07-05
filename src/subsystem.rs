@@ -10,6 +10,8 @@ use bedrock::{
 };
 use parking_lot::RwLock;
 
+use crate::thirdparty::freetype::FreeType;
+
 #[derive(Debug, thiserror::Error)]
 pub enum LoadShaderError {
     #[error(transparent)]
@@ -112,6 +114,7 @@ pub struct Subsystem {
     pipeline_cache: br::vk::VkPipelineCache,
     empty_pipeline_layout: OnceLock<br::VkHandleRef<'static, br::vk::VkPipelineLayout>>,
     loaded_shader_modules: RwLock<HashMap<PathBuf, br::vk::VkShaderModule>>,
+    pub ft: RwLock<FreeType>,
 }
 unsafe impl Sync for Subsystem {}
 unsafe impl Send for Subsystem {}
@@ -417,6 +420,24 @@ impl Subsystem {
             }
         };
 
+        let mut ft = match FreeType::new() {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to initialize FreeType");
+                std::process::exit(1);
+            }
+        };
+        let hinting = unsafe { ft.get_property::<u32>(c"cff", c"hinting-engine").unwrap() };
+        let no_stem_darkening = unsafe {
+            ft.get_property::<freetype2::FT_Bool>(c"cff", c"no-stem-darkening")
+                .unwrap()
+        };
+        tracing::debug!(hinting, no_stem_darkening, "freetype cff properties");
+        unsafe {
+            ft.set_property(c"cff", c"no-stem-darkening", &(true as freetype2::FT_Bool))
+                .unwrap();
+        }
+
         let (pipeline_cache, _) = pipeline_cache.unmanage();
         let (device, _) = device.unmanage();
         let (adapter, _) = adapter.unmanage();
@@ -435,6 +456,7 @@ impl Subsystem {
             pipeline_cache,
             empty_pipeline_layout: OnceLock::new(),
             loaded_shader_modules: RwLock::new(HashMap::new()),
+            ft: RwLock::new(ft),
         }
     }
 

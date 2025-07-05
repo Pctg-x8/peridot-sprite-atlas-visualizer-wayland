@@ -1,8 +1,4 @@
-use std::{
-    cell::Cell,
-    os::fd::{AsRawFd, RawFd},
-    rc::Rc,
-};
+use std::os::fd::{AsRawFd, RawFd};
 
 use bedrock::{self as br, SurfaceCreateInfo};
 
@@ -26,7 +22,9 @@ struct WaylandShellEventHandler<'a> {
 }
 impl wl::XdgWmBaseEventListener for WaylandShellEventHandler<'_> {
     fn ping(&mut self, wm_base: &mut wl::XdgWmBase, serial: u32) {
-        wm_base.pong(serial);
+        if let Err(e) = wm_base.pong(serial) {
+            tracing::warn!(reason = ?e, serial, "Failed to respond wm_base.ping");
+        }
     }
 }
 impl wl::XdgSurfaceEventListener for WaylandShellEventHandler<'_> {

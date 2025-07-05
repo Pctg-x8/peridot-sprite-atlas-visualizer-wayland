@@ -13,9 +13,9 @@ use image::EncodableLayout;
 use parking_lot::RwLock;
 
 use crate::{
-    AppEventBus, BLEND_STATE_SINGLE_NONE, BLEND_STATE_SINGLE_PREMULTIPLIED,
-    BufferedStagingScratchBuffer, IA_STATE_TRILIST, IA_STATE_TRISTRIP, MS_STATE_EMPTY,
-    RASTER_STATE_DEFAULT_FILL_NOCULL, VI_STATE_EMPTY, VI_STATE_FLOAT4_ONLY,
+    BLEND_STATE_SINGLE_NONE, BLEND_STATE_SINGLE_PREMULTIPLIED, BufferedStagingScratchBuffer,
+    IA_STATE_TRILIST, IA_STATE_TRISTRIP, MS_STATE_EMPTY, RASTER_STATE_DEFAULT_FILL_NOCULL,
+    VI_STATE_EMPTY, VI_STATE_FLOAT4_ONLY,
     app_state::SpriteInfo,
     base_system::AppBaseSystem,
     bg_worker::{BackgroundWork, BackgroundWorkerEnqueueAccess},
@@ -42,10 +42,10 @@ struct LoadedSpriteSourceAtlas<'subsystem> {
 impl<'subsystem> LoadedSpriteSourceAtlas<'subsystem> {
     const SIZE: u32 = 4096;
 
-    #[tracing::instrument(skip(subsystem), fields(size = Self::SIZE))]
-    fn new(subsystem: &'subsystem Subsystem, format: br::Format) -> Self {
+    #[tracing::instrument(skip(base_system), fields(size = Self::SIZE))]
+    fn new(base_system: &AppBaseSystem<'subsystem>, format: br::Format) -> Self {
         let mut resource = br::ImageObject::new(
-            subsystem,
+            base_system.subsystem,
             &br::ImageCreateInfo::new(br::Extent2D::spread1(Self::SIZE), format)
                 .sampled()
                 .transfer_dest()
@@ -56,11 +56,11 @@ impl<'subsystem> LoadedSpriteSourceAtlas<'subsystem> {
             .set_name(Some(c"Loaded Sprite Source Atlas"))
             .unwrap();
         let req = resource.requirements();
-        let memindex = subsystem
+        let memindex = base_system
             .find_device_local_memory_index(req.memoryTypeBits)
             .unwrap();
         let memory = br::DeviceMemoryObject::new(
-            subsystem,
+            base_system.subsystem,
             &br::MemoryAllocateInfo::new(req.size, memindex),
         )
         .unwrap();
@@ -500,7 +500,7 @@ impl<'d> EditingAtlasRenderer<'d> {
             .unwrap();
 
         let loaded_sprite_source_atlas =
-            LoadedSpriteSourceAtlas::new(app_system.subsystem, br::vk::VK_FORMAT_R8G8B8A8_UNORM);
+            LoadedSpriteSourceAtlas::new(app_system, br::vk::VK_FORMAT_R8G8B8A8_UNORM);
         let sprite_instance_buffers = SpriteInstanceBuffers::new(app_system.subsystem);
 
         let mut dp = match br::DescriptorPoolObject::new(

@@ -18,6 +18,8 @@ mod thirdparty;
 mod trigger_cell;
 mod uikit;
 
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::{
     cell::{Cell, RefCell, UnsafeCell},
     collections::{BTreeSet, HashMap, VecDeque},
@@ -246,16 +248,17 @@ impl<'subsystem> AppSystem<'subsystem> {
                 .unwrap();
         }
 
+        let (primary_face_path, primary_face_index);
         #[cfg(unix)]
         {
-            let mut fc_pat = fontconfig::Pattern::new();
+            let mut fc_pat = thirdparty::fontconfig::Pattern::new();
             fc_pat.add_family_name(c"system-ui");
             fc_pat.add_weight(80);
-            fontconfig::Config::current()
+            thirdparty::fontconfig::Config::current()
                 .unwrap()
-                .substitute(&mut fc_pat, fontconfig::MatchKind::Pattern);
+                .substitute(&mut fc_pat, thirdparty::fontconfig::MatchKind::Pattern);
             fc_pat.default_substitute();
-            let fc_set = fontconfig::Config::current()
+            let fc_set = thirdparty::fontconfig::Config::current()
                 .unwrap()
                 .sort(&mut fc_pat, true)
                 .unwrap();
@@ -270,16 +273,19 @@ impl<'subsystem> AppSystem<'subsystem> {
                     primary_face_info = Some((file_path.to_owned(), index));
                 }
             }
-            let Some((primary_face_path, primary_face_index)) = primary_face_info else {
+            let Some((path, index)) = primary_face_info else {
                 tracing::error!("No UI face found");
                 std::process::exit(1);
             };
+            primary_face_path = path;
+            primary_face_index = index;
         }
         // TODO: mock
         #[cfg(windows)]
-        let primary_face_path = c"C:\\Windows\\Fonts\\YuGothR.ttc";
-        #[cfg(windows)]
-        let primary_face_index = 0;
+        {
+            primary_face_path = c"C:\\Windows\\Fonts\\YuGothR.ttc";
+            primary_face_index = 0;
+        }
 
         let ft_face = match ft.new_face(&primary_face_path, primary_face_index as _) {
             Ok(x) => x,
@@ -3098,7 +3104,7 @@ fn main() {
     let events = AppEventBus {
         queue: UnsafeCell::new(VecDeque::new()),
         #[cfg(target_os = "linux")]
-        efd: EventFD::new(0, EventFDOptions::NONBLOCK).unwrap(),
+        efd: platform::linux::EventFD::new(0, platform::linux::EventFDOptions::NONBLOCK).unwrap(),
         #[cfg(windows)]
         event_notify: platform::win32::event::EventObject::new(None, true, false).unwrap(),
     };
@@ -4048,7 +4054,7 @@ fn main() {
         AppEventBus,
         AppShellDisplay,
         BackgroundWorkerViewFeedback,
-        DBusWatch(*mut dbus::WatchRef),
+        DBusWatch(*mut thirdparty::dbus::WatchRef),
     }
     #[cfg(target_os = "linux")]
     struct PollFDPool {
@@ -4086,53 +4092,59 @@ fn main() {
     }
 
     #[cfg(target_os = "linux")]
-    {
-        let poll_fd_pool = RefCell::new(PollFDPool::new());
-        let epoll = Epoll::new(0).unwrap();
-        epoll
-            .add(
-                &events.efd,
-                EPOLLIN,
-                EpollData::U64(poll_fd_pool.borrow_mut().alloc(PollFDType::AppEventBus)),
-            )
-            .unwrap();
-        epoll
-            .add(
-                &app_shell.display_fd(),
-                EPOLLIN,
-                EpollData::U64(poll_fd_pool.borrow_mut().alloc(PollFDType::AppShellDisplay)),
-            )
-            .unwrap();
-        epoll
-            .add(
-                bg_worker.view_feedback_notifier(),
-                EPOLLIN,
-                EpollData::U64(
-                    poll_fd_pool
-                        .borrow_mut()
-                        .alloc(PollFDType::BackgroundWorkerViewFeedback),
-                ),
-            )
-            .unwrap();
-    }
+    let poll_fd_pool = RefCell::new(PollFDPool::new());
+    #[cfg(target_os = "linux")]
+    let epoll = platform::linux::Epoll::new(0).unwrap();
+    #[cfg(target_os = "linux")]
+    epoll
+        .add(
+            &events.efd,
+            platform::linux::EPOLLIN,
+            platform::linux::EpollData::U64(
+                poll_fd_pool.borrow_mut().alloc(PollFDType::AppEventBus),
+            ),
+        )
+        .unwrap();
+    #[cfg(target_os = "linux")]
+    epoll
+        .add(
+            &app_shell.display_fd(),
+            platform::linux::EPOLLIN,
+            platform::linux::EpollData::U64(
+                poll_fd_pool.borrow_mut().alloc(PollFDType::AppShellDisplay),
+            ),
+        )
+        .unwrap();
+    #[cfg(target_os = "linux")]
+    epoll
+        .add(
+            bg_worker.main_thread_waker(),
+            platform::linux::EPOLLIN,
+            platform::linux::EpollData::U64(
+                poll_fd_pool
+                    .borrow_mut()
+                    .alloc(PollFDType::BackgroundWorkerViewFeedback),
+            ),
+        )
+        .unwrap();
 
     #[cfg(target_os = "linux")]
     struct DBusWatcher<'e> {
-        epoll: &'e Epoll,
+        epoll: &'e platform::linux::Epoll,
         fd_pool: &'e RefCell<PollFDPool>,
         fd_to_pool_index: HashMap<core::ffi::c_int, u64>,
     }
     #[cfg(target_os = "linux")]
-    impl dbus::WatchFunction for DBusWatcher<'_> {
-        fn add(&mut self, watch: &mut dbus::WatchRef) -> bool {
+    impl thirdparty::dbus::WatchFunction for DBusWatcher<'_> {
+        fn add(&mut self, watch: &mut thirdparty::dbus::WatchRef) -> bool {
             if watch.enabled() {
                 let mut event_type = 0;
                 let flags = watch.flags();
-                if flags.contains(dbus::WatchFlags::READABLE) {
-                    event_type |= EPOLLIN;
+                if flags.contains(thirdparty::dbus::WatchFlags::READABLE) {
+                    event_type |= platform::linux::EPOLLIN;
                 }
-                if flags.contains(dbus::WatchFlags::WRITABLE) {
-                    event_type |= EPOLLOUT;
+                if flags.contains(thirdparty::dbus::WatchFlags::WRITABLE) {
+                    event_type |= platform::linux::EPOLLOUT;
                 }
 
                 let pool_index = self
@@ -4141,7 +4153,11 @@ fn main() {
                     .alloc(PollFDType::DBusWatch(watch as *mut _));
 
                 self.epoll
-                    .add(&watch.as_raw_fd(), event_type, EpollData::U64(pool_index))
+                    .add(
+                        &watch.as_raw_fd(),
+                        event_type,
+                        platform::linux::EpollData::U64(pool_index),
+                    )
                     .unwrap();
                 self.fd_to_pool_index.insert(watch.as_raw_fd(), pool_index);
             }
@@ -4149,7 +4165,7 @@ fn main() {
             true
         }
 
-        fn remove(&mut self, watch: &mut dbus::WatchRef) {
+        fn remove(&mut self, watch: &mut thirdparty::dbus::WatchRef) {
             let Some(pool_index) = self.fd_to_pool_index.remove(&watch.as_raw_fd()) else {
                 // not bound
                 return;
@@ -4167,14 +4183,14 @@ fn main() {
             self.fd_pool.borrow_mut().free(pool_index);
         }
 
-        fn toggled(&mut self, watch: &mut dbus::WatchRef) {
+        fn toggled(&mut self, watch: &mut thirdparty::dbus::WatchRef) {
             let mut event_type = 0;
             let flags = watch.flags();
-            if flags.contains(dbus::WatchFlags::READABLE) {
-                event_type |= EPOLLIN;
+            if flags.contains(thirdparty::dbus::WatchFlags::READABLE) {
+                event_type |= platform::linux::EPOLLIN;
             }
-            if flags.contains(dbus::WatchFlags::WRITABLE) {
-                event_type |= EPOLLOUT;
+            if flags.contains(thirdparty::dbus::WatchFlags::WRITABLE) {
+                event_type |= platform::linux::EPOLLOUT;
             }
 
             if watch.enabled() {
@@ -4184,7 +4200,11 @@ fn main() {
                     .alloc(PollFDType::DBusWatch(watch as *mut _));
 
                 self.epoll
-                    .add(&watch.as_raw_fd(), event_type, EpollData::U64(pool_index))
+                    .add(
+                        &watch.as_raw_fd(),
+                        event_type,
+                        platform::linux::EpollData::U64(pool_index),
+                    )
                     .unwrap();
                 self.fd_to_pool_index.insert(watch.as_raw_fd(), pool_index);
             } else {
@@ -4288,18 +4308,18 @@ fn main() {
                     }
                     Some(&PollFDType::DBusWatch(watch_ptr)) => {
                         let watch_ptr = unsafe { &mut *watch_ptr };
-                        let mut flags = dbus::WatchFlags::empty();
-                        if (e.events & EPOLLIN) != 0 {
-                            flags |= dbus::WatchFlags::READABLE;
+                        let mut flags = thirdparty::dbus::WatchFlags::empty();
+                        if (e.events & platform::linux::EPOLLIN) != 0 {
+                            flags |= thirdparty::dbus::WatchFlags::READABLE;
                         }
-                        if (e.events & EPOLLOUT) != 0 {
-                            flags |= dbus::WatchFlags::WRITABLE;
+                        if (e.events & platform::linux::EPOLLOUT) != 0 {
+                            flags |= thirdparty::dbus::WatchFlags::WRITABLE;
                         }
-                        if (e.events & EPOLLERR) != 0 {
-                            flags |= dbus::WatchFlags::ERROR;
+                        if (e.events & platform::linux::EPOLLERR) != 0 {
+                            flags |= thirdparty::dbus::WatchFlags::ERROR;
                         }
-                        if (e.events & EPOLLHUP) != 0 {
-                            flags |= dbus::WatchFlags::HANGUP;
+                        if (e.events & platform::linux::EPOLLHUP) != 0 {
+                            flags |= thirdparty::dbus::WatchFlags::HANGUP;
                         }
                         if !watch_ptr.handle(flags) {
                             tracing::warn!(?flags, "dbus_watch_handle failed");
@@ -4371,7 +4391,7 @@ fn main() {
         #[cfg(target_os = "linux")]
         while let Some(m) = dbus.underlying_mut().pop_message() {
             println!("!! dbus msg recv: {}", m.r#type());
-            if m.r#type() == dbus::MESSAGE_TYPE_METHOD_RETURN {
+            if m.r#type() == thirdparty::dbus::MESSAGE_TYPE_METHOD_RETURN {
                 // method return
                 println!(
                     "!! method return data: {} {:?}",
@@ -4396,7 +4416,7 @@ fn main() {
                         w.wake();
                     }
                 }
-            } else if m.r#type() == dbus::MESSAGE_TYPE_SIGNAL {
+            } else if m.r#type() == thirdparty::dbus::MESSAGE_TYPE_SIGNAL {
                 // signal
                 println!(
                     "!! signal data: {:?} {:?} {:?}",
@@ -5692,16 +5712,19 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 struct DBusLink {
-    con: RefCell<dbus::Connection>,
+    con: RefCell<thirdparty::dbus::Connection>,
 }
 #[cfg(target_os = "linux")]
 impl DBusLink {
     #[inline(always)]
-    pub fn underlying_mut(&self) -> std::cell::RefMut<dbus::Connection> {
+    pub fn underlying_mut(&self) -> std::cell::RefMut<thirdparty::dbus::Connection> {
         self.con.borrow_mut()
     }
 
-    pub async fn send(&self, mut msg: dbus::Message) -> Option<dbus::Message> {
+    pub async fn send(
+        &self,
+        mut msg: thirdparty::dbus::Message,
+    ) -> Option<thirdparty::dbus::Message> {
         let Some(serial) = self.con.borrow_mut().send_with_serial(&mut msg) else {
             return None;
         };
@@ -5775,7 +5798,7 @@ async fn app_menu_on_add_sprite<'subsystem>(
     // TODO: これUIだして待つべきか？ローカルだからあんまり待たないような気もするが......
     let reply_msg = dbus
         .send(
-            dbus::Message::new_method_call(
+            thirdparty::dbus::Message::new_method_call(
                 Some(c"org.freedesktop.portal.Desktop"),
                 c"/org/freedesktop/portal/desktop",
                 Some(c"org.freedesktop.DBus.Introspectable"),
@@ -5798,12 +5821,12 @@ async fn app_menu_on_add_sprite<'subsystem>(
     };
 
     let mut has_file_chooser = false;
-    if let Err(e) = dbus::introspect_document::read_toplevel(
+    if let Err(e) = thirdparty::dbus::introspect_document::read_toplevel(
         &mut quick_xml::Reader::from_str(doc),
         |_, ifname, r| {
             has_file_chooser = ifname.as_ref() == b"org.freedesktop.portal.FileChooser";
 
-            dbus::introspect_document::skip_read_interface_tag_contents(r)
+            thirdparty::dbus::introspect_document::skip_read_interface_tag_contents(r)
         },
     ) {
         tracing::warn!(reason = ?e, "Failed to parse introspection document from portal object");
@@ -5821,7 +5844,7 @@ async fn app_menu_on_add_sprite<'subsystem>(
 
     let reply_msg = dbus
         .send({
-            let mut msg = dbus::Message::new_method_call(
+            let mut msg = thirdparty::dbus::Message::new_method_call(
                 Some(c"org.freedesktop.portal.Desktop"),
                 c"/org/freedesktop/portal/desktop",
                 Some(c"org.freedesktop.DBus.Properties"),
@@ -5877,7 +5900,7 @@ async fn app_menu_on_add_sprite<'subsystem>(
 
     let reply_msg = dbus
         .send({
-            let mut msg = dbus::Message::new_method_call(
+            let mut msg = thirdparty::dbus::Message::new_method_call(
                 Some(c"org.freedesktop.portal.Desktop"),
                 c"/org/freedesktop/portal/desktop",
                 Some(c"org.freedesktop.portal.FileChooser"),
@@ -5889,25 +5912,25 @@ async fn app_menu_on_add_sprite<'subsystem>(
             msg_args_appender.append_cstr(c"");
             msg_args_appender.append_cstr(c"Add Sprite");
             let mut options_appender = msg_args_appender
-                .open_container(dbus::TYPE_ARRAY, c"{sv}")
+                .open_container(thirdparty::dbus::TYPE_ARRAY, c"{sv}")
                 .unwrap();
             let mut dict_appender = options_appender
-                .open_container(dbus::TYPE_DICT_ENTRY, c"sv")
+                .open_container(thirdparty::dbus::TYPE_DICT_ENTRY, c"sv")
                 .unwrap();
             dict_appender.append_cstr(c"handle_token");
             let mut handle_token_option_variant_appender = dict_appender
-                .open_container(dbus::TYPE_VARIANT, c"s")
+                .open_container(thirdparty::dbus::TYPE_VARIANT, c"s")
                 .unwrap();
             handle_token_option_variant_appender
                 .append_cstr(&std::ffi::CString::new(dialog_token.clone()).unwrap());
             handle_token_option_variant_appender.close();
             dict_appender.close();
             let mut dict_appender = options_appender
-                .open_container(dbus::TYPE_DICT_ENTRY, c"sv")
+                .open_container(thirdparty::dbus::TYPE_DICT_ENTRY, c"sv")
                 .unwrap();
             dict_appender.append_cstr(c"multiple");
             let mut multiple_option_variant_appender = dict_appender
-                .open_container(dbus::TYPE_VARIANT, c"b")
+                .open_container(thirdparty::dbus::TYPE_VARIANT, c"b")
                 .unwrap();
             multiple_option_variant_appender.append_bool(true);
             multiple_option_variant_appender.close();
@@ -5950,7 +5973,7 @@ async fn app_menu_on_add_sprite<'subsystem>(
 
     println!("open file response! {:?}", resp.signature());
     let mut resp_iter = resp.iter();
-    assert_eq!(resp_iter.arg_type(), dbus::TYPE_UINT);
+    assert_eq!(resp_iter.arg_type(), thirdparty::dbus::TYPE_UINT);
     let response = unsafe { resp_iter.get_u32_unchecked() };
     if response != 0 {
         tracing::warn!(code = response, "FileChooser.OpenFile has cancelled");
@@ -5958,22 +5981,25 @@ async fn app_menu_on_add_sprite<'subsystem>(
     }
 
     resp_iter.next();
-    assert_eq!(resp_iter.arg_type(), dbus::TYPE_ARRAY);
+    assert_eq!(resp_iter.arg_type(), thirdparty::dbus::TYPE_ARRAY);
     let mut resp_results_iter = resp_iter.recurse();
     let mut uris = Vec::new();
-    while resp_results_iter.arg_type() != dbus::TYPE_INVALID {
-        assert_eq!(resp_results_iter.arg_type(), dbus::TYPE_DICT_ENTRY);
+    while resp_results_iter.arg_type() != thirdparty::dbus::TYPE_INVALID {
+        assert_eq!(
+            resp_results_iter.arg_type(),
+            thirdparty::dbus::TYPE_DICT_ENTRY
+        );
         let mut kv_iter = resp_results_iter.recurse();
 
-        assert_eq!(kv_iter.arg_type(), dbus::TYPE_STRING);
+        assert_eq!(kv_iter.arg_type(), thirdparty::dbus::TYPE_STRING);
         match unsafe { kv_iter.get_cstr_unchecked() } {
             x if x == c"uris" => {
                 kv_iter.next();
 
                 let mut value_iter = kv_iter.begin_iter_variant_content().unwrap();
                 let mut iter = value_iter.begin_iter_array_content().unwrap();
-                while iter.arg_type() != dbus::TYPE_INVALID {
-                    assert_eq!(iter.arg_type(), dbus::TYPE_STRING);
+                while iter.arg_type() != thirdparty::dbus::TYPE_INVALID {
+                    assert_eq!(iter.arg_type(), thirdparty::dbus::TYPE_STRING);
                     uris.push(std::ffi::CString::from(unsafe {
                         iter.get_cstr_unchecked()
                     }));
@@ -5985,14 +6011,14 @@ async fn app_menu_on_add_sprite<'subsystem>(
 
                 let mut value_iter = kv_iter.begin_iter_variant_content().unwrap();
                 let mut iter = value_iter.begin_iter_array_content().unwrap();
-                while iter.arg_type() != dbus::TYPE_INVALID {
-                    assert_eq!(iter.arg_type(), dbus::TYPE_STRUCT);
+                while iter.arg_type() != thirdparty::dbus::TYPE_INVALID {
+                    assert_eq!(iter.arg_type(), thirdparty::dbus::TYPE_STRUCT);
                     let mut elements_iter = iter.recurse();
-                    assert_eq!(elements_iter.arg_type(), dbus::TYPE_STRING);
+                    assert_eq!(elements_iter.arg_type(), thirdparty::dbus::TYPE_STRING);
                     let key =
                         unsafe { std::ffi::CString::from(elements_iter.get_cstr_unchecked()) };
                     elements_iter.next();
-                    assert_eq!(elements_iter.arg_type(), dbus::TYPE_STRING);
+                    assert_eq!(elements_iter.arg_type(), thirdparty::dbus::TYPE_STRING);
                     let value =
                         unsafe { std::ffi::CString::from(elements_iter.get_cstr_unchecked()) };
                     println!("choices {key:?} -> {value:?}");
@@ -6003,21 +6029,21 @@ async fn app_menu_on_add_sprite<'subsystem>(
             x if x == c"current_filter" => {
                 kv_iter.next();
 
-                assert_eq!(kv_iter.arg_type(), dbus::TYPE_STRUCT);
+                assert_eq!(kv_iter.arg_type(), thirdparty::dbus::TYPE_STRUCT);
                 let mut struct_iter = kv_iter.recurse();
-                assert_eq!(struct_iter.arg_type(), dbus::TYPE_STRING);
+                assert_eq!(struct_iter.arg_type(), thirdparty::dbus::TYPE_STRING);
                 let filter_name =
                     unsafe { std::ffi::CString::from(struct_iter.get_cstr_unchecked()) };
                 struct_iter.next();
-                assert_eq!(struct_iter.arg_type(), dbus::TYPE_ARRAY);
+                assert_eq!(struct_iter.arg_type(), thirdparty::dbus::TYPE_ARRAY);
                 let mut array_iter = struct_iter.recurse();
-                while array_iter.arg_type() != dbus::TYPE_INVALID {
-                    assert_eq!(array_iter.arg_type(), dbus::TYPE_STRUCT);
+                while array_iter.arg_type() != thirdparty::dbus::TYPE_INVALID {
+                    assert_eq!(array_iter.arg_type(), thirdparty::dbus::TYPE_STRUCT);
                     let mut struct_iter = array_iter.recurse();
-                    assert_eq!(struct_iter.arg_type(), dbus::TYPE_UINT);
+                    assert_eq!(struct_iter.arg_type(), thirdparty::dbus::TYPE_UINT);
                     let v = unsafe { struct_iter.get_u32_unchecked() };
                     struct_iter.next();
-                    assert_eq!(struct_iter.arg_type(), dbus::TYPE_STRING);
+                    assert_eq!(struct_iter.arg_type(), thirdparty::dbus::TYPE_STRING);
                     let f = unsafe { struct_iter.get_cstr_unchecked() };
                     println!("filter {filter_name:?}: {v} {f:?}");
                     array_iter.next();
@@ -6091,7 +6117,7 @@ async fn app_menu_on_add_sprite<'subsystem>(
 static mut DBUS_WAIT_FOR_REPLY_WAKERS: *mut HashMap<
     u32,
     Vec<(
-        std::rc::Weak<std::cell::Cell<Option<dbus::Message>>>,
+        std::rc::Weak<std::cell::Cell<Option<thirdparty::dbus::Message>>>,
         core::task::Waker,
     )>,
 > = core::ptr::null_mut();
@@ -6100,7 +6126,7 @@ static mut DBUS_WAIT_FOR_REPLY_WAKERS: *mut HashMap<
 static mut DBUS_WAIT_FOR_SIGNAL_WAKERS: *mut HashMap<
     (std::ffi::CString, std::ffi::CString, std::ffi::CString),
     Vec<(
-        std::rc::Weak<std::cell::Cell<Option<dbus::Message>>>,
+        std::rc::Weak<std::cell::Cell<Option<thirdparty::dbus::Message>>>,
         core::task::Waker,
     )>,
 > = core::ptr::null_mut();
@@ -6108,7 +6134,7 @@ static mut DBUS_WAIT_FOR_SIGNAL_WAKERS: *mut HashMap<
 #[cfg(target_os = "linux")]
 pub struct DBusWaitForReplyFuture {
     serial: u32,
-    reply: std::rc::Rc<std::cell::Cell<Option<dbus::Message>>>,
+    reply: std::rc::Rc<std::cell::Cell<Option<thirdparty::dbus::Message>>>,
 }
 #[cfg(target_os = "linux")]
 impl DBusWaitForReplyFuture {
@@ -6121,7 +6147,7 @@ impl DBusWaitForReplyFuture {
 }
 #[cfg(target_os = "linux")]
 impl core::future::Future for DBusWaitForReplyFuture {
-    type Output = dbus::Message;
+    type Output = thirdparty::dbus::Message;
 
     fn poll(
         self: std::pin::Pin<&mut Self>,
@@ -6150,7 +6176,7 @@ impl core::future::Future for DBusWaitForReplyFuture {
 #[cfg(target_os = "linux")]
 pub struct DBusWaitForSignalFuture {
     key: Option<(std::ffi::CString, std::ffi::CString, std::ffi::CString)>,
-    message: std::rc::Rc<std::cell::Cell<Option<dbus::Message>>>,
+    message: std::rc::Rc<std::cell::Cell<Option<thirdparty::dbus::Message>>>,
 }
 #[cfg(target_os = "linux")]
 impl DBusWaitForSignalFuture {
@@ -6167,7 +6193,7 @@ impl DBusWaitForSignalFuture {
 }
 #[cfg(target_os = "linux")]
 impl core::future::Future for DBusWaitForSignalFuture {
-    type Output = dbus::Message;
+    type Output = thirdparty::dbus::Message;
 
     fn poll(
         self: std::pin::Pin<&mut Self>,

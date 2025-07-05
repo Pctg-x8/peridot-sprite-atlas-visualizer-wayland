@@ -19,7 +19,8 @@ enum PointerOnSurface {
 }
 struct WaylandShellEventHandler<'a> {
     app_event_bus: &'a AppEventBus,
-    ui_scale_factor: Rc<Cell<f32>>,
+    cached_client_size: (u32, u32),
+    ui_scale_factor: f32,
     pointer_on_surface: PointerOnSurface,
     main_surface_proxy_ptr: *mut wl::Surface,
 }
@@ -31,6 +32,7 @@ impl wl::XdgSurfaceEventListener for WaylandShellEventHandler<'_> {
 }
 impl wl::XdgToplevelEventListener for WaylandShellEventHandler<'_> {
     fn configure(&mut self, _: &mut wl::XdgToplevel, width: i32, height: i32, states: &[i32]) {
+        self.cached_client_size = (width as _, height as _);
         self.app_event_bus.push(AppEvent::ToplevelWindowConfigure {
             width: width as _,
             height: height as _,
@@ -62,7 +64,7 @@ impl wl::SurfaceEventListener for WaylandShellEventHandler<'_> {
 
     fn preferred_buffer_scale(&mut self, surface: &mut wl::Surface, factor: i32) {
         tracing::trace!(factor, "preferred buffer scale");
-        self.ui_scale_factor.set(factor as _);
+        self.ui_scale_factor = factor as _;
         // 同じ値を適用することでdpi-awareになるらしい
         surface.set_buffer_scale(factor).unwrap();
         surface.commit().unwrap();
@@ -423,7 +425,9 @@ impl<'a> AppShell<'a> {
 
         let mut shell_event_handler = Box::new(WaylandShellEventHandler {
             app_event_bus: events,
-            ui_scale_factor: Rc::new(Cell::new(2.0)),
+            // 現時点ではわからないので適当な値を設定
+            cached_client_size: (640, 480),
+            ui_scale_factor: 2.0,
             pointer_on_surface: PointerOnSurface::None,
             main_surface_proxy_ptr: wl_surface.as_raw() as _,
         });
@@ -482,6 +486,15 @@ impl<'a> AppShell<'a> {
             )
             .execute(instance, None)
         }
+    }
+
+    pub fn client_size(&self) -> (f32, f32) {
+        let ui_scale_factor = self.shell_event_handler.ui_scale_factor;
+
+        (
+            self.shell_event_handler.cached_client_size.0 as f32 / ui_scale_factor,
+            self.shell_event_handler.cached_client_size.1 as f32 / ui_scale_factor,
+        )
     }
 
     #[tracing::instrument(skip(self))]
@@ -572,6 +585,14 @@ impl<'a> AppShell<'a> {
         }
     }
 
+    pub fn capture_pointer(&self) {
+        /* do nothing currently(maybe requires on floating-window system) */
+    }
+
+    pub fn release_pointer(&self) {
+        /* do nothing currently(maybe requires on floating-window system) */
+    }
+
     #[tracing::instrument(skip(self))]
     pub fn set_cursor_shape(&mut self, enter_serial: u32, shape: CursorShape) {
         if let Err(e) = unsafe { self.cursor_shape_device.as_mut() }.set_shape(
@@ -587,6 +608,6 @@ impl<'a> AppShell<'a> {
 
     #[inline]
     pub fn ui_scale_factor(&self) -> f32 {
-        self.shell_event_handler.ui_scale_factor.get()
+        self.shell_event_handler.ui_scale_factor
     }
 }

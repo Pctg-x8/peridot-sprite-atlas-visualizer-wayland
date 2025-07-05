@@ -185,7 +185,7 @@ impl<'subsystem> BackgroundWorker<'subsystem> {
 
     #[cfg(target_os = "linux")]
     #[inline(always)]
-    pub fn main_thread_waker(&self) -> &crate::platform::liunx::EventFD {
+    pub fn main_thread_waker(&self) -> &crate::platform::linux::EventFD {
         &self.main_thread_waker
     }
 
@@ -199,7 +199,7 @@ impl<'subsystem> BackgroundWorker<'subsystem> {
     pub fn clear_view_feedback_notification(&self) -> std::io::Result<()> {
         #[cfg(target_os = "linux")]
         {
-            self.view_feedback_notifier.take().map(drop)
+            self.main_thread_waker.take().map(drop)
         }
         #[cfg(windows)]
         {

@@ -79,7 +79,8 @@ pub struct hb_glyph_position_t {
 
 FFIOpaqueStruct!(pub struct hb_face_t);
 
-#[link(name = "harfbuzz", kind = "static")]
+#[cfg_attr(windows, link(name = "harfbuzz", kind = "static"))]
+#[cfg_attr(not(windows), link(name = "harfbuzz"))]
 // TODO: このへんいらないので外せるなら外したい（が、vcpkgでいれたharfbuzzのfreetypeがこれに依存してる......）
 #[cfg_attr(windows, link(name = "libpng16", kind = "static"))]
 #[cfg_attr(windows, link(name = "zlib", kind = "static"))]

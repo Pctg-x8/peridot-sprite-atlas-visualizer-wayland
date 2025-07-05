@@ -46,8 +46,8 @@ pub struct epoll_params {
 }
 
 pub const EPOLL_IOC_TYPE: core::ffi::c_uint = 0x8a;
-pub const EPIOCSPARAMS: core::ffi::c_uint = libc::_IOW::<epoll_params>(EPOLL_IOC_TYPE, 0x01);
-pub const EPIOCGPARAMS: core::ffi::c_uint = libc::_IOR::<epoll_params>(EPOLL_IOC_TYPE, 0x02);
+pub const EPIOCSPARAMS: libc::Ioctl = libc::_IOW::<epoll_params>(EPOLL_IOC_TYPE, 0x01);
+pub const EPIOCGPARAMS: libc::Ioctl = libc::_IOR::<epoll_params>(EPOLL_IOC_TYPE, 0x02);
 
 unsafe extern "C" {
     pub unsafe fn epoll_create1(flags: core::ffi::c_int) -> core::ffi::c_int;

@@ -61,6 +61,20 @@ impl SystemCommandButtonView {
     ];
     const MINIMIZE_ICON_INDICES: &'static [u16] = &[0, 1, 2, 2, 3, 0];
 
+    const MAXIMIZE_ICON_VERTICES: &'static [[f32; 2]] = &[
+        [0.0, 0.0],
+        [0.0 + 1.5 / Self::ICON_SIZE, 0.0 + 1.5 / Self::ICON_SIZE],
+        [1.0, 0.0],
+        [1.0 - 1.5 / Self::ICON_SIZE, 0.0 + 1.5 / Self::ICON_SIZE],
+        [1.0, 1.0],
+        [1.0 - 1.5 / Self::ICON_SIZE, 1.0 - 1.5 / Self::ICON_SIZE],
+        [0.0, 1.0],
+        [0.0 + 1.5 / Self::ICON_SIZE, 1.0 - 1.5 / Self::ICON_SIZE],
+    ];
+    const MAXIMIZE_ICON_INDICES: &'static [u16] = &[
+        0, 2, 3, 3, 1, 0, 2, 4, 5, 5, 3, 2, 4, 6, 7, 7, 5, 4, 6, 0, 1, 1, 7, 6,
+    ];
+
     pub fn new(init: &mut ViewInitContext, right_offset: f32, init_cmd: SystemCommand) -> Self {
         let icon_size_px = (Self::ICON_SIZE * init.ui_scale_factor).trunc() as u32;
         let icon_atlas_rect = init
@@ -78,7 +92,8 @@ impl SystemCommandButtonView {
                 indices = Self::MINIMIZE_ICON_INDICES;
             }
             SystemCommand::Maximize => {
-                unimplemented!()
+                vertices = Self::MAXIMIZE_ICON_VERTICES;
+                indices = Self::MAXIMIZE_ICON_INDICES;
             }
             SystemCommand::Restore => {
                 unimplemented!()
@@ -998,9 +1013,14 @@ impl Presenter {
         let menu_button_view = MenuButtonView::new(&mut init.for_view, base_view.height);
         let close_button_view =
             SystemCommandButtonView::new(&mut init.for_view, 0.0, SystemCommand::Close);
-        let minimize_button_view = SystemCommandButtonView::new(
+        let maximize_restore_button_view = SystemCommandButtonView::new(
             &mut init.for_view,
             SystemCommandButtonView::WIDTH,
+            SystemCommand::Maximize,
+        );
+        let minimize_button_view = SystemCommandButtonView::new(
+            &mut init.for_view,
+            SystemCommandButtonView::WIDTH * 2.0,
             SystemCommand::Minimize,
         );
 
@@ -1014,6 +1034,11 @@ impl Presenter {
             base_view.ct_root,
             base_view.ht_root,
         );
+        maximize_restore_button_view.mount(
+            init.for_view.base_system,
+            base_view.ct_root,
+            base_view.ht_root,
+        );
         minimize_button_view.mount(
             init.for_view.base_system,
             base_view.ct_root,
@@ -1022,7 +1047,11 @@ impl Presenter {
 
         let action_handler = Rc::new(ActionHandler {
             menu_button_view,
-            system_command_button_views: vec![close_button_view, minimize_button_view],
+            system_command_button_views: vec![
+                close_button_view,
+                maximize_restore_button_view,
+                minimize_button_view,
+            ],
         });
         init.for_view
             .base_system

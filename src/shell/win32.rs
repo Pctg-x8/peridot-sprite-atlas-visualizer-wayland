@@ -404,7 +404,7 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
                 surface_x: p[0].x as f32 / ui_scale_factor,
                 surface_y: p[0].y as f32 / ui_scale_factor,
             });
-            return LRESULT(0);
+            // Note: NCMOUSEMOVEはデフォルト動作もさせる
         }
 
         unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }

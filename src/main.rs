@@ -67,6 +67,8 @@ pub enum AppEvent {
     },
     ToplevelWindowClose,
     ToplevelWindowFrameTiming,
+    ToplevelWindowMinimizeRequest,
+    ToplevelWindowMaximizeRequest,
     MainWindowPointerMove {
         enter_serial: u32,
         surface_x: f32,
@@ -4387,6 +4389,12 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                 AppEvent::ToplevelWindowClose => {
                     app_shell.close_safe();
                     break 'app;
+                }
+                AppEvent::ToplevelWindowMinimizeRequest => {
+                    app_shell.minimize();
+                }
+                AppEvent::ToplevelWindowMaximizeRequest => {
+                    app_shell.maximize();
                 }
                 AppEvent::ToplevelWindowFrameTiming => {
                     let current_t = t.elapsed();

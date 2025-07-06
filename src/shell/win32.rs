@@ -35,8 +35,8 @@ use windows::{
                 GetWindowLongPtrW, GetWindowRect, HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON,
                 HTMINBUTTON, IDC_ARROW, IDC_SIZEWE, IDI_APPLICATION, IsWindow, LoadCursorW,
                 LoadIconW, MSG, NCCALCSIZE_PARAMS, PM_REMOVE, PeekMessageW, RegisterClassExW,
-                SM_CXSIZEFRAME, SM_CYSIZEFRAME, SW_SHOWNORMAL, SWP_FRAMECHANGED, SetCursor,
-                SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
+                SM_CXSIZEFRAME, SM_CYSIZEFRAME, SW_SHOWMAXIMIZED, SW_SHOWNORMAL, SWP_FRAMECHANGED,
+                SetCursor, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
                 WINDOW_LONG_PTR_INDEX, WM_ACTIVATE, WM_DESTROY, WM_DPICHANGED, WM_LBUTTONDOWN,
                 WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN,
                 WM_NCLBUTTONUP, WM_NCMOUSEMOVE, WM_SIZE, WNDCLASS_STYLES, WNDCLASSEXW,
@@ -521,6 +521,18 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
         if let Err(e) = unsafe { ReleaseCapture() } {
             tracing::warn!(reason = ?e, "ReleaseCapture() failed");
         }
+    }
+
+    #[inline]
+    pub fn minimize(&self) {
+        if let Err(e) = unsafe { CloseWindow(self.hwnd) } {
+            tracing::warn!(reason = ?e, "CloseWindow failed");
+        }
+    }
+
+    #[inline]
+    pub fn maximize(&self) {
+        let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWMAXIMIZED) };
     }
 
     #[inline]

@@ -986,8 +986,16 @@ impl HitTestTreeActionHandler for ActionHandler {
                     SystemCommand::Close => {
                         context.event_queue.push(AppEvent::ToplevelWindowClose);
                     }
-                    SystemCommand::Minimize => (),
-                    SystemCommand::Maximize => (),
+                    SystemCommand::Minimize => {
+                        context
+                            .event_queue
+                            .push(AppEvent::ToplevelWindowMinimizeRequest);
+                    }
+                    SystemCommand::Maximize => {
+                        context
+                            .event_queue
+                            .push(AppEvent::ToplevelWindowMaximizeRequest);
+                    }
                     SystemCommand::Restore => (),
                 }
                 return EventContinueControl::STOP_PROPAGATION;

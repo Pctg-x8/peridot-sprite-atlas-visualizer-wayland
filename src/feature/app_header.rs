@@ -13,7 +13,7 @@ use crate::{
         AnimatableColor, AnimatableFloat, AnimationData, AtlasRect, CompositeMode, CompositeRect,
         CompositeTree, CompositeTreeRef,
     },
-    hittest::{HitTestTreeActionHandler, HitTestTreeData, HitTestTreeRef, PointerActionArgs},
+    hittest::{HitTestTreeActionHandler, HitTestTreeData, HitTestTreeRef, PointerActionArgs, Role},
     input::EventContinueControl,
     subsystem::StagingScratchBufferMapMode,
     text::TextLayout,
@@ -53,14 +53,40 @@ impl SystemCommandButtonView {
     ];
     const CLOSE_ICON_INDICES: &'static [u16] = &[0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4];
 
+    const MINIMIZE_ICON_VERTICES: &'static [[f32; 2]] = &[
+        [0.0, 1.0 - 1.5 / Self::ICON_SIZE],
+        [0.0, 1.0],
+        [1.0, 1.0],
+        [1.0, 1.0 - 1.5 / Self::ICON_SIZE],
+    ];
+    const MINIMIZE_ICON_INDICES: &'static [u16] = &[0, 1, 2, 2, 3, 0];
+
     pub fn new(init: &mut ViewInitContext, right_offset: f32, init_cmd: SystemCommand) -> Self {
         let icon_size_px = (Self::ICON_SIZE * init.ui_scale_factor).trunc() as u32;
         let icon_atlas_rect = init
             .base_system
             .alloc_mask_atlas_rect(icon_size_px, icon_size_px);
 
-        let indices_offset = core::mem::size_of::<[f32; 2]>() * Self::CLOSE_ICON_VERTICES.len();
-        let bufsize = indices_offset + core::mem::size_of::<u16>() * Self::CLOSE_ICON_INDICES.len();
+        let (vertices, indices);
+        match init_cmd {
+            SystemCommand::Close => {
+                vertices = Self::CLOSE_ICON_VERTICES;
+                indices = Self::CLOSE_ICON_INDICES;
+            }
+            SystemCommand::Minimize => {
+                vertices = Self::MINIMIZE_ICON_VERTICES;
+                indices = Self::MINIMIZE_ICON_INDICES;
+            }
+            SystemCommand::Maximize => {
+                unimplemented!()
+            }
+            SystemCommand::Restore => {
+                unimplemented!()
+            }
+        }
+
+        let indices_offset = core::mem::size_of::<[f32; 2]>() * vertices.len();
+        let bufsize = indices_offset + core::mem::size_of::<u16>() * indices.len();
         let mut buf = br::BufferObject::new(
             init.base_system.subsystem,
             &br::BufferCreateInfo::new(
@@ -90,15 +116,10 @@ impl SystemCommandButtonView {
         let h = mem.native_ptr();
         let p = mem.map(0..bufsize).unwrap();
         unsafe {
-            p.addr_of_mut::<[f32; 2]>(0).copy_from_nonoverlapping(
-                Self::CLOSE_ICON_VERTICES.as_ptr(),
-                Self::CLOSE_ICON_VERTICES.len(),
-            );
+            p.addr_of_mut::<[f32; 2]>(0)
+                .copy_from_nonoverlapping(vertices.as_ptr(), vertices.len());
             p.addr_of_mut::<u16>(indices_offset)
-                .copy_from_nonoverlapping(
-                    Self::CLOSE_ICON_INDICES.as_ptr(),
-                    Self::CLOSE_ICON_INDICES.len(),
-                );
+                .copy_from_nonoverlapping(indices.as_ptr(), indices.len());
         }
         if !init.base_system.is_coherent_memory_type(memindex) {
             unsafe {
@@ -218,7 +239,7 @@ impl SystemCommandButtonView {
                 .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline)
                 .bind_vertex_buffer_array(0, &[buf.as_transparent_ref()], &[0])
                 .bind_index_buffer(&buf, indices_offset, br::IndexType::U16)
-                .draw_indexed(Self::CLOSE_ICON_INDICES.len() as _, 1, 0, 0, 0)
+                .draw_indexed(indices.len() as _, 1, 0, 0, 0)
                 .end_render_pass2(&br::SubpassEndInfo::new())
                 .pipeline_barrier_2(&br::DependencyInfo::new(
                     &[],
@@ -275,7 +296,7 @@ impl SystemCommandButtonView {
         let ct_root = init.base_system.register_composite_rect(CompositeRect {
             relative_offset_adjustment: [1.0, 0.0],
             offset: [
-                AnimatableFloat::Value((right_offset - Self::WIDTH) * init.ui_scale_factor),
+                AnimatableFloat::Value((-right_offset - Self::WIDTH) * init.ui_scale_factor),
                 AnimatableFloat::Value(0.0),
             ],
             relative_size_adjustment: [0.0, 1.0],
@@ -288,7 +309,10 @@ impl SystemCommandButtonView {
         let ct_hover = init.base_system.register_composite_rect(CompositeRect {
             relative_size_adjustment: [1.0, 1.0],
             has_bitmap: true,
-            composite_mode: CompositeMode::FillColor(AnimatableColor::Value([1.0, 0.0, 0.0, 1.0])),
+            composite_mode: CompositeMode::FillColor(AnimatableColor::Value(match init_cmd {
+                SystemCommand::Close => [1.0, 0.0, 0.0, 1.0],
+                _ => [1.0, 1.0, 1.0, 0.5],
+            })),
             opacity: AnimatableFloat::Value(0.0),
             ..Default::default()
         });
@@ -313,7 +337,7 @@ impl SystemCommandButtonView {
         init.base_system.set_composite_tree_parent(ct_icon, ct_root);
 
         let ht_root = init.base_system.create_hit_tree(HitTestTreeData {
-            left: right_offset - Self::WIDTH,
+            left: -right_offset - Self::WIDTH,
             left_adjustment_factor: 1.0,
             width: Self::WIDTH,
             height_adjustment_factor: 1.0,
@@ -344,9 +368,29 @@ impl SystemCommandButtonView {
     fn update(&self, ct: &mut CompositeTree, current_sec: f32) {
         if self.is_dirty.replace(false) {
             ct.get_mut(self.ct_hover).opacity = if self.hovering.get() {
-                AnimatableFloat::Value(1.0)
+                AnimatableFloat::Animated(
+                    0.0,
+                    AnimationData {
+                        to_value: 1.0,
+                        start_sec: current_sec,
+                        end_sec: current_sec + 0.1,
+                        curve_p1: (0.5, 0.5),
+                        curve_p2: (0.5, 0.5),
+                        event_on_complete: None,
+                    },
+                )
             } else {
-                AnimatableFloat::Value(0.0)
+                AnimatableFloat::Animated(
+                    1.0,
+                    AnimationData {
+                        to_value: 0.0,
+                        start_sec: current_sec,
+                        end_sec: current_sec + 0.1,
+                        curve_p1: (0.5, 0.5),
+                        curve_p2: (0.5, 0.5),
+                        event_on_complete: None,
+                    },
+                )
             };
 
             ct.mark_dirty(self.ct_hover);
@@ -811,13 +855,21 @@ impl BaseView {
 
 struct ActionHandler {
     menu_button_view: MenuButtonView,
-    close_button_view: SystemCommandButtonView,
+    system_command_button_views: Vec<SystemCommandButtonView>,
 }
 impl HitTestTreeActionHandler for ActionHandler {
-    fn role(&self, sender: HitTestTreeRef) -> Option<crate::hittest::Role> {
-        if sender == self.close_button_view.ht_root {
-            return Some(crate::hittest::Role::CloseButton);
+    fn role(&self, sender: HitTestTreeRef) -> Option<Role> {
+        for x in self.system_command_button_views.iter() {
+            if sender == x.ht_root {
+                return match x.cmd.get() {
+                    SystemCommand::Close => Some(Role::CloseButton),
+                    SystemCommand::Minimize => Some(Role::MinimizeButton),
+                    SystemCommand::Maximize => Some(Role::MaximizeButton),
+                    SystemCommand::Restore => Some(Role::RestoreButton),
+                };
+            }
         }
+
         if sender == self.menu_button_view.ht_root {
             return Some(crate::hittest::Role::ForceClient);
         }
@@ -836,9 +888,11 @@ impl HitTestTreeActionHandler for ActionHandler {
             return EventContinueControl::STOP_PROPAGATION;
         }
 
-        if sender == self.close_button_view.ht_root {
-            self.close_button_view.on_hover();
-            return EventContinueControl::STOP_PROPAGATION;
+        for x in self.system_command_button_views.iter() {
+            if sender == x.ht_root {
+                x.on_hover();
+                return EventContinueControl::STOP_PROPAGATION;
+            }
         }
 
         EventContinueControl::empty()
@@ -855,9 +909,11 @@ impl HitTestTreeActionHandler for ActionHandler {
             return EventContinueControl::STOP_PROPAGATION;
         }
 
-        if sender == self.close_button_view.ht_root {
-            self.close_button_view.on_leave();
-            return EventContinueControl::STOP_PROPAGATION;
+        for x in self.system_command_button_views.iter() {
+            if sender == x.ht_root {
+                x.on_leave();
+                return EventContinueControl::STOP_PROPAGATION;
+            }
         }
 
         EventContinueControl::empty()
@@ -869,8 +925,10 @@ impl HitTestTreeActionHandler for ActionHandler {
         _context: &mut AppUpdateContext,
         _args: &PointerActionArgs,
     ) -> EventContinueControl {
-        if sender == self.close_button_view.ht_root {
-            return EventContinueControl::STOP_PROPAGATION;
+        for x in self.system_command_button_views.iter() {
+            if sender == x.ht_root {
+                return EventContinueControl::STOP_PROPAGATION;
+            }
         }
 
         if sender == self.menu_button_view.ht_root {
@@ -887,8 +945,10 @@ impl HitTestTreeActionHandler for ActionHandler {
         _context: &mut AppUpdateContext,
         _args: &PointerActionArgs,
     ) -> EventContinueControl {
-        if sender == self.close_button_view.ht_root {
-            return EventContinueControl::STOP_PROPAGATION;
+        for x in self.system_command_button_views.iter() {
+            if sender == x.ht_root {
+                return EventContinueControl::STOP_PROPAGATION;
+            }
         }
 
         if sender == self.menu_button_view.ht_root {
@@ -905,9 +965,18 @@ impl HitTestTreeActionHandler for ActionHandler {
         context: &mut AppUpdateContext,
         _args: &PointerActionArgs,
     ) -> EventContinueControl {
-        if sender == self.close_button_view.ht_root {
-            context.event_queue.push(AppEvent::ToplevelWindowClose);
-            return EventContinueControl::STOP_PROPAGATION;
+        for x in self.system_command_button_views.iter() {
+            if sender == x.ht_root {
+                match x.cmd.get() {
+                    SystemCommand::Close => {
+                        context.event_queue.push(AppEvent::ToplevelWindowClose);
+                    }
+                    SystemCommand::Minimize => (),
+                    SystemCommand::Maximize => (),
+                    SystemCommand::Restore => (),
+                }
+                return EventContinueControl::STOP_PROPAGATION;
+            }
         }
 
         if sender == self.menu_button_view.ht_root {
@@ -929,6 +998,11 @@ impl Presenter {
         let menu_button_view = MenuButtonView::new(&mut init.for_view, base_view.height);
         let close_button_view =
             SystemCommandButtonView::new(&mut init.for_view, 0.0, SystemCommand::Close);
+        let minimize_button_view = SystemCommandButtonView::new(
+            &mut init.for_view,
+            SystemCommandButtonView::WIDTH,
+            SystemCommand::Minimize,
+        );
 
         menu_button_view.mount(
             init.for_view.base_system,
@@ -940,10 +1014,15 @@ impl Presenter {
             base_view.ct_root,
             base_view.ht_root,
         );
+        minimize_button_view.mount(
+            init.for_view.base_system,
+            base_view.ct_root,
+            base_view.ht_root,
+        );
 
         let action_handler = Rc::new(ActionHandler {
             menu_button_view,
-            close_button_view,
+            system_command_button_views: vec![close_button_view, minimize_button_view],
         });
         init.for_view
             .base_system
@@ -953,10 +1032,12 @@ impl Presenter {
             .base_system
             .hit_tree
             .set_action_handler(action_handler.menu_button_view.ht_root, &action_handler);
-        init.for_view
-            .base_system
-            .hit_tree
-            .set_action_handler(action_handler.close_button_view.ht_root, &action_handler);
+        for x in action_handler.system_command_button_views.iter() {
+            init.for_view
+                .base_system
+                .hit_tree
+                .set_action_handler(x.ht_root, &action_handler);
+        }
 
         Self {
             base_view,
@@ -975,9 +1056,9 @@ impl Presenter {
 
     pub fn update(&self, ct: &mut CompositeTree, current_sec: f32) {
         self.action_handler.menu_button_view.update(ct, current_sec);
-        self.action_handler
-            .close_button_view
-            .update(ct, current_sec);
+        for x in self.action_handler.system_command_button_views.iter() {
+            x.update(ct, current_sec);
+        }
     }
 
     pub const fn height(&self) -> f32 {

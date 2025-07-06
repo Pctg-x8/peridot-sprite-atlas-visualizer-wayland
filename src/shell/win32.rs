@@ -362,9 +362,7 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
             return LRESULT(0);
         }
 
-        if (msg == WM_NCLBUTTONDOWN || msg == WM_NCLBUTTONUP || msg == WM_NCMOUSEMOVE)
-            && wparam.0 == HTCAPTION as _
-        {
+        if (msg == WM_NCLBUTTONDOWN || msg == WM_NCLBUTTONUP) && wparam.0 == HTCAPTION as _ {
             // TitleBarの挙動はシステムにおまかせ
             return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
         }

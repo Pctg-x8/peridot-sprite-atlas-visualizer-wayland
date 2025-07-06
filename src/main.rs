@@ -213,8 +213,8 @@ pub struct PresenterInitContext<'r, 'state, 'app_system, 'subsystem> {
     pub app_state: &'state mut AppState<'subsystem>,
 }
 
-pub struct ViewFeedbackContext<'d> {
-    pub composite_tree: &'d mut CompositeTree,
+pub struct ViewFeedbackContext<'base_system, 'subsystem> {
+    pub base_system: &'base_system mut AppBaseSystem<'subsystem>,
     pub current_sec: f32,
 }
 
@@ -1086,8 +1086,11 @@ pub struct SpriteListCellView {
     ct_bg: CompositeTreeRef,
     ct_bg_selected: CompositeTreeRef,
     ct_label: CompositeTreeRef,
+    ht_root: HitTestTreeRef,
     top: Cell<f32>,
     ui_scale: Cell<f32>,
+    hovering: TriggerCell<bool>,
+    bound_sprite_index: Cell<usize>,
 }
 impl SpriteListCellView {
     const CORNER_RADIUS: f32 = 8.0;
@@ -1096,7 +1099,12 @@ impl SpriteListCellView {
     const LABEL_MARGIN_LEFT: f32 = 8.0;
 
     #[tracing::instrument(name = "SpriteListCellView::new", skip(init))]
-    pub fn new(init: &mut ViewInitContext, init_label: &str, init_top: f32) -> Self {
+    pub fn new(
+        init: &mut ViewInitContext,
+        init_label: &str,
+        init_top: f32,
+        init_sprite_index: usize,
+    ) -> Self {
         let label_layout =
             TextLayout::build_simple(init_label, &mut init.base_system.fonts.ui_default);
         let label_atlas_rect = init
@@ -1261,24 +1269,28 @@ impl SpriteListCellView {
                 AnimatableFloat::Value(label_layout.height()),
             ],
             instance_slot_index: Some(0),
-            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.1, 0.1, 0.1, 1.0])),
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
             texatlas_rect: label_atlas_rect,
             ..Default::default()
         });
         let ct_bg = init.base_system.register_composite_rect(CompositeRect {
             relative_size_adjustment: [1.0, 1.0],
             instance_slot_index: Some(0),
-            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 0.25])),
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([
+                1.0, 1.0, 1.0, 0.125,
+            ])),
             texatlas_rect: bg_atlas_rect.clone(),
             slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
+            opacity: AnimatableFloat::Value(0.0),
             ..Default::default()
         });
         let ct_bg_selected = init.base_system.register_composite_rect(CompositeRect {
             relative_size_adjustment: [1.0, 1.0],
             instance_slot_index: Some(0),
-            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.6, 0.8, 1.0, 0.0])),
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.6, 0.8, 1.0, 0.25])),
             texatlas_rect: bg_atlas_rect,
             slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
+            opacity: AnimatableFloat::Value(0.0),
             ..Default::default()
         });
 
@@ -1288,22 +1300,103 @@ impl SpriteListCellView {
         init.base_system
             .set_composite_tree_parent(ct_label, ct_root);
 
+        let ht_root = init.base_system.create_hit_tree(HitTestTreeData {
+            left: Self::MARGIN_H,
+            top: init_top,
+            width_adjustment_factor: 1.0,
+            width: -Self::MARGIN_H * 2.0,
+            height: Self::HEIGHT,
+            ..Default::default()
+        });
+
         Self {
             ct_root,
             ct_label,
             ct_bg,
             ct_bg_selected,
+            ht_root,
             top: Cell::new(init_top),
             ui_scale: Cell::new(init.ui_scale_factor),
+            hovering: TriggerCell::new(false),
+            bound_sprite_index: Cell::new(init_sprite_index),
         }
     }
 
-    pub fn mount(&self, ct_parent: CompositeTreeRef, ct: &mut CompositeTree) {
-        ct.add_child(ct_parent, self.ct_root);
+    pub fn mount(
+        &self,
+        ct_parent: CompositeTreeRef,
+        ht_parent: HitTestTreeRef,
+        base_system: &mut AppBaseSystem,
+    ) {
+        base_system.set_tree_parent((self.ct_root, self.ht_root), (ct_parent, ht_parent));
     }
 
-    pub fn unmount(&self, ct: &mut CompositeTree) {
-        ct.remove_child(self.ct_root);
+    pub fn update(&self, base_system: &mut AppBaseSystem, current_sec: f32) {
+        if let Some(hovering) = self.hovering.get_if_triggered() {
+            base_system.composite_tree.get_mut(self.ct_bg).opacity = if hovering {
+                AnimatableFloat::Animated(
+                    0.0,
+                    AnimationData {
+                        to_value: 1.0,
+                        start_sec: current_sec,
+                        end_sec: current_sec + 0.1,
+                        curve_p1: (0.5, 0.5),
+                        curve_p2: (0.5, 0.5),
+                        event_on_complete: None,
+                    },
+                )
+            } else {
+                AnimatableFloat::Animated(
+                    1.0,
+                    AnimationData {
+                        to_value: 0.0,
+                        start_sec: current_sec,
+                        end_sec: current_sec + 0.1,
+                        curve_p1: (0.5, 0.5),
+                        curve_p2: (0.5, 0.5),
+                        event_on_complete: None,
+                    },
+                )
+            };
+        }
+    }
+
+    pub fn unmount(&self, base_system: &mut AppBaseSystem) {
+        base_system.composite_tree.remove_child(self.ct_root);
+        base_system.hit_tree.remove_child(self.ht_root);
+    }
+
+    pub fn on_hover(&self) {
+        self.hovering.set(true);
+    }
+
+    pub fn on_leave(&self) {
+        self.hovering.set(false);
+    }
+
+    pub fn on_select(&self, ct: &mut CompositeTree) {
+        ct.get_mut(self.ct_bg_selected).opacity = AnimatableFloat::Value(1.0);
+    }
+
+    pub fn on_deselect(&self, ct: &mut CompositeTree) {
+        ct.get_mut(self.ct_bg_selected).opacity = AnimatableFloat::Value(0.0);
+    }
+
+    pub fn set_top(&self, top: f32, base_system: &mut AppBaseSystem) {
+        let ui_scale_factor = self.ui_scale.get();
+
+        base_system.composite_tree.get_mut(self.ct_root).offset[1] =
+            AnimatableFloat::Value(top * ui_scale_factor);
+        base_system.hit_tree.get_data_mut(self.ht_root).top = top;
+        self.top.set(top);
+    }
+
+    pub fn set_name(&self, name: &str, subsystem: &Subsystem) {
+        // TODO
+    }
+
+    pub fn bind_sprite_index(&self, index: usize) {
+        self.bound_sprite_index.set(index);
     }
 }
 
@@ -1940,6 +2033,7 @@ impl SpriteListPaneView {
 pub struct SpriteListPaneActionHandler {
     view: Rc<SpriteListPaneView>,
     toggle_button_view: Rc<SpriteListToggleButtonView>,
+    cell_views: RefCell<Vec<SpriteListCellView>>,
     ht_resize_area: HitTestTreeRef,
     resize_state: Cell<Option<(f32, f32)>>,
     shown: Cell<bool>,
@@ -1965,6 +2059,13 @@ impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
             return EventContinueControl::STOP_PROPAGATION;
         }
 
+        for v in self.cell_views.borrow().iter() {
+            if sender == v.ht_root {
+                v.on_hover();
+                return EventContinueControl::STOP_PROPAGATION;
+            }
+        }
+
         EventContinueControl::empty()
     }
 
@@ -1978,6 +2079,13 @@ impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
             self.toggle_button_view.on_leave();
 
             return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        for v in self.cell_views.borrow().iter() {
+            if sender == v.ht_root {
+                v.on_leave();
+                return EventContinueControl::STOP_PROPAGATION;
+            }
         }
 
         EventContinueControl::empty()
@@ -2072,7 +2180,7 @@ impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
     fn on_click(
         &self,
         sender: HitTestTreeRef,
-        _context: &mut AppUpdateContext,
+        context: &mut AppUpdateContext,
         _args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
         if self.shown.get() && sender == self.view.ht_frame {
@@ -2096,13 +2204,25 @@ impl HitTestTreeActionHandler for SpriteListPaneActionHandler {
                 | EventContinueControl::RECOMPUTE_POINTER_ENTER;
         }
 
+        for v in self.cell_views.borrow().iter() {
+            if sender == v.ht_root {
+                context
+                    .state
+                    .borrow_mut()
+                    .select_sprite(v.bound_sprite_index.get());
+                return EventContinueControl::STOP_PROPAGATION;
+            }
+        }
+
         EventContinueControl::empty()
     }
 }
 
 pub struct SpriteListPanePresenter {
     view: Rc<SpriteListPaneView>,
-    cell_view: SpriteListCellView,
+    needs_rebuild_list_cells: Rc<Cell<bool>>,
+    sprite_list_contents: Rc<RefCell<Vec<(String, bool)>>>,
+    ui_scale_factor: f32,
     ht_action_handler: Rc<SpriteListPaneActionHandler>,
 }
 impl SpriteListPanePresenter {
@@ -2110,15 +2230,36 @@ impl SpriteListPanePresenter {
         let view = Rc::new(SpriteListPaneView::new(&mut init.for_view, header_height));
         let toggle_button_view = Rc::new(SpriteListToggleButtonView::new(&mut init.for_view));
 
-        let cell_view = SpriteListCellView::new(&mut init.for_view, "sprite cell", 32.0);
-
         toggle_button_view.mount(init.for_view.base_system, view.ct_root, view.ht_frame);
 
-        cell_view.mount(view.ct_root, &mut init.for_view.base_system.composite_tree);
+        let needs_rebuild_list_cells = Rc::new(Cell::new(false));
+        let sprite_list_contents = Rc::new(RefCell::new(Vec::new()));
+        init.app_state.register_sprites_view_feedback({
+            let sprite_list_contents = Rc::downgrade(&sprite_list_contents);
+            let needs_rebuild_list_cells = Rc::downgrade(&needs_rebuild_list_cells);
+
+            move |sprites| {
+                let Some(needs_rebuild_list_cells) = needs_rebuild_list_cells.upgrade() else {
+                    // presenter teardown-ed
+                    return;
+                };
+                let Some(sprite_list_contents) = sprite_list_contents.upgrade() else {
+                    // presenter teardown-ed
+                    return;
+                };
+
+                sprite_list_contents.borrow_mut().clear();
+                sprite_list_contents
+                    .borrow_mut()
+                    .extend(sprites.iter().map(|x| (x.name.clone(), x.selected)));
+                needs_rebuild_list_cells.set(true);
+            }
+        });
 
         let ht_action_handler = Rc::new(SpriteListPaneActionHandler {
             view: view.clone(),
             toggle_button_view: toggle_button_view.clone(),
+            cell_views: RefCell::new(Vec::new()),
             ht_resize_area: view.ht_resize_area,
             resize_state: Cell::new(None),
             shown: Cell::new(true),
@@ -2138,7 +2279,9 @@ impl SpriteListPanePresenter {
 
         Self {
             view,
-            cell_view,
+            needs_rebuild_list_cells,
+            sprite_list_contents,
+            ui_scale_factor: init.for_view.ui_scale_factor,
             ht_action_handler,
         }
     }
@@ -2152,11 +2295,65 @@ impl SpriteListPanePresenter {
         self.view.mount(app_system, ct_parent, ht_parent);
     }
 
-    pub fn update(&self, app_system: &mut AppBaseSystem, current_sec: f32) {
+    pub fn update<'r, 'base_system, 'subsystem>(
+        &mut self,
+        app_system: &'base_system mut AppBaseSystem<'subsystem>,
+        current_sec: f32,
+        staging_scratch_buffer: &'r mut StagingScratchBufferManager<'subsystem>,
+    ) {
         self.ht_action_handler.view.update(app_system, current_sec);
         self.ht_action_handler
             .toggle_button_view
             .update(app_system, current_sec);
+
+        if self.needs_rebuild_list_cells.replace(false) {
+            let sprite_list_contents = self.sprite_list_contents.borrow();
+            let visible_contents = &sprite_list_contents[..];
+            let mut cell_views = self.ht_action_handler.cell_views.borrow_mut();
+            for (n, &(ref c, sel)) in visible_contents.iter().enumerate() {
+                if cell_views.len() == n {
+                    // create new one
+                    let new_cell = SpriteListCellView::new(
+                        &mut ViewInitContext {
+                            base_system: app_system,
+                            staging_scratch_buffer,
+                            ui_scale_factor: self.ui_scale_factor,
+                        },
+                        c,
+                        32.0 + n as f32 * SpriteListCellView::HEIGHT,
+                        n,
+                    );
+                    new_cell.mount(
+                        self.ht_action_handler.view.ct_root,
+                        self.ht_action_handler.view.ht_frame,
+                        app_system,
+                    );
+                    app_system
+                        .hit_tree
+                        .set_action_handler(new_cell.ht_root, &self.ht_action_handler);
+                    if sel {
+                        new_cell.on_select(&mut app_system.composite_tree);
+                    }
+
+                    cell_views.push(new_cell);
+                    continue;
+                }
+
+                // reuse existing
+                cell_views[n].set_top(32.0 + n as f32 * SpriteListCellView::HEIGHT, app_system);
+                cell_views[n].set_name(c, app_system.subsystem);
+                cell_views[n].bind_sprite_index(n);
+                if sel {
+                    cell_views[n].on_select(&mut app_system.composite_tree);
+                } else {
+                    cell_views[n].on_deselect(&mut app_system.composite_tree);
+                }
+            }
+        }
+
+        for v in self.ht_action_handler.cell_views.borrow().iter() {
+            v.update(app_system, current_sec);
+        }
     }
 }
 
@@ -2371,6 +2568,9 @@ impl<'c> HitTestTreeActionHandler for HitTestRootTreeActionHandler<'c> {
 
                 // 選択インデックスが変わるわけではないのでここで選択枠Viewを復帰させる
                 marker_view.focus(sx as _, sy as _, base_width_pixels, base_height_pixels);
+
+                return EventContinueControl::STOP_PROPAGATION
+                    | EventContinueControl::RELEASE_CAPTURE_ELEMENT;
             }
         }
 
@@ -3506,7 +3706,7 @@ fn main() {
     });
 
     let app_header = feature::app_header::Presenter::new(&mut init_context);
-    let sprite_list_pane = SpriteListPanePresenter::new(&mut init_context, app_header.height());
+    let mut sprite_list_pane = SpriteListPanePresenter::new(&mut init_context, app_header.height());
     let app_menu = feature::app_menu::Presenter::new(&mut init_context, app_header.height());
 
     let current_selected_sprite_marker_view = Rc::new(CurrentSelectedSpriteMarkerView::new(
@@ -4161,7 +4361,11 @@ fn main() {
                         .update(&mut app_system.composite_tree, current_sec);
                     app_header.update(&mut app_system.composite_tree, current_sec);
                     app_menu.update(&mut app_system, current_sec);
-                    sprite_list_pane.update(&mut app_system, current_sec);
+                    sprite_list_pane.update(
+                        &mut app_system,
+                        current_sec,
+                        &mut staging_scratch_buffers.write().active_buffer_mut(),
+                    );
                     for p in popups.values() {
                         p.update(&mut app_system.composite_tree, current_sec);
                     }

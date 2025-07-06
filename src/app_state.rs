@@ -268,7 +268,6 @@ impl<'subsystem> AppState<'subsystem> {
         &mut self,
         mut fb: impl FnMut(&[SpriteInfo]) + 'subsystem,
     ) {
-        fb(&self.sprites);
         self.sprites_view_feedbacks.push(Box::new(fb));
     }
 

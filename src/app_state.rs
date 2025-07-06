@@ -264,10 +264,7 @@ impl<'subsystem> AppState<'subsystem> {
     }
 
     // TODO: unregister
-    pub fn register_sprites_view_feedback(
-        &mut self,
-        mut fb: impl FnMut(&[SpriteInfo]) + 'subsystem,
-    ) {
+    pub fn register_sprites_view_feedback(&mut self, fb: impl FnMut(&[SpriteInfo]) + 'subsystem) {
         self.sprites_view_feedbacks.push(Box::new(fb));
     }
 

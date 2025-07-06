@@ -213,7 +213,7 @@ impl CommonButtonView {
                     Self::PADDING_V * 2.0 * init.ui_scale_factor + text_layout.height(),
                 ),
             ],
-            instance_slot_index: Some(0),
+            has_bitmap: true,
             texatlas_rect: frame_image_atlas_rect,
             slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 0.0])),
@@ -221,7 +221,7 @@ impl CommonButtonView {
         });
         let ct_border = init.base_system.register_composite_rect(CompositeRect {
             relative_size_adjustment: [1.0, 1.0],
-            instance_slot_index: Some(0),
+            has_bitmap: true,
             texatlas_rect: frame_border_image_atlas_rect,
             slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 0.25])),
@@ -237,7 +237,7 @@ impl CommonButtonView {
                 AnimatableFloat::Value(text_layout.height()),
             ],
             relative_offset_adjustment: [0.5, 0.5],
-            instance_slot_index: Some(0),
+            has_bitmap: true,
             texatlas_rect: text_atlas_rect,
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
             ..Default::default()

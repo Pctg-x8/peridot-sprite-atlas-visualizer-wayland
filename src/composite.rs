@@ -313,7 +313,7 @@ impl<T> AnimationData<T> {
 }
 
 pub struct CompositeRect {
-    pub instance_slot_index: Option<usize>,
+    pub has_bitmap: bool,
     pub offset: [AnimatableFloat; 2],
     pub size: [AnimatableFloat; 2],
     pub relative_offset_adjustment: [f32; 2],
@@ -332,7 +332,7 @@ pub struct CompositeRect {
 impl Default for CompositeRect {
     fn default() -> Self {
         Self {
-            instance_slot_index: None,
+            has_bitmap: false,
             offset: [const { AnimatableFloat::Value(0.0) }; 2],
             size: [const { AnimatableFloat::Value(0.0) }; 2],
             relative_offset_adjustment: [0.0, 0.0],
@@ -1108,7 +1108,7 @@ impl CompositeTree {
                 }
             }
 
-            if let Some(_) = r.instance_slot_index {
+            if r.has_bitmap {
                 unsafe {
                     core::ptr::write(
                         mapped_head

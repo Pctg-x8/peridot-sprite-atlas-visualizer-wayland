@@ -424,7 +424,7 @@ impl CurrentSelectedSpriteMarkerView {
                     store.float_value(global_y_param) + store.float_value(view_offset_y_param)
                 })),
             ],
-            instance_slot_index: Some(0),
+            has_bitmap: true,
             slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
             texatlas_rect: border_image_atlas_rect,
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value(Self::COLOR)),
@@ -913,7 +913,7 @@ impl SpriteListToggleButtonView {
                 AnimatableFloat::Value(8.0 * init.ui_scale_factor),
             ],
             relative_offset_adjustment: [1.0, 0.0],
-            instance_slot_index: Some(0),
+            has_bitmap: true,
             texatlas_rect: circle_atlas_rect,
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 0.0])),
             ..Default::default()
@@ -928,7 +928,7 @@ impl SpriteListToggleButtonView {
                 AnimatableFloat::Value(Self::ICON_SIZE * init.ui_scale_factor),
                 AnimatableFloat::Value(Self::ICON_SIZE * init.ui_scale_factor),
             ],
-            instance_slot_index: Some(0),
+            has_bitmap: true,
             texatlas_rect: icon_atlas_rect.clone(),
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
             ..Default::default()
@@ -1268,14 +1268,14 @@ impl SpriteListCellView {
                 AnimatableFloat::Value(label_layout.width()),
                 AnimatableFloat::Value(label_layout.height()),
             ],
-            instance_slot_index: Some(0),
+            has_bitmap: true,
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
             texatlas_rect: label_atlas_rect,
             ..Default::default()
         });
         let ct_bg = init.base_system.register_composite_rect(CompositeRect {
             relative_size_adjustment: [1.0, 1.0],
-            instance_slot_index: Some(0),
+            has_bitmap: true,
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([
                 1.0, 1.0, 1.0, 0.125,
             ])),
@@ -1286,7 +1286,7 @@ impl SpriteListCellView {
         });
         let ct_bg_selected = init.base_system.register_composite_rect(CompositeRect {
             relative_size_adjustment: [1.0, 1.0],
-            instance_slot_index: Some(0),
+            has_bitmap: true,
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.6, 0.8, 1.0, 0.25])),
             texatlas_rect: bg_atlas_rect,
             slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
@@ -1880,7 +1880,7 @@ impl SpriteListPaneView {
                 ),
             ],
             relative_size_adjustment: [0.0, 1.0],
-            instance_slot_index: Some(0),
+            has_bitmap: true,
             texatlas_rect: frame_image_atlas_rect.clone(),
             slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
             composite_mode: CompositeMode::ColorTintBackdropBlur(
@@ -1890,7 +1890,7 @@ impl SpriteListPaneView {
             ..Default::default()
         });
         let ct_title_blurred = init.base_system.register_composite_rect(CompositeRect {
-            instance_slot_index: Some(0),
+            has_bitmap: true,
             offset: [
                 AnimatableFloat::Value(-(title_blurred_atlas_rect.width() as f32 * 0.5)),
                 AnimatableFloat::Value(
@@ -1907,7 +1907,7 @@ impl SpriteListPaneView {
             ..Default::default()
         });
         let ct_title = init.base_system.register_composite_rect(CompositeRect {
-            instance_slot_index: Some(0),
+            has_bitmap: true,
             offset: [
                 AnimatableFloat::Value(-(title_atlas_rect.width() as f32 * 0.5)),
                 AnimatableFloat::Value(12.0 * init.ui_scale_factor),

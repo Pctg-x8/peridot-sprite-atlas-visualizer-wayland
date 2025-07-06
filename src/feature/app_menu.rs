@@ -978,7 +978,7 @@ impl CommandButtonView {
                 ),
                 AnimatableFloat::Value(Self::BUTTON_HEIGHT * init.ui_scale_factor),
             ],
-            instance_slot_index: Some(0),
+            has_bitmap: true,
             texatlas_rect: bg_atlas_rect,
             slice_borders: [Self::BUTTON_HEIGHT * 0.5 * init.ui_scale_factor; 4],
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Expression(Box::new(
@@ -1001,7 +1001,7 @@ impl CommandButtonView {
                 AnimatableFloat::Value(-Self::ICON_SIZE * 0.5 * init.ui_scale_factor),
             ],
             relative_offset_adjustment: [0.0, 0.5],
-            instance_slot_index: Some(0),
+            has_bitmap: true,
             texatlas_rect: icon_atlas_rect,
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value(
                 Self::CONTENT_COLOR_HIDDEN,
@@ -1021,7 +1021,7 @@ impl CommandButtonView {
                 AnimatableFloat::Value(-label_layout.height() * 0.5),
             ],
             relative_offset_adjustment: [0.0, 0.5],
-            instance_slot_index: Some(0),
+            has_bitmap: true,
             texatlas_rect: label_atlas_rect,
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value(
                 Self::CONTENT_COLOR_HIDDEN,
@@ -1250,7 +1250,7 @@ impl BaseView {
     pub fn new(init: &mut ViewInitContext) -> Self {
         let ct_root = init.base_system.register_composite_rect(CompositeRect {
             relative_size_adjustment: [1.0, 1.0],
-            instance_slot_index: Some(0),
+            has_bitmap: true,
             composite_mode: CompositeMode::FillColor(AnimatableColor::Value([0.0, 0.0, 0.0, 0.0])),
             ..Default::default()
         });

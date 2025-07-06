@@ -25,7 +25,7 @@ impl MaskView {
     pub fn new(init: &mut ViewInitContext) -> Self {
         let ct_root = init.base_system.register_composite_rect(CompositeRect {
             relative_size_adjustment: [1.0, 1.0],
-            instance_slot_index: Some(0),
+            has_bitmap: true,
             composite_mode: CompositeMode::FillColor(AnimatableColor::Value([0.0, 0.0, 0.0, 0.0])),
             ..Default::default()
         });
@@ -295,7 +295,7 @@ impl CommonFrameView {
                 AnimatableFloat::Value(width * init.ui_scale_factor),
                 AnimatableFloat::Value(height * init.ui_scale_factor),
             ],
-            instance_slot_index: Some(0),
+            has_bitmap: true,
             texatlas_rect: frame_image_atlas_rect,
             slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.0, 0.0, 0.0, 1.0])),
@@ -312,7 +312,7 @@ impl CommonFrameView {
                 AnimatableFloat::Value(width * init.ui_scale_factor),
                 AnimatableFloat::Value(height * init.ui_scale_factor),
             ],
-            instance_slot_index: Some(0),
+            has_bitmap: true,
             texatlas_rect: frame_border_image_atlas_rect,
             slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([

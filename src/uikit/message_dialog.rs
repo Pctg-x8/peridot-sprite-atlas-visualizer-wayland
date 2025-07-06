@@ -96,7 +96,7 @@ impl ContentView {
                 AnimatableFloat::Value(Self::FRAME_PADDING_V * init.ui_scale_factor),
             ],
             relative_offset_adjustment: [0.5, 0.0],
-            instance_slot_index: Some(0),
+            has_bitmap: true,
             texatlas_rect: text_atlas_rect,
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
             ..Default::default()

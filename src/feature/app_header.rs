@@ -202,7 +202,7 @@ impl MenuButtonView {
         });
         let ct_bg = init.base_system.register_composite_rect(CompositeRect {
             relative_size_adjustment: [1.0, 1.0],
-            instance_slot_index: Some(0),
+            has_bitmap: true,
             composite_mode: CompositeMode::FillColor(AnimatableColor::Value([1.0, 1.0, 1.0, 0.0])),
             ..Default::default()
         });
@@ -216,7 +216,7 @@ impl MenuButtonView {
                 AnimatableFloat::Value(-Self::ICON_SIZE * 0.5 * init.ui_scale_factor),
             ],
             relative_offset_adjustment: [0.5, 0.5],
-            instance_slot_index: Some(0),
+            has_bitmap: true,
             texatlas_rect: icon_atlas_rect,
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
             ..Default::default()
@@ -419,7 +419,7 @@ impl BaseView {
             ],
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.0, 0.0, 0.0, 0.25])),
             texatlas_rect: bg_atlas_rect,
-            instance_slot_index: Some(0),
+            has_bitmap: true,
             ..Default::default()
         });
         let ct_title = ctx.base_system.register_composite_rect(CompositeRect {
@@ -433,7 +433,7 @@ impl BaseView {
             ],
             texatlas_rect: text_atlas_rect,
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
-            instance_slot_index: Some(0),
+            has_bitmap: true,
             ..Default::default()
         });
 

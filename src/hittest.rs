@@ -304,6 +304,10 @@ pub struct PointerActionArgs {
 pub enum Role {
     ForceClient,
     TitleBar,
+    CloseButton,
+    MaximizeButton,
+    MinimizeButton,
+    RestoreButton,
 }
 
 // 将来的にはAppUpdateContextへの直接依存を剥がしたいが、associated typeに局所的なlifetime与える方法がない

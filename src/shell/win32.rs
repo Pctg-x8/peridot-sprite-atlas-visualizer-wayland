@@ -11,7 +11,7 @@ use windows::{
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM},
         Graphics::{
-            Dwm::DwmExtendFrameIntoClientArea,
+            Dwm::{DwmDefWindowProc, DwmExtendFrameIntoClientArea},
             Gdi::{
                 DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, GetMonitorInfoW, HBRUSH,
                 MONITOR_DEFAULTTOPRIMARY, MONITORINFOEXW, MapWindowPoints, MonitorFromWindow,
@@ -30,14 +30,16 @@ use windows::{
             Input::KeyboardAndMouse::{ReleaseCapture, SetCapture},
             Shell::IInitializeWithWindow,
             WindowsAndMessaging::{
-                CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA,
-                GetClientRect, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, HTCAPTION,
-                HTCLIENT, IDC_ARROW, IDC_SIZEWE, IDI_APPLICATION, LoadCursorW, LoadIconW, MSG,
-                NCCALCSIZE_PARAMS, PM_REMOVE, PeekMessageW, RegisterClassExW, SM_CXSIZEFRAME,
-                SM_CYSIZEFRAME, SW_SHOWNORMAL, SWP_FRAMECHANGED, SetCursor, SetWindowLongPtrW,
-                SetWindowPos, ShowWindow, TranslateMessage, WINDOW_LONG_PTR_INDEX, WM_ACTIVATE,
-                WM_DESTROY, WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-                WM_NCCALCSIZE, WM_NCHITTEST, WM_SIZE, WNDCLASS_STYLES, WNDCLASSEXW,
+                CW_USEDEFAULT, CloseWindow, CreateWindowExW, DefWindowProcW, DestroyWindow,
+                DispatchMessageW, GWLP_USERDATA, GetClientRect, GetSystemMetrics,
+                GetWindowLongPtrW, GetWindowRect, HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON,
+                HTMINBUTTON, IDC_ARROW, IDC_SIZEWE, IDI_APPLICATION, IsWindow, LoadCursorW,
+                LoadIconW, MSG, NCCALCSIZE_PARAMS, PM_REMOVE, PeekMessageW, RegisterClassExW,
+                SM_CXSIZEFRAME, SM_CYSIZEFRAME, SW_SHOWNORMAL, SWP_FRAMECHANGED, SetCursor,
+                SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
+                WINDOW_LONG_PTR_INDEX, WM_ACTIVATE, WM_DESTROY, WM_DPICHANGED, WM_LBUTTONDOWN,
+                WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN,
+                WM_NCLBUTTONUP, WM_NCMOUSEMOVE, WM_SIZE, WNDCLASS_STYLES, WNDCLASSEXW,
                 WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW,
             },
         },
@@ -334,6 +336,11 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
                 None => LRESULT(HTCLIENT as _),
                 Some(Role::TitleBar) => LRESULT(HTCAPTION as _),
                 Some(Role::ForceClient) => LRESULT(HTCLIENT as _),
+                Some(Role::CloseButton) => LRESULT(HTCLOSE as _),
+                Some(Role::MaximizeButton) => LRESULT(HTMAXBUTTON as _),
+                Some(Role::MinimizeButton) => LRESULT(HTMINBUTTON as _),
+                // Windowsだと同じ位置にあるので同じものを返す
+                Some(Role::RestoreButton) => LRESULT(HTMAXBUTTON as _),
             };
         }
 
@@ -355,12 +362,19 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
             return LRESULT(0);
         }
 
-        if msg == WM_LBUTTONDOWN {
+        if (msg == WM_NCLBUTTONDOWN || msg == WM_NCLBUTTONUP || msg == WM_NCMOUSEMOVE)
+            && wparam.0 == HTCAPTION as _
+        {
+            // TitleBarの挙動はシステムにおまかせ
+            return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+        }
+
+        if msg == WM_LBUTTONDOWN || msg == WM_NCLBUTTONDOWN {
             Self::app_event_bus(hwnd).push(AppEvent::MainWindowPointerLeftDown { enter_serial: 0 });
             return LRESULT(0);
         }
 
-        if msg == WM_LBUTTONUP {
+        if msg == WM_LBUTTONUP || msg == WM_NCLBUTTONUP {
             Self::app_event_bus(hwnd).push(AppEvent::MainWindowPointerLeftUp { enter_serial: 0 });
             return LRESULT(0);
         }
@@ -372,6 +386,25 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
                 enter_serial: 0,
                 surface_x: (lparam.0 & 0xffff) as i16 as f32 / ui_scale_factor,
                 surface_y: ((lparam.0 >> 16) & 0xffff) as i16 as f32 / ui_scale_factor,
+            });
+            return LRESULT(0);
+        }
+
+        if msg == WM_NCMOUSEMOVE {
+            let mut p = [POINT {
+                x: (lparam.0 & 0xffff) as i16 as _,
+                y: ((lparam.0 >> 16) & 0xffff) as i16 as _,
+            }];
+            unsafe {
+                MapWindowPoints(None, Some(hwnd), &mut p);
+            }
+
+            let ui_scale_factor = Self::ui_scale_factor_cell(hwnd).get();
+
+            Self::app_event_bus(hwnd).push(AppEvent::MainWindowPointerMove {
+                enter_serial: 0,
+                surface_x: p[0].x as f32 / ui_scale_factor,
+                surface_y: p[0].y as f32 / ui_scale_factor,
             });
             return LRESULT(0);
         }
@@ -489,6 +522,18 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
     pub fn release_pointer(&self) {
         if let Err(e) = unsafe { ReleaseCapture() } {
             tracing::warn!(reason = ?e, "ReleaseCapture() failed");
+        }
+    }
+
+    #[inline]
+    pub fn close_safe(&self) {
+        if unsafe { !IsWindow(Some(self.hwnd)).as_bool() } {
+            // already destroyed
+            return;
+        }
+
+        if let Err(e) = unsafe { DestroyWindow(self.hwnd) } {
+            tracing::warn!(reason = ?e, "DestroyWindow failed");
         }
     }
 

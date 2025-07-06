@@ -2992,7 +2992,11 @@ fn main() {
     tracing_subscriber::fmt()
         .pretty()
         .with_thread_names(true)
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(tracing_subscriber::filter::LevelFilter::INFO.into())
+                .from_env_lossy(),
+        )
         .init();
     std::panic::set_hook(Box::new(move |info| {
         tracing::error!(%info, "application panic");
@@ -3042,10 +3046,6 @@ fn main() {
 
     bg_worker.teardown();
     drop(task_worker);
-
-    if let Err(e) = unsafe { app_system.subsystem.wait() } {
-        tracing::warn!(reason = ?e, "Error in waiting pending works before shutdown");
-    }
 }
 
 fn app_main<'sys, 'event_bus, 'subsystem>(
@@ -3763,35 +3763,14 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         .borrow_mut()
         .set_offset(0.0, app_header.height() * app_shell.ui_scale_factor());
 
-    let ht_titlebar = if app_shell.is_floating_window() {
-        let ht_titlebar = app_system.create_hit_tree(HitTestTreeData {
-            // MenuButtonの分だけ開ける
-            left: app_header.height(),
-            width_adjustment_factor: 1.0,
-            width: -app_header.height(),
-            height: app_header.height(),
-            ..Default::default()
-        });
-        app_system.set_hit_tree_parent(ht_titlebar, HitTestTreeManager::ROOT);
-
-        Some(ht_titlebar)
-    } else {
-        None
-    };
-
     let ht_root_fallback_action_handler = Rc::new(HitTestRootTreeActionHandler::new(
         &editing_atlas_renderer,
         &current_selected_sprite_marker_view,
-        ht_titlebar,
+        None,
     ));
     app_system
         .hit_tree
         .set_action_handler(HitTestTreeManager::ROOT, &ht_root_fallback_action_handler);
-    if let Some(ht_titlebar) = ht_titlebar {
-        app_system
-            .hit_tree
-            .set_action_handler(ht_titlebar, &ht_root_fallback_action_handler);
-    }
 
     app_state.get_mut().register_sprites_view_feedback({
         let ht_root_fallback_action_handler = Rc::downgrade(&ht_root_fallback_action_handler);
@@ -4405,7 +4384,10 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         task_worker.try_tick();
         while let Some(e) = app_update_context.event_queue.pop() {
             match e {
-                AppEvent::ToplevelWindowClose => break 'app,
+                AppEvent::ToplevelWindowClose => {
+                    app_shell.close_safe();
+                    break 'app;
+                }
                 AppEvent::ToplevelWindowFrameTiming => {
                     let current_t = t.elapsed();
                     let current_sec = current_t.as_secs_f32();
@@ -5657,6 +5639,10 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
             }
             app_update_context.event_queue.notify_clear().unwrap();
         }
+    }
+
+    if let Err(e) = unsafe { app_system.subsystem.wait() } {
+        tracing::warn!(reason = ?e, "Error in waiting pending works before shutdown");
     }
 }
 

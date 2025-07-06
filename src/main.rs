@@ -2987,7 +2987,7 @@ fn main() {
         tracing::error!(%info, "application panic");
     }));
 
-    tracing::info!("Initializing Peridot SpriteAtlas Visualizer/Editor");
+    tracing::info!("Initializing BaseSystem...");
     let setup_timer = std::time::Instant::now();
 
     #[cfg(unix)]
@@ -3004,9 +3004,48 @@ fn main() {
 
     let subsystem = Subsystem::init();
     let mut app_system = AppBaseSystem::new(&subsystem);
-    let mut app_state = RefCell::new(AppState::new());
     let mut app_shell = shell::AppShell::new(&events);
     app_system.rescale_fonts(app_shell.ui_scale_factor());
+    let mut app_state = RefCell::new(AppState::new());
+
+    #[cfg(target_os = "linux")]
+    unsafe {
+        DBUS_WAIT_FOR_REPLY_WAKERS = &mut HashMap::new() as *mut _;
+        DBUS_WAIT_FOR_SIGNAL_WAKERS = &mut HashMap::new() as *mut _;
+    }
+    let bg_worker = BackgroundWorker::new();
+    let task_worker = smol::LocalExecutor::new();
+
+    let elapsed = setup_timer.elapsed();
+    tracing::info!(?elapsed, "Initializing BaseSystem done!");
+
+    app_main(
+        &mut app_system,
+        &mut app_shell,
+        &events,
+        &mut app_state,
+        &task_worker,
+        &bg_worker,
+    );
+
+    bg_worker.teardown();
+    drop(task_worker);
+
+    if let Err(e) = unsafe { app_system.subsystem.wait() } {
+        tracing::warn!(reason = ?e, "Error in waiting pending works before shutdown");
+    }
+}
+
+fn app_main<'sys, 'event_bus, 'subsystem>(
+    app_system: &'sys mut AppBaseSystem<'subsystem>,
+    app_shell: &'sys mut AppShell<'event_bus>,
+    events: &'event_bus AppEventBus,
+    app_state: &'sys mut RefCell<AppState<'subsystem>>,
+    task_worker: &smol::LocalExecutor<'sys>,
+    bg_worker: &BackgroundWorker<'subsystem>,
+) {
+    tracing::info!("Initializing Peridot SpriteAtlas Visualizer/Editor");
+    let setup_timer = std::time::Instant::now();
 
     let staging_scratch_buffers = Arc::new(RwLock::new(BufferedStagingScratchBuffer::new(
         &app_system.subsystem,
@@ -3657,14 +3696,6 @@ fn main() {
         con: RefCell::new(dbus),
     };
 
-    #[cfg(target_os = "linux")]
-    unsafe {
-        DBUS_WAIT_FOR_REPLY_WAKERS = &mut HashMap::new() as *mut _;
-        DBUS_WAIT_FOR_SIGNAL_WAKERS = &mut HashMap::new() as *mut _;
-    }
-    let task_worker = smol::LocalExecutor::new();
-    let bg_worker = BackgroundWorker::new();
-
     let mut staging_scratch_buffer_locked =
         parking_lot::RwLockWriteGuard::map(staging_scratch_buffers.write(), |x| {
             x.active_buffer_mut()
@@ -3672,7 +3703,7 @@ fn main() {
     tracing::info!(value = app_shell.ui_scale_factor(), "initial ui scale");
     let mut init_context = PresenterInitContext {
         for_view: ViewInitContext {
-            base_system: &mut app_system,
+            base_system: app_system,
             staging_scratch_buffer: &mut staging_scratch_buffer_locked,
             ui_scale_factor: app_shell.ui_scale_factor(),
         },
@@ -3717,9 +3748,9 @@ fn main() {
     drop(staging_scratch_buffer_locked);
 
     current_selected_sprite_marker_view.mount(CompositeTree::ROOT, &mut app_system.composite_tree);
-    sprite_list_pane.mount(&mut app_system, CompositeTree::ROOT, ht_root);
-    app_menu.mount(&mut app_system, CompositeTree::ROOT, ht_root);
-    app_header.mount(&mut app_system, CompositeTree::ROOT, ht_root);
+    sprite_list_pane.mount(app_system, CompositeTree::ROOT, ht_root);
+    app_menu.mount(app_system, CompositeTree::ROOT, ht_root);
+    app_header.mount(app_system, CompositeTree::ROOT, ht_root);
 
     editing_atlas_renderer
         .borrow_mut()
@@ -4230,7 +4261,6 @@ fn main() {
         {
             use windows::Win32::Foundation::WAIT_TIMEOUT;
 
-            let mut current_qpc = 0i64;
             let r = unsafe {
                 use windows::Win32::UI::WindowsAndMessaging::{
                     MSG_WAIT_FOR_MULTIPLE_OBJECTS_EX_FLAGS, QS_ALLINPUT,
@@ -4360,9 +4390,9 @@ fn main() {
                     current_selected_sprite_marker_view
                         .update(&mut app_system.composite_tree, current_sec);
                     app_header.update(&mut app_system.composite_tree, current_sec);
-                    app_menu.update(&mut app_system, current_sec);
+                    app_menu.update(app_system, current_sec);
                     sprite_list_pane.update(
-                        &mut app_system,
+                        app_system,
                         current_sec,
                         &mut staging_scratch_buffers.write().active_buffer_mut(),
                     );
@@ -5526,7 +5556,7 @@ fn main() {
                     let p = uikit::message_dialog::Presenter::new(
                         &mut PresenterInitContext {
                             for_view: ViewInitContext {
-                                base_system: &mut app_system,
+                                base_system: app_system,
                                 staging_scratch_buffer: &mut staging_scratch_buffer_locked,
                                 ui_scale_factor: app_shell.ui_scale_factor(),
                             },
@@ -5536,7 +5566,7 @@ fn main() {
                         &content,
                     );
                     p.show(
-                        &mut app_system,
+                        app_system,
                         CompositeTree::ROOT,
                         ht_root,
                         t.elapsed().as_secs_f32(),
@@ -5555,7 +5585,7 @@ fn main() {
                 }
                 AppEvent::UIPopupClose { id } => {
                     if let Some(inst) = popups.get(&id) {
-                        inst.hide(&mut app_system, t.elapsed().as_secs_f32());
+                        inst.hide(app_system, t.elapsed().as_secs_f32());
                     }
                 }
                 AppEvent::UIPopupUnmount { id } => {
@@ -5573,7 +5603,7 @@ fn main() {
                         .detach();
                     #[cfg(windows)]
                     task_worker
-                        .spawn(app_menu_on_add_sprite(&app_shell, &app_state))
+                        .spawn(app_menu_on_add_sprite(app_shell, app_state))
                         .detach();
                     #[cfg(not(any(target_os = "linux", windows)))]
                     events.push(AppEvent::UIMessageDialogRequest {
@@ -5598,12 +5628,6 @@ fn main() {
             }
             app_update_context.event_queue.notify_clear().unwrap();
         }
-    }
-
-    bg_worker.teardown();
-
-    if let Err(e) = unsafe { app_system.subsystem.wait() } {
-        tracing::warn!(reason = ?e, "Error in waiting pending works before shutdown");
     }
 }
 
@@ -5632,8 +5656,8 @@ impl DBusLink {
 
 #[cfg(windows)]
 async fn app_menu_on_add_sprite<'sys, 'subsystem>(
-    shell: &AppShell<'sys>,
-    app_state: &RefCell<AppState<'subsystem>>,
+    shell: &'sys AppShell<'sys>,
+    app_state: &'sys RefCell<AppState<'subsystem>>,
 ) {
     let added_paths = shell.select_added_sprites().await;
 

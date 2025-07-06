@@ -2,7 +2,7 @@ use bitflags::bitflags;
 
 use crate::{
     AppUpdateContext,
-    hittest::{CursorShape, HitTestTreeManager, HitTestTreeRef, PointerActionArgs},
+    hittest::{CursorShape, HitTestTreeManager, HitTestTreeRef, PointerActionArgs, Role},
     shell::AppShell,
 };
 
@@ -232,7 +232,6 @@ impl PointerInputManager {
         ht_root: HitTestTreeRef,
     ) {
         let new_hit = ht.test(
-            action_context,
             ht_root,
             client_x,
             client_y,
@@ -657,5 +656,53 @@ impl PointerInputManager {
             }
             PointerFocusState::None => CursorShape::Default,
         }
+    }
+
+    pub fn role(
+        &self,
+        client_x: f32,
+        client_y: f32,
+        client_width: f32,
+        client_height: f32,
+        ht: &HitTestTreeManager,
+        ht_root: HitTestTreeRef,
+    ) -> Option<Role> {
+        if let PointerFocusState::Capturing(ht_ref) = self.pointer_focus {
+            // キャプチャ中の要素があればそれだけを見る
+            return ht
+                .get_data(ht_ref)
+                .action_handler()
+                .and_then(|x| x.role(ht_ref));
+        }
+
+        // roleの検査(WM_NCHITTEST)ではEnter/Leaveの更新をしないので直接testを呼ぶ
+        let Some(hit) = ht.test(
+            ht_root,
+            client_x,
+            client_y,
+            0.0,
+            0.0,
+            client_width,
+            client_height,
+        ) else {
+            // なにもヒットしなかった
+            return None;
+        };
+
+        let mut p = Some(hit);
+        while let Some(ht_ref) = p {
+            if let Some(role) = ht
+                .get_data(ht_ref)
+                .action_handler()
+                .and_then(|h| h.role(ht_ref))
+            {
+                return Some(role);
+            }
+
+            p = ht.parent_of(ht_ref);
+        }
+
+        // fallback
+        None
     }
 }

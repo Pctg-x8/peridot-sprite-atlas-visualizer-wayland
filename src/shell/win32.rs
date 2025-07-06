@@ -1,15 +1,20 @@
-use std::{cell::Cell, path::PathBuf, sync::Arc};
+use std::{
+    cell::{Cell, UnsafeCell},
+    path::PathBuf,
+    pin::Pin,
+    sync::Arc,
+};
 
 use bedrock::{self as br, SurfaceCreateInfo};
 use windows::{
     Storage::Pickers::FileOpenPicker,
     Win32::{
-        Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
+        Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM},
         Graphics::{
             Dwm::DwmExtendFrameIntoClientArea,
             Gdi::{
                 DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, GetMonitorInfoW, HBRUSH,
-                MONITOR_DEFAULTTOPRIMARY, MONITORINFOEXW, MonitorFromWindow,
+                MONITOR_DEFAULTTOPRIMARY, MONITORINFOEXW, MapWindowPoints, MonitorFromWindow,
             },
         },
         System::{
@@ -26,23 +31,28 @@ use windows::{
             Shell::IInitializeWithWindow,
             WindowsAndMessaging::{
                 CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA,
-                GetClientRect, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, IDC_ARROW,
-                IDC_SIZEWE, IDI_APPLICATION, LoadCursorW, LoadIconW, MSG, NCCALCSIZE_PARAMS,
-                PM_REMOVE, PeekMessageW, RegisterClassExW, SM_CXSIZEFRAME, SM_CYSIZEFRAME,
-                SW_SHOWNORMAL, SWP_FRAMECHANGED, SetCursor, SetWindowLongPtrW, SetWindowPos,
-                ShowWindow, TranslateMessage, WINDOW_LONG_PTR_INDEX, WM_ACTIVATE, WM_DESTROY,
-                WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE,
-                WM_NCHITTEST, WM_SIZE, WNDCLASS_STYLES, WNDCLASSEXW, WS_EX_APPWINDOW,
-                WS_OVERLAPPEDWINDOW,
+                GetClientRect, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, HTCAPTION,
+                HTCLIENT, IDC_ARROW, IDC_SIZEWE, IDI_APPLICATION, LoadCursorW, LoadIconW, MSG,
+                NCCALCSIZE_PARAMS, PM_REMOVE, PeekMessageW, RegisterClassExW, SM_CXSIZEFRAME,
+                SM_CYSIZEFRAME, SW_SHOWNORMAL, SWP_FRAMECHANGED, SetCursor, SetWindowLongPtrW,
+                SetWindowPos, ShowWindow, TranslateMessage, WINDOW_LONG_PTR_INDEX, WM_ACTIVATE,
+                WM_DESTROY, WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+                WM_NCCALCSIZE, WM_NCHITTEST, WM_SIZE, WNDCLASS_STYLES, WNDCLASSEXW,
+                WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW,
             },
         },
     },
     core::{Interface, PCWSTR, h, w},
 };
 
-use crate::{AppEvent, AppEventBus, hittest::CursorShape};
+use crate::{
+    AppEvent, AppEventBus,
+    base_system::AppBaseSystem,
+    hittest::{CursorShape, HitTestTreeManager, Role},
+    input::PointerInputManager,
+};
 
-pub struct AppShell<'sys> {
+pub struct AppShell<'sys, 'subsystem> {
     hinstance: HINSTANCE,
     hwnd: HWND,
     ui_scale_factor: core::pin::Pin<Box<Cell<f32>>>,
@@ -50,10 +60,12 @@ pub struct AppShell<'sys> {
     app_event_queue: &'sys AppEventBus,
     perf_counter_freq: i64,
     next_target_frame_timing: Cell<i64>,
+    pub pointer_input_manager: Pin<Box<UnsafeCell<PointerInputManager>>>,
+    _marker: core::marker::PhantomData<*mut AppBaseSystem<'subsystem>>,
 }
-impl<'sys> AppShell<'sys> {
-    #[tracing::instrument(skip(events))]
-    pub fn new(events: &'sys AppEventBus) -> Self {
+impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
+    #[tracing::instrument(skip(events, base_sys))]
+    pub fn new(events: &'sys AppEventBus, base_sys: *mut AppBaseSystem<'subsystem>) -> Self {
         let hinstance =
             unsafe { core::mem::transmute::<_, HINSTANCE>(GetModuleHandleW(None).unwrap()) };
 
@@ -69,7 +81,7 @@ impl<'sys> AppShell<'sys> {
             style: WNDCLASS_STYLES(0),
             lpfnWndProc: Some(Self::wndproc),
             cbClsExtra: 0,
-            cbWndExtra: core::mem::size_of::<*const Cell<f32>>() as _,
+            cbWndExtra: (core::mem::size_of::<usize>() * 3) as _,
             hInstance: hinstance,
             hIcon: unsafe { LoadIconW(None, IDI_APPLICATION).unwrap() },
             hCursor: unsafe { LoadCursorW(None, IDC_ARROW).unwrap() },
@@ -109,6 +121,21 @@ impl<'sys> AppShell<'sys> {
                 hwnd,
                 WINDOW_LONG_PTR_INDEX(0),
                 ui_scale_factor.as_ref().get_ref() as *const _ as _,
+            );
+        }
+
+        let mut pointer_input_manager =
+            Pin::new(Box::new(UnsafeCell::new(PointerInputManager::new())));
+        unsafe {
+            SetWindowLongPtrW(
+                hwnd,
+                WINDOW_LONG_PTR_INDEX(core::mem::size_of::<usize>() as _),
+                pointer_input_manager.as_mut().get_mut() as *mut _ as _,
+            );
+            SetWindowLongPtrW(
+                hwnd,
+                WINDOW_LONG_PTR_INDEX((core::mem::size_of::<usize>() * 2) as _),
+                base_sys as _,
             );
         }
 
@@ -189,6 +216,8 @@ impl<'sys> AppShell<'sys> {
                         as i64,
             ),
             current_display_refresh_rate_hz,
+            pointer_input_manager,
+            _marker: core::marker::PhantomData,
         }
     }
 
@@ -208,6 +237,26 @@ impl<'sys> AppShell<'sys> {
             &*core::ptr::with_exposed_provenance::<Cell<f32>>(GetWindowLongPtrW(
                 hwnd,
                 WINDOW_LONG_PTR_INDEX(0),
+            ) as _)
+        }
+    }
+
+    #[inline(always)]
+    fn pointer_input_manager<'a>(hwnd: HWND) -> &'a UnsafeCell<PointerInputManager> {
+        unsafe {
+            &*core::ptr::with_exposed_provenance(GetWindowLongPtrW(
+                hwnd,
+                WINDOW_LONG_PTR_INDEX(core::mem::size_of::<usize>() as _),
+            ) as _)
+        }
+    }
+
+    #[inline(always)]
+    fn base_sys_mut<'a>(hwnd: HWND) -> &'a mut AppBaseSystem<'subsystem> {
+        unsafe {
+            &mut *core::ptr::with_exposed_provenance_mut(GetWindowLongPtrW(
+                hwnd,
+                WINDOW_LONG_PTR_INDEX((core::mem::size_of::<usize>() * 2) as _),
             ) as _)
         }
     }
@@ -256,7 +305,36 @@ impl<'sys> AppShell<'sys> {
         }
 
         if msg == WM_NCHITTEST {
-            // TODO: nc hittest
+            let mut p = [POINT {
+                x: (lparam.0 & 0xffff) as i16 as _,
+                y: ((lparam.0 >> 16) & 0xffff) as i16 as _,
+            }];
+            unsafe {
+                MapWindowPoints(None, Some(hwnd), &mut p);
+            }
+
+            let mut rc = core::mem::MaybeUninit::uninit();
+            unsafe {
+                GetClientRect(hwnd, rc.as_mut_ptr()).unwrap();
+            }
+            let rc = unsafe { rc.assume_init_ref() };
+
+            let ui_scale_factor = Self::ui_scale_factor_cell(hwnd).get();
+            let pointer_input_manager = Self::pointer_input_manager(hwnd);
+            let base_sys = Self::base_sys_mut(hwnd);
+
+            return match unsafe { &*pointer_input_manager.get() }.role(
+                p[0].x as f32 / ui_scale_factor,
+                p[0].y as f32 / ui_scale_factor,
+                (rc.right - rc.left) as f32 / ui_scale_factor,
+                (rc.bottom - rc.top) as f32 / ui_scale_factor,
+                &base_sys.hit_tree,
+                HitTestTreeManager::ROOT,
+            ) {
+                None => LRESULT(HTCLIENT as _),
+                Some(Role::TitleBar) => LRESULT(HTCAPTION as _),
+                Some(Role::ForceClient) => LRESULT(HTCLIENT as _),
+            };
         }
 
         if msg == WM_DPICHANGED {

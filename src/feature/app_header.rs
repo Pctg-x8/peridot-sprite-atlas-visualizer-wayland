@@ -466,6 +466,14 @@ struct ActionHandler {
     menu_button_view: MenuButtonView,
 }
 impl HitTestTreeActionHandler for ActionHandler {
+    fn role(&self, sender: HitTestTreeRef) -> Option<crate::hittest::Role> {
+        if sender == self.menu_button_view.ht_root {
+            return Some(crate::hittest::Role::ForceClient);
+        }
+
+        return Some(crate::hittest::Role::TitleBar);
+    }
+
     fn on_pointer_enter(
         &self,
         sender: HitTestTreeRef,

@@ -53,12 +53,29 @@ pub struct HitTestTreeManager<'h> {
     free_index: BTreeSet<usize>,
 }
 impl<'h> HitTestTreeManager<'h> {
+    pub const ROOT: HitTestTreeRef = HitTestTreeRef(0);
+
     pub fn new() -> Self {
-        Self {
+        let mut this = Self {
             data: Vec::new(),
             relations: Vec::new(),
             free_index: BTreeSet::new(),
-        }
+        };
+
+        // root(simply fits to client_width/client_height)
+        this.create(HitTestTreeData {
+            left: 0.0,
+            top: 0.0,
+            left_adjustment_factor: 0.0,
+            top_adjustment_factor: 0.0,
+            width: 0.0,
+            height: 0.0,
+            width_adjustment_factor: 1.0,
+            height_adjustment_factor: 1.0,
+            action_handler: None,
+        });
+
+        this
     }
 
     pub fn create(&mut self, data: HitTestTreeData<'h>) -> HitTestTreeRef {
@@ -211,7 +228,6 @@ impl<'h> HitTestTreeManager<'h> {
 
     pub fn test(
         &self,
-        context: &AppUpdateContext,
         root: HitTestTreeRef,
         global_x: f32,
         global_y: f32,
@@ -225,7 +241,7 @@ impl<'h> HitTestTreeManager<'h> {
             .action_handler
             .as_ref()
             .and_then(std::rc::Weak::upgrade)
-            .map_or(true, |x| x.hit_active(root, context))
+            .map_or(true, |x| x.hit_active(root))
         {
             // hit disabled
             return None;
@@ -243,7 +259,6 @@ impl<'h> HitTestTreeManager<'h> {
         // 後ろにあるほうが上なので優先して見る
         if let Some(t) = self.relations[root.0].children.iter().rev().find_map(|&c| {
             self.test(
-                context,
                 HitTestTreeRef(c),
                 global_x,
                 global_y,
@@ -285,11 +300,23 @@ pub struct PointerActionArgs {
     pub client_height: f32,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum Role {
+    ForceClient,
+    TitleBar,
+}
+
 // 将来的にはAppUpdateContextへの直接依存を剥がしたいが、associated typeに局所的なlifetime与える方法がない
 pub trait HitTestTreeActionHandler {
     #[allow(unused_variables)]
     #[inline]
-    fn hit_active(&self, sender: HitTestTreeRef, context: &AppUpdateContext) -> bool {
+    fn role(&self, sender: HitTestTreeRef) -> Option<Role> {
+        None
+    }
+
+    #[allow(unused_variables)]
+    #[inline]
+    fn hit_active(&self, sender: HitTestTreeRef) -> bool {
         true
     }
 

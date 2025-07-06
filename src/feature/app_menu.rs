@@ -1356,7 +1356,7 @@ struct ActionHandler {
     shown: Cell<bool>,
 }
 impl HitTestTreeActionHandler for ActionHandler {
-    fn hit_active(&self, _sender: HitTestTreeRef, _context: &AppUpdateContext) -> bool {
+    fn hit_active(&self, _sender: HitTestTreeRef) -> bool {
         self.shown.get()
     }
 

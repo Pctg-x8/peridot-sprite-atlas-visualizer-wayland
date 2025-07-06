@@ -2381,16 +2381,19 @@ struct HitTestRootTreeActionHandler<'subsystem> {
     sprite_rects_cached: RefCell<Vec<(u32, u32, u32, u32)>>,
     current_selected_sprite_marker_view: std::rc::Weak<CurrentSelectedSpriteMarkerView>,
     editing_atlas_renderer: std::rc::Weak<RefCell<EditingAtlasRenderer<'subsystem>>>,
+    ht_titlebar: Option<HitTestTreeRef>,
     drag_state: RefCell<DragState>,
 }
 impl<'subsystem> HitTestRootTreeActionHandler<'subsystem> {
     pub fn new(
         editing_atlas_renderer: &Rc<RefCell<EditingAtlasRenderer<'subsystem>>>,
         current_selected_sprite_marker_view: &Rc<CurrentSelectedSpriteMarkerView>,
+        ht_titlebar: Option<HitTestTreeRef>,
     ) -> Self {
         Self {
             editing_atlas_renderer: Rc::downgrade(editing_atlas_renderer),
             current_selected_sprite_marker_view: Rc::downgrade(current_selected_sprite_marker_view),
+            ht_titlebar,
             sprites_qt: RefCell::new(QuadTree::new()),
             sprite_rects_cached: RefCell::new(Vec::new()),
             drag_state: RefCell::new(DragState::None),
@@ -2398,6 +2401,14 @@ impl<'subsystem> HitTestRootTreeActionHandler<'subsystem> {
     }
 }
 impl<'c> HitTestTreeActionHandler for HitTestRootTreeActionHandler<'c> {
+    fn role(&self, sender: HitTestTreeRef) -> Option<hittest::Role> {
+        if self.ht_titlebar.is_some_and(|x| sender == x) {
+            return Some(hittest::Role::TitleBar);
+        }
+
+        None
+    }
+
     fn on_pointer_down(
         &self,
         _sender: HitTestTreeRef,
@@ -3004,8 +3015,7 @@ fn main() {
 
     let subsystem = Subsystem::init();
     let mut app_system = AppBaseSystem::new(&subsystem);
-    let mut app_shell = shell::AppShell::new(&events);
-    app_system.rescale_fonts(app_shell.ui_scale_factor());
+    let mut app_shell = AppShell::new(&events, &mut app_system as _);
     let mut app_state = RefCell::new(AppState::new());
 
     #[cfg(target_os = "linux")]
@@ -3015,6 +3025,8 @@ fn main() {
     }
     let bg_worker = BackgroundWorker::new();
     let task_worker = smol::LocalExecutor::new();
+
+    app_system.rescale_fonts(app_shell.ui_scale_factor());
 
     let elapsed = setup_timer.elapsed();
     tracing::info!(?elapsed, "Initializing BaseSystem done!");
@@ -3038,7 +3050,7 @@ fn main() {
 
 fn app_main<'sys, 'event_bus, 'subsystem>(
     app_system: &'sys mut AppBaseSystem<'subsystem>,
-    app_shell: &'sys mut AppShell<'event_bus>,
+    app_shell: &'sys mut AppShell<'event_bus, 'subsystem>,
     events: &'event_bus AppEventBus,
     app_state: &'sys mut RefCell<AppState<'subsystem>>,
     task_worker: &smol::LocalExecutor<'sys>,
@@ -3053,18 +3065,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     )));
 
     let client_size = Cell::new(app_shell.client_size());
-    let mut pointer_input_manager = PointerInputManager::new();
-    let ht_root = app_system.hit_tree.create(HitTestTreeData {
-        left: 0.0,
-        top: 0.0,
-        left_adjustment_factor: 0.0,
-        top_adjustment_factor: 0.0,
-        width: 0.0,
-        height: 0.0,
-        width_adjustment_factor: 1.0,
-        height_adjustment_factor: 1.0,
-        action_handler: None,
-    });
 
     let mut sc = PrimaryRenderTarget::new(SubsystemBoundSurface {
         handle: unsafe {
@@ -3748,21 +3748,50 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     drop(staging_scratch_buffer_locked);
 
     current_selected_sprite_marker_view.mount(CompositeTree::ROOT, &mut app_system.composite_tree);
-    sprite_list_pane.mount(app_system, CompositeTree::ROOT, ht_root);
-    app_menu.mount(app_system, CompositeTree::ROOT, ht_root);
-    app_header.mount(app_system, CompositeTree::ROOT, ht_root);
+    sprite_list_pane.mount(app_system, CompositeTree::ROOT, HitTestTreeManager::ROOT);
+    app_menu.mount(app_system, CompositeTree::ROOT, HitTestTreeManager::ROOT);
+    app_header.mount(app_system, CompositeTree::ROOT, HitTestTreeManager::ROOT);
+
+    let popup_hit_layer = app_system.create_hit_tree(HitTestTreeData {
+        width_adjustment_factor: 1.0,
+        height_adjustment_factor: 1.0,
+        ..Default::default()
+    });
+    app_system.set_hit_tree_parent(popup_hit_layer, HitTestTreeManager::ROOT);
 
     editing_atlas_renderer
         .borrow_mut()
         .set_offset(0.0, app_header.height() * app_shell.ui_scale_factor());
 
+    let ht_titlebar = if app_shell.is_floating_window() {
+        let ht_titlebar = app_system.create_hit_tree(HitTestTreeData {
+            // MenuButtonの分だけ開ける
+            left: app_header.height(),
+            width_adjustment_factor: 1.0,
+            width: -app_header.height(),
+            height: app_header.height(),
+            ..Default::default()
+        });
+        app_system.set_hit_tree_parent(ht_titlebar, HitTestTreeManager::ROOT);
+
+        Some(ht_titlebar)
+    } else {
+        None
+    };
+
     let ht_root_fallback_action_handler = Rc::new(HitTestRootTreeActionHandler::new(
         &editing_atlas_renderer,
         &current_selected_sprite_marker_view,
+        ht_titlebar,
     ));
     app_system
         .hit_tree
-        .set_action_handler(ht_root, &ht_root_fallback_action_handler);
+        .set_action_handler(HitTestTreeManager::ROOT, &ht_root_fallback_action_handler);
+    if let Some(ht_titlebar) = ht_titlebar {
+        app_system
+            .hit_tree
+            .set_action_handler(ht_titlebar, &ht_root_fallback_action_handler);
+    }
 
     app_state.get_mut().register_sprites_view_feedback({
         let ht_root_fallback_action_handler = Rc::downgrade(&ht_root_fallback_action_handler);
@@ -3908,7 +3937,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
             "Reserved Staging Buffers during UI initialization",
         );
         staging_scratch_buffer_locked.reset();
-        app_system.hit_tree.dump(ht_root);
+        app_system.hit_tree.dump(HitTestTreeManager::ROOT);
     }
 
     let mut main_cp = br::CommandPoolObject::new(
@@ -5490,18 +5519,18 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     app_update_context.ui_scale_factor = app_shell.ui_scale_factor();
                     let (cw, ch) = client_size.get();
 
-                    pointer_input_manager.handle_mouse_move(
+                    unsafe { &mut *app_shell.pointer_input_manager.get() }.handle_mouse_move(
                         surface_x,
                         surface_y,
                         cw,
                         ch,
                         &mut app_system.hit_tree,
                         &mut app_update_context,
-                        ht_root,
+                        HitTestTreeManager::ROOT,
                     );
                     app_shell.set_cursor_shape(
                         enter_serial,
-                        pointer_input_manager
+                        unsafe { &mut *app_shell.pointer_input_manager.get() }
                             .cursor_shape(&mut app_system.hit_tree, &mut app_update_context),
                     );
 
@@ -5511,7 +5540,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     app_update_context.ui_scale_factor = app_shell.ui_scale_factor();
                     let (cw, ch) = client_size.get();
 
-                    pointer_input_manager.handle_mouse_left_down(
+                    unsafe { &mut *app_shell.pointer_input_manager.get() }.handle_mouse_left_down(
                         &app_shell,
                         last_pointer_pos.0,
                         last_pointer_pos.1,
@@ -5519,11 +5548,11 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         ch,
                         &mut app_system.hit_tree,
                         &mut app_update_context,
-                        ht_root,
+                        HitTestTreeManager::ROOT,
                     );
                     app_shell.set_cursor_shape(
                         enter_serial,
-                        pointer_input_manager
+                        unsafe { &mut *app_shell.pointer_input_manager.get() }
                             .cursor_shape(&mut app_system.hit_tree, &mut app_update_context),
                     );
                 }
@@ -5531,7 +5560,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     app_update_context.ui_scale_factor = app_shell.ui_scale_factor();
                     let (cw, ch) = client_size.get();
 
-                    pointer_input_manager.handle_mouse_left_up(
+                    unsafe { &mut *app_shell.pointer_input_manager.get() }.handle_mouse_left_up(
                         &app_shell,
                         last_pointer_pos.0,
                         last_pointer_pos.1,
@@ -5539,11 +5568,11 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         ch,
                         &mut app_system.hit_tree,
                         &mut app_update_context,
-                        ht_root,
+                        HitTestTreeManager::ROOT,
                     );
                     app_shell.set_cursor_shape(
                         enter_serial,
-                        pointer_input_manager
+                        unsafe { &mut *app_shell.pointer_input_manager.get() }
                             .cursor_shape(&mut app_system.hit_tree, &mut app_update_context),
                     );
                 }
@@ -5568,7 +5597,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     p.show(
                         app_system,
                         CompositeTree::ROOT,
-                        ht_root,
+                        popup_hit_layer,
                         t.elapsed().as_secs_f32(),
                     );
 
@@ -5656,7 +5685,7 @@ impl DBusLink {
 
 #[cfg(windows)]
 async fn app_menu_on_add_sprite<'sys, 'subsystem>(
-    shell: &'sys AppShell<'sys>,
+    shell: &'sys AppShell<'sys, 'subsystem>,
     app_state: &'sys RefCell<AppState<'subsystem>>,
 ) {
     let added_paths = shell.select_added_sprites().await;

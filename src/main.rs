@@ -28,6 +28,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::{composite::FloatParameter, quadtree::QuadTree};
 use app_state::{AppState, SpriteInfo};
 use base_system::AppBaseSystem;
 use bedrock::{
@@ -47,15 +48,12 @@ use feature::editing_atlas_renderer::EditingAtlasRenderer;
 use hittest::{
     CursorShape, HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef,
 };
-use input::{EventContinueControl, PointerInputManager};
+use input::EventContinueControl;
 use parking_lot::RwLock;
+use shell::AppShell;
 use subsystem::{StagingScratchBufferManager, Subsystem};
 use text::TextLayout;
 use trigger_cell::TriggerCell;
-
-#[cfg(windows)]
-use crate::shell::AppShell;
-use crate::{composite::FloatParameter, quadtree::QuadTree};
 
 pub enum AppEvent {
     ToplevelWindowConfigure {
@@ -3010,6 +3008,10 @@ fn main() {
     #[cfg(unix)]
     let dbus =
         thirdparty::dbus::Connection::connect_bus(thirdparty::dbus::BusType::Session).unwrap();
+    #[cfg(unix)]
+    let mut dbus = DBusLink {
+        con: RefCell::new(dbus),
+    };
 
     let events = AppEventBus {
         queue: UnsafeCell::new(VecDeque::new()),
@@ -3044,6 +3046,8 @@ fn main() {
         &mut app_state,
         &task_worker,
         &bg_worker,
+        #[cfg(unix)]
+        &mut dbus,
     );
 
     bg_worker.teardown();
@@ -3057,6 +3061,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     app_state: &'sys mut RefCell<AppState<'subsystem>>,
     task_worker: &smol::LocalExecutor<'sys>,
     bg_worker: &BackgroundWorker<'subsystem>,
+    #[cfg(unix)] dbus: &'sys mut DBusLink,
 ) {
     tracing::info!("Initializing Peridot SpriteAtlas Visualizer/Editor");
     let setup_timer = std::time::Instant::now();
@@ -3692,11 +3697,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                 .collect::<Vec<_>>(),
         )
         .unwrap();
-
-    #[cfg(unix)]
-    let mut dbus = DBusLink {
-        con: RefCell::new(dbus),
-    };
 
     let mut staging_scratch_buffer_locked =
         parking_lot::RwLockWriteGuard::map(staging_scratch_buffers.write(), |x| {
@@ -5618,7 +5618,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                 AppEvent::AppMenuRequestAddSprite => {
                     #[cfg(target_os = "linux")]
                     task_worker
-                        .spawn(app_menu_on_add_sprite(&dbus, &events, &app_state))
+                        .spawn(app_menu_on_add_sprite(dbus, events, app_state))
                         .detach();
                     #[cfg(windows)]
                     task_worker

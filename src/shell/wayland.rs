@@ -1,13 +1,16 @@
 use std::{
     cell::{Cell, UnsafeCell},
     os::fd::{AsRawFd, RawFd},
+    pin::Pin,
 };
 
 use bedrock::{self as br, SurfaceCreateInfo};
 
 use crate::{
     AppEvent, AppEventBus,
+    base_system::AppBaseSystem,
     hittest::CursorShape,
+    input::PointerInputManager,
     platform::linux::input_event_codes::BTN_LEFT,
     thirdparty::wl::{self, WpCursorShapeDeviceV1Shape, WpCursorShapeManagerV1},
 };
@@ -197,7 +200,7 @@ impl wl::CallbackEventListener for WaylandShellEventHandler<'_> {
     }
 }
 
-pub struct AppShell<'a> {
+pub struct AppShell<'a, 'subsystem> {
     shell_event_handler: Box<UnsafeCell<WaylandShellEventHandler<'a>>>,
     display: wl::Display,
     surface: core::ptr::NonNull<wl::Surface>,
@@ -205,10 +208,12 @@ pub struct AppShell<'a> {
     zxdg_exporter_v2: Option<core::ptr::NonNull<wl::ZxdgExporterV2>>,
     cursor_shape_device: core::ptr::NonNull<wl::WpCursorShapeDeviceV1>,
     frame_callback: Cell<core::ptr::NonNull<wl::Callback>>,
+    pub pointer_input_manager: Pin<Box<UnsafeCell<PointerInputManager>>>,
+    _marker: core::marker::PhantomData<*mut AppBaseSystem<'subsystem>>,
 }
-impl<'a> AppShell<'a> {
-    #[tracing::instrument(skip(events))]
-    pub fn new(events: &'a AppEventBus) -> Self {
+impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
+    #[tracing::instrument(skip(events, _base_sys))]
+    pub fn new(events: &'a AppEventBus, _base_sys: *mut AppBaseSystem<'subsystem>) -> Self {
         let mut dp = wl::Display::connect().unwrap();
         let mut registry = dp.get_registry().unwrap();
         struct RegistryListener {
@@ -455,6 +460,8 @@ impl<'a> AppShell<'a> {
             tracing::warn!(reason = ?e, "Failed to commit wl_surface");
         }
 
+        let pointer_input_manager = Box::pin(UnsafeCell::new(PointerInputManager::new()));
+
         compositor.leak();
         xdg_wm_base.leak();
         seat.leak();
@@ -470,6 +477,8 @@ impl<'a> AppShell<'a> {
             cursor_shape_device: cursor_shape_device.unwrap(),
             frame_callback: Cell::new(frame.unwrap()),
             zxdg_exporter_v2: zxdg_exporter_v2.map(|x| x.unwrap()),
+            pointer_input_manager,
+            _marker: core::marker::PhantomData,
         }
     }
 
@@ -586,6 +595,18 @@ impl<'a> AppShell<'a> {
 
     pub fn release_pointer(&self) {
         /* do nothing currently(maybe requires on floating-window system) */
+    }
+
+    pub fn close_safe(&self) {
+        // do nothing for wayland
+    }
+
+    pub fn minimize(&self) {
+        // do nothing currently(maybe requires on floating-window system)
+    }
+
+    pub fn maximize(&self) {
+        // do nothing currently(maybe requires on floating-window system)
     }
 
     #[tracing::instrument(skip(self))]

@@ -5329,6 +5329,16 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                 .subsystem
                                 .update_descriptor_sets(&descriptor_writes, &[]);
 
+                            let screen_viewport = [sc
+                                .size
+                                .into_rect(br::Offset2D::ZERO)
+                                .make_viewport(0.0..1.0)];
+                            let screen_scissor = [sc.size.into_rect(br::Offset2D::ZERO)];
+                            let screen_viewport_state =
+                                br::PipelineViewportStateCreateInfo::new_array(
+                                    &screen_viewport,
+                                    &screen_scissor,
+                                );
                             let [
                                 composite_pipeline_grabbed1,
                                 composite_pipeline_final1,
@@ -5342,12 +5352,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                         &composite_shader_stages,
                                         &composite_vinput,
                                         &composite_ia_state,
-                                        &br::PipelineViewportStateCreateInfo::new(
-                                            &[sc.size
-                                                .into_rect(br::Offset2D::ZERO)
-                                                .make_viewport(0.0..1.0)],
-                                            &[sc.size.into_rect(br::Offset2D::ZERO)],
-                                        ),
+                                        &screen_viewport_state,
                                         &composite_raster_state,
                                         &composite_blend_state,
                                     )
@@ -5358,12 +5363,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                         &composite_shader_stages,
                                         &composite_vinput,
                                         &composite_ia_state,
-                                        &br::PipelineViewportStateCreateInfo::new(
-                                            &[sc.size
-                                                .into_rect(br::Offset2D::ZERO)
-                                                .make_viewport(0.0..1.0)],
-                                            &[sc.size.into_rect(br::Offset2D::ZERO)],
-                                        ),
+                                        &screen_viewport_state,
                                         &composite_raster_state,
                                         &composite_blend_state,
                                     )
@@ -5374,12 +5374,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                         &composite_shader_stages,
                                         &composite_vinput,
                                         &composite_ia_state,
-                                        &br::PipelineViewportStateCreateInfo::new(
-                                            &[sc.size
-                                                .into_rect(br::Offset2D::ZERO)
-                                                .make_viewport(0.0..1.0)],
-                                            &[sc.size.into_rect(br::Offset2D::ZERO)],
-                                        ),
+                                        &screen_viewport_state,
                                         &composite_raster_state,
                                         &composite_blend_state,
                                     )
@@ -5390,12 +5385,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                         &composite_shader_stages,
                                         &composite_vinput,
                                         &composite_ia_state,
-                                        &br::PipelineViewportStateCreateInfo::new(
-                                            &[sc.size
-                                                .into_rect(br::Offset2D::ZERO)
-                                                .make_viewport(0.0..1.0)],
-                                            &[sc.size.into_rect(br::Offset2D::ZERO)],
-                                        ),
+                                        &screen_viewport_state,
                                         &composite_raster_state,
                                         &composite_blend_state,
                                     )

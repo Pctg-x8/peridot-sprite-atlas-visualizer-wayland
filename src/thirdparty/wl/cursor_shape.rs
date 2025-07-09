@@ -1,34 +1,10 @@
 use super::{Interface, NEWID_ARG, Owned, Proxy, ffi, interface, message};
 
-static WP_CURSOR_SHAPE_MANAGER_V1_INTERFACE: ffi::Interface = interface(
-    c"wp_cursor_shape_manager_v1",
-    1,
-    &[
-        message(c"destroy", c"", &[]),
-        message(
-            c"get_pointer",
-            c"no",
-            &[&WP_CURSOR_SHAPE_DEVICE_V1_INTERFACE, unsafe {
-                &super::wl_pointer_interface
-            }],
-        ),
-        // message(
-        //     c"get_tablet_tool_v2",
-        //     c"no",
-        //     &[
-        //         &WP_CURSOR_SHAPE_DEVICE_V1_INTERFACE,
-        //         &ZWP_TABLET_TOOL_V2_INTERFACE,
-        //     ],
-        // ),
-    ],
-    &[],
-);
-
 #[repr(transparent)]
 pub struct WpCursorShapeManagerV1(Proxy);
 unsafe impl Interface for WpCursorShapeManagerV1 {
     fn def() -> &'static ffi::Interface {
-        &WP_CURSOR_SHAPE_MANAGER_V1_INTERFACE
+        Self::INTERFACE
     }
 
     unsafe fn destruct(&mut self) {
@@ -45,6 +21,32 @@ unsafe impl Interface for WpCursorShapeManagerV1 {
     }
 }
 impl WpCursorShapeManagerV1 {
+    const INTERFACE: &'static ffi::Interface = &interface(
+        c"wp_cursor_shape_manager_v1",
+        1,
+        &[
+            message(c"destroy", c"", &[]),
+            message(
+                c"get_pointer",
+                c"no",
+                &const {
+                    [WpCursorShapeDeviceV1::INTERFACE, unsafe {
+                        &super::wl_pointer_interface
+                    }]
+                },
+            ),
+            // message(
+            //     c"get_tablet_tool_v2",
+            //     c"no",
+            //     &[
+            //         &WP_CURSOR_SHAPE_DEVICE_V1_INTERFACE,
+            //         &ZWP_TABLET_TOOL_V2_INTERFACE,
+            //     ],
+            // ),
+        ],
+        &[],
+    );
+
     pub fn get_pointer(
         &self,
         pointer: &mut super::Pointer,
@@ -70,25 +72,15 @@ impl WpCursorShapeManagerV1 {
 #[derive(Clone, Copy)]
 pub enum WpCursorShapeDeviceV1Shape {
     Default = 1,
-    ContextMenu = 2,
+    // ContextMenu = 2,
     EwResize = 26,
 }
-
-static WP_CURSOR_SHAPE_DEVICE_V1_INTERFACE: ffi::Interface = interface(
-    c"wp_cursor_shape_device_v1",
-    1,
-    &[
-        message(c"destroy", c"", &[]),
-        message(c"set_shape", c"uu", &[]),
-    ],
-    &[],
-);
 
 #[repr(transparent)]
 pub struct WpCursorShapeDeviceV1(Proxy);
 unsafe impl Interface for WpCursorShapeDeviceV1 {
     fn def() -> &'static ffi::Interface {
-        &WP_CURSOR_SHAPE_DEVICE_V1_INTERFACE
+        Self::INTERFACE
     }
 
     unsafe fn destruct(&mut self) {
@@ -105,6 +97,16 @@ unsafe impl Interface for WpCursorShapeDeviceV1 {
     }
 }
 impl WpCursorShapeDeviceV1 {
+    const INTERFACE: &'static ffi::Interface = &interface(
+        c"wp_cursor_shape_device_v1",
+        1,
+        &[
+            message(c"destroy", c"", &[]),
+            message(c"set_shape", c"uu", &[]),
+        ],
+        &[],
+    );
+
     #[inline]
     pub fn set_shape(
         &self,

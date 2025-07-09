@@ -1,4 +1,6 @@
 {
     "editor.formatOnSave": true,
-    "rust-analyzer.cargo.features": ["platform-windows"]
+    "rust-analyzer.cargo.features": [
+        "platform-linux-wayland"
+    ]
 }

@@ -12,7 +12,7 @@ use crate::{
     hittest::CursorShape,
     input::PointerInputManager,
     platform::linux::input_event_codes::BTN_LEFT,
-    thirdparty::wl::{self, WpCursorShapeDeviceV1Shape, WpCursorShapeManagerV1},
+    thirdparty::wl::{self, Interface, WpCursorShapeDeviceV1Shape, WpCursorShapeManagerV1},
 };
 
 enum PointerOnSurface {
@@ -199,6 +199,15 @@ impl wl::CallbackEventListener for WaylandShellEventHandler<'_> {
         self.app_event_bus.push(AppEvent::ToplevelWindowFrameTiming);
     }
 }
+impl wl::WpFractionalScaleV1EventListener for WaylandShellEventHandler<'_> {
+    fn preferred_scale(&mut self, _object: &mut wl::WpFractionalScaleV1, scale: u32) {
+        tracing::trace!(
+            scale,
+            scale_f = scale as f32 / 120.0,
+            "preferred fractional scale"
+        )
+    }
+}
 
 pub struct AppShell<'a, 'subsystem> {
     shell_event_handler: Box<UnsafeCell<WaylandShellEventHandler<'a>>>,
@@ -222,6 +231,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             seat: Option<wl::Owned<wl::Seat>>,
             cursor_shape_manager: Option<wl::Owned<WpCursorShapeManagerV1>>,
             zxdg_exporter_v2: Option<wl::Owned<wl::ZxdgExporterV2>>,
+            fractional_scale_manager_v1: Option<wl::Owned<wl::WpFractionalScaleManagerV1>>,
         }
         impl wl::RegistryListener for RegistryListener {
             #[tracing::instrument(name = "RegistryListener::global", skip(self, registry))]
@@ -283,6 +293,16 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
                         }
                     }
                 }
+
+                if interface == c"wp_fractional_scale_manager_v1" {
+                    self.fractional_scale_manager_v1 = match registry.bind(name, version) {
+                        Ok(x) => Some(x),
+                        Err(e) => {
+                            tracing::warn!(reason = ?e, "Failed to bind");
+                            None
+                        }
+                    };
+                }
             }
 
             fn global_remove(&mut self, _registry: &mut wl::Registry, name: u32) {
@@ -295,6 +315,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             seat: None,
             cursor_shape_manager: None,
             zxdg_exporter_v2: None,
+            fractional_scale_manager_v1: None,
         };
         if let Err(e) = registry.add_listener(&mut rl) {
             tracing::warn!(target = "registry", reason = ?e, "Failed to set listener");
@@ -304,7 +325,14 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
         }
         drop(registry);
 
-        let (compositor, mut xdg_wm_base, mut seat, cursor_shape_manager, zxdg_exporter_v2);
+        let (
+            compositor,
+            mut xdg_wm_base,
+            mut seat,
+            cursor_shape_manager,
+            zxdg_exporter_v2,
+            fractional_scale_manager_v1,
+        );
         match rl {
             RegistryListener {
                 compositor: Some(compositor1),
@@ -312,12 +340,14 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
                 seat: Some(seat1),
                 cursor_shape_manager: Some(cursor_shape_manager1),
                 zxdg_exporter_v2: zxdg_exporter_v21,
+                fractional_scale_manager_v1: fractional_scale_manager_v11,
             } => {
                 compositor = compositor1;
                 xdg_wm_base = xdg_wm_base1;
                 seat = seat1;
                 cursor_shape_manager = cursor_shape_manager1;
                 zxdg_exporter_v2 = zxdg_exporter_v21;
+                fractional_scale_manager_v1 = fractional_scale_manager_v11;
             }
             rl => {
                 if rl.compositor.is_none() {
@@ -456,6 +486,24 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             tracing::warn!(target = "frame", reason = ?e, "Failed to set listener");
         }
 
+        'optin_fractional_scale: {
+            let Some(ref m) = fractional_scale_manager_v1 else {
+                // no wp_fractional_scale_manager_v1
+                break 'optin_fractional_scale;
+            };
+
+            let Ok(mut fs) = m.get_fractional_scale(&wl_surface) else {
+                // errored(logged via tracing::instrument)
+                break 'optin_fractional_scale;
+            };
+
+            if let Err(e) = fs.add_listener(shell_event_handler.get_mut()) {
+                tracing::warn!(target = "fractional_scale", reason = ?e, "Failed to set listener");
+            }
+
+            fs.leak();
+        }
+
         if let Err(e) = wl_surface.commit() {
             tracing::warn!(reason = ?e, "Failed to commit wl_surface");
         }
@@ -468,6 +516,9 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
         cursor_shape_manager.leak();
         xdg_toplevel.leak();
         pointer.leak();
+        if let Some(x) = fractional_scale_manager_v1 {
+            x.leak();
+        }
 
         Self {
             shell_event_handler,

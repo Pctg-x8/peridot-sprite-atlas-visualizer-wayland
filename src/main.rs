@@ -5608,7 +5608,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                 AppEvent::AppMenuRequestAddSprite => {
                     #[cfg(target_os = "linux")]
                     task_worker
-                        .spawn(app_menu_on_add_sprite(dbus, events, app_state))
+                        .spawn(app_menu_on_add_sprite(dbus, app_shell, events, app_state))
                         .detach();
                     #[cfg(windows)]
                     task_worker
@@ -5726,6 +5726,7 @@ async fn app_menu_on_add_sprite<'sys, 'subsystem>(
 #[cfg(target_os = "linux")]
 async fn app_menu_on_add_sprite<'subsystem>(
     dbus: &DBusLink,
+    shell: &AppShell<'_, 'subsystem>,
     events: &AppEventBus,
     app_state: &RefCell<AppState<'subsystem>>,
 ) {
@@ -5832,6 +5833,33 @@ async fn app_menu_on_add_sprite<'subsystem>(
         c"Response".into(),
     );
 
+    let (exported_shell_handle, exported_shell) = 'optin_exported: {
+        if let Some(mut x) = shell.try_export_toplevel() {
+            struct Handler {
+                handle: Option<std::ffi::CString>,
+            }
+            impl thirdparty::wl::ZxdgExportedV2EventListener for Handler {
+                fn handle(
+                    &mut self,
+                    _sender: &mut thirdparty::wl::ZxdgExportedV2,
+                    handle: &core::ffi::CStr,
+                ) {
+                    self.handle = Some(handle.into());
+                }
+            }
+            let mut handler = Handler { handle: None };
+            if let Err(e) = x.add_listener(&mut handler) {
+                tracing::warn!(target = "ZxdgExportedV2", reason = ?e, "Failed to add listener");
+                break 'optin_exported (c"".into(), None);
+            }
+            shell.sync();
+
+            (handler.handle.unwrap_or_else(|| c"".into()), Some(x))
+        } else {
+            (c"".into(), None)
+        }
+    };
+
     let reply_msg = dbus
         .send({
             let mut msg = thirdparty::dbus::Message::new_method_call(
@@ -5842,8 +5870,7 @@ async fn app_menu_on_add_sprite<'subsystem>(
             )
             .unwrap();
             let mut msg_args_appender = msg.iter_append();
-            // TODO: parent_window(if available Hyprlandにはxdg_foreignの実装がなかった)
-            msg_args_appender.append_cstr(c"");
+            msg_args_appender.append_cstr(&exported_shell_handle);
             msg_args_appender.append_cstr(c"Add Sprite");
             let mut options_appender = msg_args_appender
                 .open_container(thirdparty::dbus::TYPE_ARRAY, Some(c"{sv}"))
@@ -5892,6 +5919,7 @@ async fn app_menu_on_add_sprite<'subsystem>(
     }
 
     let resp = signal_awaiter.await;
+    drop(exported_shell);
 
     println!("open file response! {:?}", resp.signature());
     let mut resp_iter = resp.iter();

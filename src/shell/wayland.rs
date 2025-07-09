@@ -533,6 +533,12 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
         }
     }
 
+    pub fn sync(&self) {
+        if let Err(e) = self.display.roundtrip() {
+            tracing::warn!(reason = ?e, "wayland display roundtrip failed");
+        }
+    }
+
     pub const fn is_floating_window(&self) -> bool {
         // TODO: detect floating/tiling window system
         false
@@ -670,6 +676,22 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             },
         ) {
             tracing::warn!(reason = ?e, "Failed to set cursor shape");
+        }
+    }
+
+    // wayland specific functionality
+    pub fn try_export_toplevel(&self) -> Option<wl::Owned<wl::ZxdgExportedV2>> {
+        let Some(ref x) = self.zxdg_exporter_v2 else {
+            tracing::warn!("No zxdg_exporter_v2 found on the system");
+            return None;
+        };
+
+        match unsafe { x.as_ref() }.export_toplevel(unsafe { self.surface.as_ref() }) {
+            Ok(x) => Some(x),
+            Err(e) => {
+                tracing::warn!(reason = ?e, "Failed to get exported toplevel");
+                None
+            }
         }
     }
 

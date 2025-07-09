@@ -57,6 +57,12 @@ impl Proxy {
         unsafe { core::mem::transmute(UnsafeCell::from_mut(r)) }
     }
 
+    pub(self) const fn as_arg(&self) -> ffi::Argument {
+        ffi::Argument {
+            o: self.0.get() as _,
+        }
+    }
+
     #[inline(always)]
     pub fn version(&self) -> u32 {
         unsafe { ffi::wl_proxy_get_version(self as *const _ as _) }

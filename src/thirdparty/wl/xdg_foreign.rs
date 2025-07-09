@@ -50,7 +50,7 @@ impl ZxdgExporterV2 {
     #[inline]
     pub fn export_toplevel(
         &self,
-        surface: &mut super::Surface,
+        surface: &super::Surface,
     ) -> Result<Owned<ZxdgExportedV2>, std::io::Error> {
         Ok(unsafe {
             Owned::from_untyped_unchecked(self.0.marshal_array_flags(
@@ -58,7 +58,7 @@ impl ZxdgExporterV2 {
                 ZxdgExportedV2::def(),
                 self.0.version(),
                 0,
-                &mut [NEWID_ARG],
+                &mut [NEWID_ARG, surface.0.as_arg()],
             )?)
         })
     }

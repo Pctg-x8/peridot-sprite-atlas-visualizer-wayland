@@ -195,6 +195,10 @@ unsafe extern "C" {
         iter: *mut DBusMessageIter,
         sub: *mut DBusMessageIter,
     ) -> dbus_bool_t;
+    pub unsafe fn dbus_message_iter_abandon_container(
+        iter: *mut DBusMessageIter,
+        sub: *mut DBusMessageIter,
+    ) -> dbus_bool_t;
     pub unsafe fn dbus_set_error_from_message(
         error: *mut DBusError,
         message: *mut DBusMessage,

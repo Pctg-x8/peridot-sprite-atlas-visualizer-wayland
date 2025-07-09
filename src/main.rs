@@ -5846,28 +5846,16 @@ async fn app_menu_on_add_sprite<'subsystem>(
             msg_args_appender.append_cstr(c"");
             msg_args_appender.append_cstr(c"Add Sprite");
             let mut options_appender = msg_args_appender
-                .open_container(thirdparty::dbus::TYPE_ARRAY, c"{sv}")
+                .open_container(thirdparty::dbus::TYPE_ARRAY, Some(c"{sv}"))
                 .unwrap();
-            let mut dict_appender = options_appender
-                .open_container(thirdparty::dbus::TYPE_DICT_ENTRY, c"sv")
-                .unwrap();
+            let mut dict_appender = options_appender.open_dict_entry_container().unwrap();
             dict_appender.append_cstr(c"handle_token");
-            let mut handle_token_option_variant_appender = dict_appender
-                .open_container(thirdparty::dbus::TYPE_VARIANT, c"s")
-                .unwrap();
-            handle_token_option_variant_appender
-                .append_cstr(&std::ffi::CString::new(dialog_token.clone()).unwrap());
-            handle_token_option_variant_appender.close();
+            dict_appender
+                .append_variant_cstr(&std::ffi::CString::new(dialog_token.clone()).unwrap());
             dict_appender.close();
-            let mut dict_appender = options_appender
-                .open_container(thirdparty::dbus::TYPE_DICT_ENTRY, c"sv")
-                .unwrap();
+            let mut dict_appender = options_appender.open_dict_entry_container().unwrap();
             dict_appender.append_cstr(c"multiple");
-            let mut multiple_option_variant_appender = dict_appender
-                .open_container(thirdparty::dbus::TYPE_VARIANT, c"b")
-                .unwrap();
-            multiple_option_variant_appender.append_bool(true);
-            multiple_option_variant_appender.close();
+            dict_appender.append_variant_bool(true);
             dict_appender.close();
             options_appender.close();
 

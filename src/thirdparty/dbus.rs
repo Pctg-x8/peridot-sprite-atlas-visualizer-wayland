@@ -519,14 +519,14 @@ impl<'m> MessageIterAppend<'m> {
     pub fn open_container<'p>(
         &'p mut self,
         r#type: core::ffi::c_int,
-        contained_signature: &CStr,
+        contained_signature: Option<&CStr>,
     ) -> Option<MessageIterAppendContainer<'p, Self>> {
         let mut subiter = MaybeUninit::uninit();
         if unsafe {
             ffi::dbus_message_iter_open_container(
                 &mut self.0,
                 r#type,
-                contained_signature.as_ptr(),
+                contained_signature.map_or_else(core::ptr::null, CStr::as_ptr),
                 subiter.as_mut_ptr(),
             ) != 0
         } {
@@ -559,6 +559,7 @@ impl<'p, P: MessageIterAppendLike + 'p> Drop for MessageIterAppendContainer<'_, 
     }
 }
 impl<'p, P: MessageIterAppendLike + 'p> MessageIterAppendContainer<'p, P> {
+    #[inline]
     pub fn close(mut self) -> bool {
         let r = unsafe {
             ffi::dbus_message_iter_close_container(self.1.ffi_pointer_mut(), &mut self.0 as *mut _)
@@ -566,6 +567,17 @@ impl<'p, P: MessageIterAppendLike + 'p> MessageIterAppendContainer<'p, P> {
         };
         core::mem::forget(self);
         r
+    }
+
+    #[inline]
+    pub fn abandon(mut self) {
+        unsafe {
+            ffi::dbus_message_iter_abandon_container(
+                self.1.ffi_pointer_mut(),
+                &mut self.0 as *mut _,
+            );
+        }
+        core::mem::forget(self);
     }
 
     pub unsafe fn append_basic(
@@ -585,17 +597,66 @@ impl<'p, P: MessageIterAppendLike + 'p> MessageIterAppendContainer<'p, P> {
         unsafe { self.append_basic(ffi::DBUS_TYPE_BOOLEAN, &v1 as *const _ as _) }
     }
 
+    #[inline(always)]
+    pub fn open_dict_entry_container<'p1>(
+        &'p1 mut self,
+    ) -> Option<MessageIterAppendContainer<'p1, Self>> {
+        self.open_container(ffi::DBUS_TYPE_DICT_ENTRY, None)
+    }
+
+    #[inline(always)]
+    pub fn open_variant_container<'p1>(
+        &'p1 mut self,
+        contained_signature: &CStr,
+    ) -> Option<MessageIterAppendContainer<'p1, Self>> {
+        self.open_container(ffi::DBUS_TYPE_VARIANT, Some(contained_signature))
+    }
+
+    #[inline]
+    pub fn append_variant_bool(&mut self, v: bool) -> bool {
+        let Some(mut c) = self.open_variant_container(c"b") else {
+            return false;
+        };
+        if !c.append_bool(v) {
+            c.abandon();
+            return false;
+        }
+        if !c.close() {
+            tracing::warn!("closing variant container has failed");
+            return false;
+        }
+
+        true
+    }
+
+    #[inline]
+    pub fn append_variant_cstr(&mut self, v: &CStr) -> bool {
+        let Some(mut c) = self.open_variant_container(c"s") else {
+            return false;
+        };
+        if !c.append_cstr(v) {
+            c.abandon();
+            return false;
+        }
+        if !c.close() {
+            tracing::warn!("closing variant container has failed");
+            return false;
+        }
+
+        true
+    }
+
     pub fn open_container<'p1>(
         &'p1 mut self,
         r#type: core::ffi::c_int,
-        contained_signature: &CStr,
+        contained_signature: Option<&CStr>,
     ) -> Option<MessageIterAppendContainer<'p1, Self>> {
         let mut subiter = MaybeUninit::uninit();
         if unsafe {
             ffi::dbus_message_iter_open_container(
                 &mut self.0,
                 r#type,
-                contained_signature.as_ptr(),
+                contained_signature.map_or_else(core::ptr::null, CStr::as_ptr),
                 subiter.as_mut_ptr(),
             ) != 0
         } {

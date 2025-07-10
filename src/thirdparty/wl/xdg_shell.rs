@@ -346,6 +346,10 @@ unsafe impl Interface for XdgToplevel {
     }
 }
 impl XdgToplevel {
+    pub const fn as_raw(&mut self) -> *mut ffi::Proxy {
+        &mut self.0 as *mut _ as _
+    }
+
     pub fn add_listener<'l, L: XdgToplevelEventListener + 'l>(
         &'l mut self,
         listener: &'l mut L,
@@ -439,6 +443,12 @@ impl XdgToplevel {
     pub fn set_app_id(&self, id: &core::ffi::CStr) -> Result<(), std::io::Error> {
         self.0
             .marshal_array_flags_void(3, 0, &mut [ffi::Argument { s: id.as_ptr() }])
+    }
+
+    #[inline]
+    pub fn r#move(&self, seat: &super::Seat, serial: u32) -> Result<(), std::io::Error> {
+        self.0
+            .marshal_array_flags_void(5, 0, &mut [seat.0.as_arg(), ffi::Argument { u: serial }])
     }
 }
 

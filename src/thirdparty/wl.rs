@@ -828,6 +828,10 @@ unsafe impl Interface for Seat {
     }
 }
 impl Seat {
+    pub const fn as_raw(&mut self) -> *mut ffi::Proxy {
+        &mut self.0 as *mut _ as _
+    }
+
     #[inline]
     pub fn get_pointer(&self) -> Result<Owned<Pointer>, std::io::Error> {
         let proxy_ptr =

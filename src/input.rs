@@ -658,6 +658,35 @@ impl PointerInputManager {
         }
     }
 
+    pub fn role_focus(&self, ht: &HitTestTreeManager) -> Option<Role> {
+        match self.pointer_focus {
+            PointerFocusState::Capturing(ht_ref) => {
+                // キャプチャ中の要素があればそれだけを見る
+                ht.get_data(ht_ref)
+                    .action_handler()
+                    .and_then(|x| x.role(ht_ref))
+            }
+            PointerFocusState::Entering(ht_ref) => {
+                let mut p = Some(ht_ref);
+                while let Some(ht_ref) = p {
+                    if let Some(role) = ht
+                        .get_data(ht_ref)
+                        .action_handler()
+                        .and_then(|h| h.role(ht_ref))
+                    {
+                        return Some(role);
+                    }
+
+                    p = ht.parent_of(ht_ref);
+                }
+
+                // fallback
+                None
+            }
+            PointerFocusState::None => None,
+        }
+    }
+
     pub fn role(
         &self,
         client_x: f32,

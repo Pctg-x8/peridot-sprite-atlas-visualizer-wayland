@@ -9,7 +9,7 @@ use bedrock::{self as br, SurfaceCreateInfo};
 use crate::{
     AppEvent, AppEventBus,
     base_system::AppBaseSystem,
-    hittest::CursorShape,
+    hittest::{CursorShape, Role},
     input::PointerInputManager,
     platform::linux::{
         MemoryMapFlags, MemoryProtectionFlags, OpenFlags, TemporalSharedMemory,
@@ -22,28 +22,32 @@ enum PointerOnSurface {
     None,
     Main { serial: u32 },
 }
-struct WaylandShellEventHandler<'a> {
+struct WaylandShellEventHandler<'a, 'subsystem> {
     app_event_bus: &'a AppEventBus,
     cached_client_size: (u32, u32),
     ui_scale_factor: f32,
     pointer_on_surface: PointerOnSurface,
     main_surface_proxy_ptr: *mut wl::Surface,
+    xdg_toplevel_proxy_ptr: *mut wl::XdgToplevel,
+    primary_seat_ptr: *mut wl::Seat,
     client_decoration: ClientDecorationResources,
+    pointer_input_manager: Pin<Box<UnsafeCell<PointerInputManager>>>,
+    base_system_ptr: *mut AppBaseSystem<'subsystem>,
 }
-impl wl::XdgWmBaseEventListener for WaylandShellEventHandler<'_> {
+impl wl::XdgWmBaseEventListener for WaylandShellEventHandler<'_, '_> {
     fn ping(&mut self, wm_base: &mut wl::XdgWmBase, serial: u32) {
         if let Err(e) = wm_base.pong(serial) {
             tracing::warn!(reason = ?e, serial, "Failed to respond wm_base.ping");
         }
     }
 }
-impl wl::XdgSurfaceEventListener for WaylandShellEventHandler<'_> {
+impl wl::XdgSurfaceEventListener for WaylandShellEventHandler<'_, '_> {
     fn configure(&mut self, _: &mut wl::XdgSurface, serial: u32) {
         self.app_event_bus
             .push(AppEvent::ToplevelWindowSurfaceConfigure { serial });
     }
 }
-impl wl::XdgToplevelEventListener for WaylandShellEventHandler<'_> {
+impl wl::XdgToplevelEventListener for WaylandShellEventHandler<'_, '_> {
     fn configure(
         &mut self,
         _: &mut wl::XdgToplevel,
@@ -85,7 +89,7 @@ impl wl::XdgToplevelEventListener for WaylandShellEventHandler<'_> {
         tracing::trace!(?capabilities, "wm capabilities");
     }
 }
-impl wl::SurfaceEventListener for WaylandShellEventHandler<'_> {
+impl wl::SurfaceEventListener for WaylandShellEventHandler<'_, '_> {
     fn enter(&mut self, _surface: &mut wl::Surface, _output: &mut wl::Output) {
         tracing::trace!("enter output");
     }
@@ -107,7 +111,7 @@ impl wl::SurfaceEventListener for WaylandShellEventHandler<'_> {
         tracing::trace!(transform, "preferred buffer transform");
     }
 }
-impl wl::PointerEventListener for WaylandShellEventHandler<'_> {
+impl wl::PointerEventListener for WaylandShellEventHandler<'_, '_> {
     fn enter(
         &mut self,
         _pointer: &mut wl::Pointer,
@@ -175,16 +179,30 @@ impl wl::PointerEventListener for WaylandShellEventHandler<'_> {
     ) {
         match self.pointer_on_surface {
             PointerOnSurface::None => (),
-            PointerOnSurface::Main { serial } => {
+            PointerOnSurface::Main {
+                serial: enter_serial,
+            } => {
                 if button == BTN_LEFT && state == wl::PointerButtonState::Pressed {
+                    // TODO: detect whether floating window system and client side decorated
+                    let role = self
+                        .pointer_input_manager
+                        .get_mut()
+                        .role_focus(unsafe { &(*self.base_system_ptr).hit_tree });
+                    match role {
+                        Some(Role::TitleBar) => {
+                            unsafe { &*self.xdg_toplevel_proxy_ptr }
+                                .r#move(unsafe { &*self.primary_seat_ptr }, serial)
+                                .unwrap();
+                            return;
+                        }
+                        _ => (),
+                    }
+
                     self.app_event_bus
-                        .push(AppEvent::MainWindowPointerLeftDown {
-                            enter_serial: serial,
-                        });
+                        .push(AppEvent::MainWindowPointerLeftDown { enter_serial });
                 } else if button == BTN_LEFT && state == wl::PointerButtonState::Released {
-                    self.app_event_bus.push(AppEvent::MainWindowPointerLeftUp {
-                        enter_serial: serial,
-                    });
+                    self.app_event_bus
+                        .push(AppEvent::MainWindowPointerLeftUp { enter_serial });
                 }
             }
         }
@@ -218,12 +236,12 @@ impl wl::PointerEventListener for WaylandShellEventHandler<'_> {
         tracing::trace!(axis, direction, "axis relative direction");
     }
 }
-impl wl::CallbackEventListener for WaylandShellEventHandler<'_> {
+impl wl::CallbackEventListener for WaylandShellEventHandler<'_, '_> {
     fn done(&mut self, _callback: &mut wl::Callback, _data: u32) {
         self.app_event_bus.push(AppEvent::ToplevelWindowFrameTiming);
     }
 }
-impl wl::WpFractionalScaleV1EventListener for WaylandShellEventHandler<'_> {
+impl wl::WpFractionalScaleV1EventListener for WaylandShellEventHandler<'_, '_> {
     fn preferred_scale(&mut self, _object: &mut wl::WpFractionalScaleV1, scale: u32) {
         tracing::trace!(
             scale,
@@ -232,12 +250,12 @@ impl wl::WpFractionalScaleV1EventListener for WaylandShellEventHandler<'_> {
         )
     }
 }
-impl wl::GtkShell1EventListener for WaylandShellEventHandler<'_> {
+impl wl::GtkShell1EventListener for WaylandShellEventHandler<'_, '_> {
     fn capabilities(&mut self, sender: &mut wl::GtkShell1, capabilities: u32) {
         tracing::trace!(capabilities, "gtk_shell capabilities");
     }
 }
-impl wl::GtkSurface1EventListener for WaylandShellEventHandler<'_> {
+impl wl::GtkSurface1EventListener for WaylandShellEventHandler<'_, '_> {
     fn configure(&mut self, sender: &mut wl::GtkSurface1, states: &[u32]) {
         tracing::trace!(?states, "gtk_surface configure");
     }
@@ -485,6 +503,50 @@ impl ClientDecorationResources {
     }
 
     pub fn set_buffer_scale(&mut self, scale: i32) {
+        // detach buffers before recreating
+        self.hide();
+
+        unsafe { self.shadow_lt_surface.as_ref() }
+            .set_buffer_scale(scale)
+            .unwrap();
+        unsafe { self.shadow_lt_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_lb_surface.as_ref() }
+            .set_buffer_scale(scale)
+            .unwrap();
+        unsafe { self.shadow_lb_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_rt_surface.as_ref() }
+            .set_buffer_scale(scale)
+            .unwrap();
+        unsafe { self.shadow_rt_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_rb_surface.as_ref() }
+            .set_buffer_scale(scale)
+            .unwrap();
+        unsafe { self.shadow_rb_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_left_surface.as_ref() }
+            .set_buffer_scale(scale)
+            .unwrap();
+        unsafe { self.shadow_left_surface.as_ref() }
+            .commit()
+            .unwrap();
+        unsafe { self.shadow_right_surface.as_ref() }
+            .set_buffer_scale(scale)
+            .unwrap();
+        unsafe { self.shadow_right_surface.as_ref() }
+            .commit()
+            .unwrap();
+        unsafe { self.shadow_top_surface.as_ref() }
+            .set_buffer_scale(scale)
+            .unwrap();
+        unsafe { self.shadow_top_surface.as_ref() }
+            .commit()
+            .unwrap();
+        unsafe { self.shadow_bottom_surface.as_ref() }
+            .set_buffer_scale(scale)
+            .unwrap();
+        unsafe { self.shadow_bottom_surface.as_ref() }
+            .commit()
+            .unwrap();
+
         // recreate pix buffer
         let vertical_shadow_start_bytes: usize = 16 * scale as usize * 16 * scale as usize * 4;
         let shm_size = vertical_shadow_start_bytes + 16 * scale as usize * 1 * scale as usize * 4;
@@ -603,47 +665,6 @@ impl ClientDecorationResources {
             .unwrap()
             .unwrap();
         self.show();
-
-        unsafe { self.shadow_lt_surface.as_ref() }
-            .set_buffer_scale(scale)
-            .unwrap();
-        unsafe { self.shadow_lt_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_lb_surface.as_ref() }
-            .set_buffer_scale(scale)
-            .unwrap();
-        unsafe { self.shadow_lb_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_rt_surface.as_ref() }
-            .set_buffer_scale(scale)
-            .unwrap();
-        unsafe { self.shadow_rt_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_rb_surface.as_ref() }
-            .set_buffer_scale(scale)
-            .unwrap();
-        unsafe { self.shadow_rb_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_left_surface.as_ref() }
-            .set_buffer_scale(scale)
-            .unwrap();
-        unsafe { self.shadow_left_surface.as_ref() }
-            .commit()
-            .unwrap();
-        unsafe { self.shadow_right_surface.as_ref() }
-            .set_buffer_scale(scale)
-            .unwrap();
-        unsafe { self.shadow_right_surface.as_ref() }
-            .commit()
-            .unwrap();
-        unsafe { self.shadow_top_surface.as_ref() }
-            .set_buffer_scale(scale)
-            .unwrap();
-        unsafe { self.shadow_top_surface.as_ref() }
-            .commit()
-            .unwrap();
-        unsafe { self.shadow_bottom_surface.as_ref() }
-            .set_buffer_scale(scale)
-            .unwrap();
-        unsafe { self.shadow_bottom_surface.as_ref() }
-            .commit()
-            .unwrap();
     }
 
     pub fn show(&self) {
@@ -683,6 +704,49 @@ impl ClientDecorationResources {
             .unwrap();
         unsafe { self.shadow_bottom_surface.as_ref() }
             .attach(Some(unsafe { self.shadow_straight_buf.as_ref() }), 0, 0)
+            .unwrap();
+        unsafe { self.shadow_bottom_surface.as_ref() }
+            .commit()
+            .unwrap();
+    }
+
+    pub fn hide(&self) {
+        unsafe { self.shadow_lt_surface.as_ref() }
+            .attach(None, 0, 0)
+            .unwrap();
+        unsafe { self.shadow_lt_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_lb_surface.as_ref() }
+            .attach(None, 0, 0)
+            .unwrap();
+        unsafe { self.shadow_lb_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_rb_surface.as_ref() }
+            .attach(None, 0, 0)
+            .unwrap();
+        unsafe { self.shadow_rb_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_rt_surface.as_ref() }
+            .attach(None, 0, 0)
+            .unwrap();
+        unsafe { self.shadow_rt_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_left_surface.as_ref() }
+            .attach(None, 0, 0)
+            .unwrap();
+        unsafe { self.shadow_left_surface.as_ref() }
+            .commit()
+            .unwrap();
+        unsafe { self.shadow_right_surface.as_ref() }
+            .attach(None, 0, 0)
+            .unwrap();
+        unsafe { self.shadow_right_surface.as_ref() }
+            .commit()
+            .unwrap();
+        unsafe { self.shadow_top_surface.as_ref() }
+            .attach(None, 0, 0)
+            .unwrap();
+        unsafe { self.shadow_top_surface.as_ref() }
+            .commit()
+            .unwrap();
+        unsafe { self.shadow_bottom_surface.as_ref() }
+            .attach(None, 0, 0)
             .unwrap();
         unsafe { self.shadow_bottom_surface.as_ref() }
             .commit()
@@ -743,7 +807,7 @@ impl ClientDecorationResources {
 }
 
 pub struct AppShell<'a, 'subsystem> {
-    shell_event_handler: Box<UnsafeCell<WaylandShellEventHandler<'a>>>,
+    shell_event_handler: Box<UnsafeCell<WaylandShellEventHandler<'a, 'subsystem>>>,
     display: wl::Display,
     content_surface: core::ptr::NonNull<wl::Surface>,
     xdg_surface: core::ptr::NonNull<wl::XdgSurface>,
@@ -751,12 +815,10 @@ pub struct AppShell<'a, 'subsystem> {
     cursor_shape_device: core::ptr::NonNull<wl::WpCursorShapeDeviceV1>,
     frame_callback: Cell<core::ptr::NonNull<wl::Callback>>,
     _gtk_surface: Option<core::ptr::NonNull<wl::GtkSurface1>>,
-    pub pointer_input_manager: Pin<Box<UnsafeCell<PointerInputManager>>>,
-    _marker: core::marker::PhantomData<*mut AppBaseSystem<'subsystem>>,
 }
 impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
-    #[tracing::instrument(skip(events, _base_sys))]
-    pub fn new(events: &'a AppEventBus, _base_sys: *mut AppBaseSystem<'subsystem>) -> Self {
+    #[tracing::instrument(skip(events, base_sys))]
+    pub fn new(events: &'a AppEventBus, base_sys: *mut AppBaseSystem<'subsystem>) -> Self {
         let dp = wl::Display::connect().unwrap();
         let mut registry = dp.get_registry().unwrap();
         struct RegistryListener {
@@ -1031,6 +1093,8 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             x.present(0).unwrap();
         }
 
+        let pointer_input_manager = Box::pin(UnsafeCell::new(PointerInputManager::new()));
+
         let mut shell_event_handler = Box::new(UnsafeCell::new(WaylandShellEventHandler {
             app_event_bus: events,
             // 現時点ではわからないので適当な値を設定
@@ -1038,7 +1102,11 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             ui_scale_factor: 2.0,
             pointer_on_surface: PointerOnSurface::None,
             main_surface_proxy_ptr: main_surface.as_raw() as _,
+            xdg_toplevel_proxy_ptr: xdg_toplevel.as_raw() as _,
+            primary_seat_ptr: seat.as_raw() as _,
             client_decoration: client_decoration_resources,
+            pointer_input_manager,
+            base_system_ptr: base_sys,
         }));
 
         if let Err(e) = pointer.add_listener(shell_event_handler.get_mut()) {
@@ -1093,8 +1161,6 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             tracing::warn!(reason = ?e, "Failed to commit wl_surface");
         }
 
-        let pointer_input_manager = Box::pin(UnsafeCell::new(PointerInputManager::new()));
-
         compositor.leak();
         subcompositor.leak();
         viewporter.leak();
@@ -1119,8 +1185,6 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             frame_callback: Cell::new(frame.unwrap()),
             zxdg_exporter_v2: zxdg_exporter_v2.map(|x| x.unwrap()),
             _gtk_surface: gtk_surface.map(|x| x.unwrap()),
-            pointer_input_manager,
-            _marker: core::marker::PhantomData,
         }
     }
 
@@ -1295,5 +1359,10 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
     #[inline]
     pub fn ui_scale_factor(&self) -> f32 {
         unsafe { (*self.shell_event_handler.get()).ui_scale_factor }
+    }
+
+    #[inline]
+    pub fn pointer_input_manager(&self) -> &UnsafeCell<PointerInputManager> {
+        unsafe { &(*self.shell_event_handler.get()).pointer_input_manager }
     }
 }

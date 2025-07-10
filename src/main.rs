@@ -5906,7 +5906,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     app_update_context.ui_scale_factor = app_shell.ui_scale_factor();
                     let (cw, ch) = client_size.get();
 
-                    unsafe { &mut *app_shell.pointer_input_manager.get() }.handle_mouse_move(
+                    unsafe { &mut *app_shell.pointer_input_manager().get() }.handle_mouse_move(
                         surface_x,
                         surface_y,
                         cw,
@@ -5917,7 +5917,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     );
                     app_shell.set_cursor_shape(
                         enter_serial,
-                        unsafe { &mut *app_shell.pointer_input_manager.get() }
+                        unsafe { &mut *app_shell.pointer_input_manager().get() }
                             .cursor_shape(&mut app_system.hit_tree, &mut app_update_context),
                     );
 
@@ -5927,19 +5927,20 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     app_update_context.ui_scale_factor = app_shell.ui_scale_factor();
                     let (cw, ch) = client_size.get();
 
-                    unsafe { &mut *app_shell.pointer_input_manager.get() }.handle_mouse_left_down(
-                        &app_shell,
-                        last_pointer_pos.0,
-                        last_pointer_pos.1,
-                        cw,
-                        ch,
-                        &mut app_system.hit_tree,
-                        &mut app_update_context,
-                        HitTestTreeManager::ROOT,
-                    );
+                    unsafe { &mut *app_shell.pointer_input_manager().get() }
+                        .handle_mouse_left_down(
+                            &app_shell,
+                            last_pointer_pos.0,
+                            last_pointer_pos.1,
+                            cw,
+                            ch,
+                            &mut app_system.hit_tree,
+                            &mut app_update_context,
+                            HitTestTreeManager::ROOT,
+                        );
                     app_shell.set_cursor_shape(
                         enter_serial,
-                        unsafe { &mut *app_shell.pointer_input_manager.get() }
+                        unsafe { &mut *app_shell.pointer_input_manager().get() }
                             .cursor_shape(&mut app_system.hit_tree, &mut app_update_context),
                     );
                 }
@@ -5947,7 +5948,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     app_update_context.ui_scale_factor = app_shell.ui_scale_factor();
                     let (cw, ch) = client_size.get();
 
-                    unsafe { &mut *app_shell.pointer_input_manager.get() }.handle_mouse_left_up(
+                    unsafe { &mut *app_shell.pointer_input_manager().get() }.handle_mouse_left_up(
                         &app_shell,
                         last_pointer_pos.0,
                         last_pointer_pos.1,
@@ -5959,7 +5960,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     );
                     app_shell.set_cursor_shape(
                         enter_serial,
-                        unsafe { &mut *app_shell.pointer_input_manager.get() }
+                        unsafe { &mut *app_shell.pointer_input_manager().get() }
                             .cursor_shape(&mut app_system.hit_tree, &mut app_update_context),
                     );
                 }

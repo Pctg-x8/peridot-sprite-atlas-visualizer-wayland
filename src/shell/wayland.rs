@@ -56,15 +56,17 @@ impl wl::XdgToplevelEventListener for WaylandShellEventHandler<'_, '_> {
         states: &[i32],
     ) {
         if width == 0 {
-            width = self.cached_client_size.0 as i32 + 16;
+            width = self.cached_client_size.0 as i32
+                + (ClientDecorationResources::SHADOW_SIZE * 2) as i32;
         }
         if height == 0 {
-            height = self.cached_client_size.1 as i32 + 16;
+            height = self.cached_client_size.1 as i32
+                + (ClientDecorationResources::SHADOW_SIZE * 2) as i32;
         }
 
         // subtract margins for decorations
-        width -= 16;
-        height -= 16;
+        width -= (ClientDecorationResources::SHADOW_SIZE * 2) as i32;
+        height -= (ClientDecorationResources::SHADOW_SIZE * 2) as i32;
 
         self.cached_client_size = (width as _, height as _);
         self.app_event_bus.push(AppEvent::ToplevelWindowConfigure {
@@ -288,6 +290,8 @@ struct ClientDecorationResources {
     shadow_bottom_viewport: core::ptr::NonNull<wl::WpViewport>,
 }
 impl ClientDecorationResources {
+    const SHADOW_SIZE: usize = 16;
+
     pub fn new(
         compositor: &wl::Compositor,
         subcompositor: &wl::Subcompositor,
@@ -312,25 +316,6 @@ impl ClientDecorationResources {
             .get_subsurface(&shadow_rb_surface, main_surface)
             .unwrap();
 
-        shadow_rt_surface
-            .set_buffer_transform(wl::OutputTransform::Rot90)
-            .unwrap();
-        shadow_rb_surface
-            .set_buffer_transform(wl::OutputTransform::Rot180)
-            .unwrap();
-        shadow_lb_surface
-            .set_buffer_transform(wl::OutputTransform::Rot270)
-            .unwrap();
-
-        shadow_lt_subsurface.set_position(-8, -8).unwrap();
-        shadow_lt_subsurface.place_below(main_surface).unwrap();
-        shadow_lb_subsurface.set_position(-8, 240 - 8).unwrap();
-        shadow_lb_subsurface.place_below(main_surface).unwrap();
-        shadow_rt_subsurface.set_position(320 - 8, -8).unwrap();
-        shadow_rt_subsurface.place_below(main_surface).unwrap();
-        shadow_rb_subsurface.set_position(320 - 8, 240 - 8).unwrap();
-        shadow_rb_subsurface.place_below(main_surface).unwrap();
-
         let shadow_left_surface = compositor.create_surface().unwrap();
         let shadow_left_subsurface = subcompositor
             .get_subsurface(&shadow_left_surface, &main_surface)
@@ -353,20 +338,27 @@ impl ClientDecorationResources {
         let shadow_bottom_viewport = viewporter.get_viewport(&shadow_bottom_surface).unwrap();
 
         shadow_left_viewport
-            .set_source(0.0, 0.0, 16.0, 1.0)
+            .set_source(0.0, 0.0, Self::SHADOW_SIZE as f32 * 2.0, 1.0)
             .unwrap();
-        shadow_left_viewport.set_destination(16, 240 - 16).unwrap();
         shadow_right_viewport
-            .set_source(0.0, 0.0, 16.0, 1.0)
+            .set_source(0.0, 0.0, Self::SHADOW_SIZE as f32 * 2.0, 1.0)
             .unwrap();
-        shadow_right_viewport.set_destination(16, 240 - 16).unwrap();
-        shadow_top_viewport.set_source(0.0, 0.0, 1.0, 16.0).unwrap();
-        shadow_top_viewport.set_destination(320 - 16, 16).unwrap();
-        shadow_bottom_viewport
-            .set_source(0.0, 0.0, 1.0, 16.0)
+        shadow_top_viewport
+            .set_source(0.0, 0.0, 1.0, Self::SHADOW_SIZE as f32 * 2.0)
             .unwrap();
         shadow_bottom_viewport
-            .set_destination(320 - 16, 16)
+            .set_source(0.0, 0.0, 1.0, Self::SHADOW_SIZE as f32 * 2.0)
+            .unwrap();
+
+        // fixed configurations
+        shadow_rt_surface
+            .set_buffer_transform(wl::OutputTransform::Rot90)
+            .unwrap();
+        shadow_rb_surface
+            .set_buffer_transform(wl::OutputTransform::Rot180)
+            .unwrap();
+        shadow_lb_surface
+            .set_buffer_transform(wl::OutputTransform::Rot270)
             .unwrap();
 
         shadow_right_surface
@@ -379,17 +371,28 @@ impl ClientDecorationResources {
             .set_buffer_transform(wl::OutputTransform::Rot270)
             .unwrap();
 
-        shadow_left_subsurface.set_position(-8, 8).unwrap();
+        shadow_lt_subsurface.place_below(main_surface).unwrap();
+        shadow_lb_subsurface.place_below(main_surface).unwrap();
+        shadow_rt_subsurface.place_below(main_surface).unwrap();
+        shadow_rb_subsurface.place_below(main_surface).unwrap();
         shadow_left_subsurface.place_below(main_surface).unwrap();
-        shadow_right_subsurface.set_position(320 - 8, 8).unwrap();
         shadow_right_subsurface.place_below(main_surface).unwrap();
-        shadow_top_subsurface.set_position(8, -8).unwrap();
         shadow_top_subsurface.place_below(main_surface).unwrap();
-        shadow_bottom_subsurface.set_position(8, 240 - 8).unwrap();
         shadow_bottom_subsurface.place_below(main_surface).unwrap();
 
-        let vertical_shadow_start_bytes: usize = 16 * 16 * 4;
-        let shm_size = vertical_shadow_start_bytes + 16 * 1 * 4;
+        // fixed position
+        shadow_lt_subsurface
+            .set_position(-(Self::SHADOW_SIZE as i32), -(Self::SHADOW_SIZE as i32))
+            .unwrap();
+        shadow_left_subsurface
+            .set_position(-(Self::SHADOW_SIZE as i32), Self::SHADOW_SIZE as i32)
+            .unwrap();
+        shadow_top_subsurface
+            .set_position(Self::SHADOW_SIZE as i32, -(Self::SHADOW_SIZE as i32))
+            .unwrap();
+
+        let vertical_shadow_start_bytes: usize = Self::SHADOW_SIZE * 2 * Self::SHADOW_SIZE * 2 * 4;
+        let shm_size = vertical_shadow_start_bytes + Self::SHADOW_SIZE * 2 * 1 * 4;
         let mut deco_shm_file_path_cstr = c"/peridot-sprite-atlas-visualizer-shell_deco_buf_XXXXXX"
             .to_owned()
             .into_bytes_with_nul();
@@ -446,30 +449,42 @@ impl ClientDecorationResources {
             )
             .unwrap();
         unsafe {
-            for y in 0..16 {
-                for x in 0..16 {
-                    let (x1, y1) = ((16 - x) as f32, (16 - y) as f32);
+            for y in 0..Self::SHADOW_SIZE * 2 {
+                for x in 0..Self::SHADOW_SIZE * 2 {
+                    let (x1, y1) = (
+                        (Self::SHADOW_SIZE * 2 - x) as f32,
+                        (Self::SHADOW_SIZE * 2 - y) as f32,
+                    );
                     let d = (x1 * x1 + y1 * y1).sqrt();
-                    deco_shm_mapped.ptr_of::<[u8; 4]>().add(x + y * 16).write([
-                        0,
-                        0,
-                        0,
-                        (255.0 * (1.0 - d / 16.0).powf(1.0)) as _,
-                    ]);
+                    deco_shm_mapped
+                        .ptr_of::<[u8; 4]>()
+                        .add(x + y * Self::SHADOW_SIZE * 2)
+                        .write([
+                            0,
+                            0,
+                            0,
+                            (255.0 * (1.0 - d / (Self::SHADOW_SIZE as f32 * 2.0)).powf(1.0)) as _,
+                        ]);
                 }
             }
         }
 
         let deco_shm_pool = shm.create_pool(&deco_shm, shm_size as _).unwrap();
         let shadow_corner_buf = deco_shm_pool
-            .create_buffer(0, 16, 16, 16 * 4, wl::ShmFormat::ARGB8888)
+            .create_buffer(
+                0,
+                (Self::SHADOW_SIZE * 2) as _,
+                (Self::SHADOW_SIZE * 2) as _,
+                (Self::SHADOW_SIZE * 2) as i32 * 4,
+                wl::ShmFormat::ARGB8888,
+            )
             .unwrap();
         let shadow_straight_buf = deco_shm_pool
             .create_buffer(
                 vertical_shadow_start_bytes as _,
-                16,
+                (Self::SHADOW_SIZE * 2) as _,
                 1,
-                16 * 4,
+                (Self::SHADOW_SIZE * 2) as i32 * 4,
                 wl::ShmFormat::ARGB8888,
             )
             .unwrap();
@@ -548,8 +563,10 @@ impl ClientDecorationResources {
             .unwrap();
 
         // recreate pix buffer
-        let vertical_shadow_start_bytes: usize = 16 * scale as usize * 16 * scale as usize * 4;
-        let shm_size = vertical_shadow_start_bytes + 16 * scale as usize * 1 * scale as usize * 4;
+        let vertical_shadow_start_bytes: usize =
+            (Self::SHADOW_SIZE * 2) * scale as usize * (Self::SHADOW_SIZE * 2) * scale as usize * 4;
+        let shm_size = vertical_shadow_start_bytes
+            + (Self::SHADOW_SIZE * 2) * scale as usize * 1 * scale as usize * 4;
         let mut deco_shm_file_path_cstr = c"/peridot-sprite-atlas-visualizer-shell_deco_buf_XXXXXX"
             .to_owned()
             .into_bytes_with_nul();
@@ -606,36 +623,41 @@ impl ClientDecorationResources {
             )
             .unwrap();
         unsafe {
-            for y in 0..16 * scale as usize {
-                for x in 0..16 * scale as usize {
+            for y in 0..(Self::SHADOW_SIZE * 2) * scale as usize {
+                for x in 0..(Self::SHADOW_SIZE * 2) * scale as usize {
                     let (x1, y1) = (
-                        (16 * scale as usize - x) as f32,
-                        (16 * scale as usize - y) as f32,
+                        ((Self::SHADOW_SIZE * 2) * scale as usize - x) as f32,
+                        ((Self::SHADOW_SIZE * 2) * scale as usize - y) as f32,
                     );
                     let d = (x1 * x1 + y1 * y1).sqrt();
                     deco_shm_mapped
                         .ptr_of::<[u8; 4]>()
-                        .add(x + y * 16 * scale as usize)
+                        .add(x + y * (Self::SHADOW_SIZE * 2) * scale as usize)
                         .write([
                             0,
                             0,
                             0,
-                            (255.0 * (1.0 - d / (16.0 * scale as f32)).powf(1.0)) as _,
+                            (255.0
+                                * (1.0 - d / ((Self::SHADOW_SIZE as f32 * 2.0) * scale as f32))
+                                    .clamp(0.0, 1.0)
+                                    .powf(2.0)) as _,
                         ]);
                 }
             }
             for y in 0..scale as usize {
-                for x in 0..16 * scale as usize {
+                for x in 0..(Self::SHADOW_SIZE * 2) * scale as usize {
                     deco_shm_mapped
                         .ptr()
                         .byte_add(vertical_shadow_start_bytes)
                         .cast::<[u8; 4]>()
-                        .add(x + y * 16 * scale as usize)
+                        .add(x + y * (Self::SHADOW_SIZE * 2) * scale as usize)
                         .write([
                             0,
                             0,
                             0,
-                            (255.0 * (x as f32 / (16.0 * scale as f32)).powf(1.0)) as _,
+                            (255.0
+                                * (x as f32 / ((Self::SHADOW_SIZE as f32 * 2.0) * scale as f32))
+                                    .powf(2.0)) as _,
                         ]);
                 }
             }
@@ -647,9 +669,9 @@ impl ClientDecorationResources {
         self.shadow_corner_buf = deco_shm_pool
             .create_buffer(
                 0,
-                16 * scale,
-                16 * scale,
-                16 * scale * 4,
+                (Self::SHADOW_SIZE * 2) as i32 * scale,
+                (Self::SHADOW_SIZE * 2) as i32 * scale,
+                (Self::SHADOW_SIZE * 2) as i32 * scale * 4,
                 wl::ShmFormat::ARGB8888,
             )
             .unwrap()
@@ -657,9 +679,9 @@ impl ClientDecorationResources {
         self.shadow_straight_buf = deco_shm_pool
             .create_buffer(
                 vertical_shadow_start_bytes as _,
-                16 * scale,
+                (Self::SHADOW_SIZE * 2) as i32 * scale,
                 1 * scale,
-                16 * scale * 4,
+                (Self::SHADOW_SIZE * 2) as i32 * scale * 4,
                 wl::ShmFormat::ARGB8888,
             )
             .unwrap()
@@ -756,35 +778,59 @@ impl ClientDecorationResources {
     pub fn adjust_for_main_surface_size(&self, width: i32, height: i32) {
         // corner positioning
         unsafe { self.shadow_lb_subsurface.as_ref() }
-            .set_position(-8, height - 8)
+            .set_position(
+                -(Self::SHADOW_SIZE as i32),
+                height - (Self::SHADOW_SIZE as i32),
+            )
             .unwrap();
         unsafe { self.shadow_rt_subsurface.as_ref() }
-            .set_position(width - 8, -8)
+            .set_position(
+                width - (Self::SHADOW_SIZE as i32),
+                -(Self::SHADOW_SIZE as i32),
+            )
             .unwrap();
         unsafe { self.shadow_rb_subsurface.as_ref() }
-            .set_position(width - 8, height - 8)
+            .set_position(
+                width - (Self::SHADOW_SIZE as i32),
+                height - (Self::SHADOW_SIZE as i32),
+            )
             .unwrap();
 
         // ltrb stretch
         unsafe { self.shadow_left_viewport.as_ref() }
-            .set_destination(16, height - 16)
+            .set_destination(
+                (Self::SHADOW_SIZE * 2) as i32,
+                height - (Self::SHADOW_SIZE * 2) as i32,
+            )
             .unwrap();
         unsafe { self.shadow_right_viewport.as_ref() }
-            .set_destination(16, height - 16)
+            .set_destination(
+                (Self::SHADOW_SIZE * 2) as i32,
+                height - (Self::SHADOW_SIZE * 2) as i32,
+            )
             .unwrap();
         unsafe { self.shadow_top_viewport.as_ref() }
-            .set_destination(width - 16, 16)
+            .set_destination(
+                width - (Self::SHADOW_SIZE * 2) as i32,
+                (Self::SHADOW_SIZE * 2) as i32,
+            )
             .unwrap();
         unsafe { self.shadow_bottom_viewport.as_ref() }
-            .set_destination(width - 16, 16)
+            .set_destination(
+                width - (Self::SHADOW_SIZE * 2) as i32,
+                (Self::SHADOW_SIZE * 2) as i32,
+            )
             .unwrap();
 
         // rb positioning
         unsafe { self.shadow_right_subsurface.as_ref() }
-            .set_position(width - 8, 8)
+            .set_position(width - (Self::SHADOW_SIZE as i32), Self::SHADOW_SIZE as i32)
             .unwrap();
         unsafe { self.shadow_bottom_subsurface.as_ref() }
-            .set_position(8, height - 8)
+            .set_position(
+                Self::SHADOW_SIZE as i32,
+                height - (Self::SHADOW_SIZE as i32),
+            )
             .unwrap();
 
         // commit

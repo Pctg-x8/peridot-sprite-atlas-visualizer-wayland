@@ -198,6 +198,22 @@ pub struct RoundedRectConstants {
     pub corner_radius: f32,
 }
 
+#[derive(br::SpecializationConstants)]
+struct CornerCutoutVshConstants {
+    #[constant_id = 0]
+    size: f32,
+    #[constant_id = 1]
+    uv_scale_x: f32,
+    #[constant_id = 2]
+    uv_scale_y: f32,
+    #[constant_id = 3]
+    uv_trans_x: f32,
+    #[constant_id = 4]
+    uv_trans_y: f32,
+    #[constant_id = 5]
+    aspect_wh: f32,
+}
+
 pub trait ViewUpdate {
     fn update(&self, ct: &mut CompositeTree, ht: &mut HitTestTreeManager, current_sec: f32);
 }
@@ -2799,9 +2815,9 @@ impl<'s> PrimaryRenderTarget<'s> {
         };
         let sc_composite_alpha = if surface_caps
             .supported_composite_alpha()
-            .has_any(br::CompositeAlphaFlags::OPAQUE)
+            .has_any(br::CompositeAlphaFlags::PRE_MULTIPLIED)
         {
-            br::CompositeAlphaFlags::OPAQUE
+            br::CompositeAlphaFlags::PRE_MULTIPLIED
         } else {
             br::CompositeAlphaFlags::INHERIT
         };
@@ -3697,6 +3713,270 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                 .collect::<Vec<_>>(),
         )
         .unwrap();
+
+    let (
+        corner_cutout_atlas_rect,
+        corner_cutout_render_pipeline_layout,
+        mut corner_cutout_render_pipeline,
+        mut corner_cutout_render_pipeline_cont,
+        corner_cutout_render_data,
+        corner_cutout_render_descriptors,
+    ) = if !app_shell.server_side_decoration_provided() {
+        // window decorations must be rendered by client side
+        let corner_cutout_atlas_rect = app_system.alloc_mask_atlas_rect(16, 16);
+
+        let rp = br::RenderPassObject::new(
+            app_system.subsystem,
+            &br::RenderPassCreateInfo2::new(
+                &[
+                    br::AttachmentDescription2::new(app_system.mask_atlas_format())
+                        .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store)
+                        .layout_transition(
+                            br::ImageLayout::Undefined,
+                            br::ImageLayout::ShaderReadOnlyOpt,
+                        ),
+                ],
+                &[br::SubpassDescription2::new()
+                    .colors(&[br::AttachmentReference2::color_attachment_opt(0)])],
+                &[br::SubpassDependency2::new(
+                    br::SubpassIndex::Internal(0),
+                    br::SubpassIndex::External,
+                )
+                .of_memory(
+                    br::AccessFlags::COLOR_ATTACHMENT.write,
+                    br::AccessFlags::SHADER.read,
+                )
+                .of_execution(
+                    br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    br::PipelineStageFlags::FRAGMENT_SHADER,
+                )],
+            ),
+        )
+        .unwrap();
+        let fb = br::FramebufferObject::new(
+            app_system.subsystem,
+            &br::FramebufferCreateInfo::new(
+                &rp,
+                &[app_system
+                    .mask_atlas_resource_transparent_ref()
+                    .as_transparent_ref()],
+                app_system.mask_atlas_size(),
+                app_system.mask_atlas_size(),
+            ),
+        )
+        .unwrap();
+        let vsh = app_system.require_shader("resources/filltri.vert");
+        let fsh = app_system.require_shader("resources/corner_cutout.frag");
+        let [pipeline] = app_system
+            .create_graphics_pipelines_array(&[br::GraphicsPipelineCreateInfo::new(
+                app_system.require_empty_pipeline_layout(),
+                rp.subpass(0),
+                &[
+                    vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+                    fsh.on_stage(br::ShaderStage::Fragment, c"main"),
+                ],
+                VI_STATE_EMPTY,
+                IA_STATE_TRILIST,
+                &br::PipelineViewportStateCreateInfo::new_array(
+                    &[corner_cutout_atlas_rect
+                        .extent()
+                        .into_rect(br::Offset2D::ZERO)
+                        .make_viewport(0.0..1.0)],
+                    &[corner_cutout_atlas_rect
+                        .extent()
+                        .into_rect(br::Offset2D::ZERO)],
+                ),
+                &RASTER_STATE_DEFAULT_FILL_NOCULL,
+                BLEND_STATE_SINGLE_NONE,
+            )
+            .set_multisample_state(MS_STATE_EMPTY)])
+            .unwrap();
+        app_system
+            .sync_execute_graphics_commands(|rec| {
+                rec.begin_render_pass2(
+                    &br::RenderPassBeginInfo::new(
+                        &rp,
+                        &fb,
+                        corner_cutout_atlas_rect.vk_rect(),
+                        &[],
+                    ),
+                    &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                )
+                .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline)
+                .draw(3, 1, 0, 0)
+                .end_render_pass2(&br::SubpassEndInfo::new())
+            })
+            .unwrap();
+        drop(pipeline);
+
+        let dsl = br::DescriptorSetLayoutObject::new(
+            app_system.subsystem,
+            &br::DescriptorSetLayoutCreateInfo::new(&[br::DescriptorType::CombinedImageSampler
+                .make_binding(0, 1)
+                .with_immutable_samplers(&[composite_sampler.as_transparent_ref()])]),
+        )
+        .unwrap();
+        let mut dp = br::DescriptorPoolObject::new(
+            app_system.subsystem,
+            &br::DescriptorPoolCreateInfo::new(
+                1,
+                &[br::DescriptorType::CombinedImageSampler.make_size(1)],
+            ),
+        )
+        .unwrap();
+        let [desc] = dp.alloc_array(&[dsl.as_transparent_ref()]).unwrap();
+        app_system.subsystem.update_descriptor_sets(
+            &[desc
+                .binding_at(0)
+                .write(br::DescriptorContents::combined_image_sampler(
+                    app_system.mask_atlas_resource_transparent_ref(),
+                    br::ImageLayout::ShaderReadOnlyOpt,
+                ))],
+            &[],
+        );
+        let pipeline_layout = br::PipelineLayoutObject::new(
+            app_system.subsystem,
+            &br::PipelineLayoutCreateInfo::new(&[dsl.as_transparent_ref()], &[]),
+        )
+        .unwrap();
+
+        let vsh = app_system.require_shader("resources/corner_cutout_placement.vert");
+        let fsh = app_system.require_shader("resources/blit_alphamask.frag");
+        let vsh_param = CornerCutoutVshConstants {
+            size: 16.0,
+            uv_scale_x: corner_cutout_atlas_rect.width() as f32
+                / app_system.mask_atlas_size() as f32,
+            uv_scale_y: corner_cutout_atlas_rect.height() as f32
+                / app_system.mask_atlas_size() as f32,
+            uv_trans_x: corner_cutout_atlas_rect.left as f32 / app_system.mask_atlas_size() as f32,
+            uv_trans_y: corner_cutout_atlas_rect.top as f32 / app_system.mask_atlas_size() as f32,
+            aspect_wh: sc.size.width as f32 / sc.size.height as f32,
+        };
+        let vsh_spec = br::SpecializationInfo::new(&vsh_param);
+        let shader_stages = [
+            vsh.on_stage(br::ShaderStage::Vertex, c"main")
+                .with_specialization_info(&vsh_spec),
+            fsh.on_stage(br::ShaderStage::Fragment, c"main"),
+        ];
+        let vi_state: br::PipelineVertexInputStateCreateInfo<'static> =
+            br::PipelineVertexInputStateCreateInfo::new(
+                &[
+                    const { br::VertexInputBindingDescription::per_instance_typed::<[[f32; 2]; 2]>(0) },
+                ],
+                &[
+                    br::VertexInputAttributeDescription {
+                        location: 0,
+                        binding: 0,
+                        format: br::vk::VK_FORMAT_R32G32_SFLOAT,
+                        offset: 0,
+                    },
+                    br::VertexInputAttributeDescription {
+                        location: 1,
+                        binding: 0,
+                        format: br::vk::VK_FORMAT_R32G32_SFLOAT,
+                        offset: core::mem::size_of::<[f32; 2]>() as _,
+                    },
+                ],
+            );
+        let viewport = [sc
+            .size
+            .into_rect(br::Offset2D::ZERO)
+            .make_viewport(0.0..1.0)];
+        let scissor = [sc.size.into_rect(br::Offset2D::ZERO)];
+        let viewport_state = br::PipelineViewportStateCreateInfo::new_array(&viewport, &scissor);
+        let blend_state = br::PipelineColorBlendStateCreateInfo::new(&[
+            br::vk::VkPipelineColorBlendAttachmentState {
+                // simply overwrite only alpha
+                blendEnable: true as _,
+                srcColorBlendFactor: br::vk::VK_BLEND_FACTOR_ONE,
+                dstColorBlendFactor: br::vk::VK_BLEND_FACTOR_ZERO,
+                colorBlendOp: br::vk::VK_BLEND_OP_ADD,
+                srcAlphaBlendFactor: br::vk::VK_BLEND_FACTOR_ONE,
+                dstAlphaBlendFactor: br::vk::VK_BLEND_FACTOR_ZERO,
+                alphaBlendOp: br::vk::VK_BLEND_OP_ADD,
+                colorWriteMask: br::vk::VK_COLOR_COMPONENT_A_BIT
+                    | br::vk::VK_COLOR_COMPONENT_B_BIT
+                    | br::vk::VK_COLOR_COMPONENT_G_BIT
+                    | br::vk::VK_COLOR_COMPONENT_R_BIT,
+            },
+        ]);
+        let [render_pipeline, render_pipeline_cont] = app_system
+            .create_graphics_pipelines_array(&[
+                br::GraphicsPipelineCreateInfo::new(
+                    &pipeline_layout,
+                    main_rp_final.subpass(0),
+                    &shader_stages,
+                    &vi_state,
+                    IA_STATE_TRISTRIP,
+                    &viewport_state,
+                    RASTER_STATE_DEFAULT_FILL_NOCULL,
+                    &blend_state,
+                )
+                .set_multisample_state(MS_STATE_EMPTY),
+                br::GraphicsPipelineCreateInfo::new(
+                    &pipeline_layout,
+                    main_rp_continue_final.subpass(0),
+                    &shader_stages,
+                    &vi_state,
+                    IA_STATE_TRISTRIP,
+                    &viewport_state,
+                    RASTER_STATE_DEFAULT_FILL_NOCULL,
+                    &blend_state,
+                )
+                .set_multisample_state(MS_STATE_EMPTY),
+            ])
+            .unwrap();
+
+        let mut vbuf = br::BufferObject::new(
+            app_system.subsystem,
+            &br::BufferCreateInfo::new(
+                core::mem::size_of::<[[f32; 2]; 2]>() * 4,
+                br::BufferUsage::VERTEX_BUFFER | br::BufferUsage::TRANSFER_DEST,
+            ),
+        )
+        .unwrap();
+        let mem = app_system.alloc_device_local_memory_for_requirements(&vbuf.requirements());
+        vbuf.bind(&mem, 0).unwrap();
+        app_system
+            .sync_execute_graphics_commands(|rec| {
+                rec.update_buffer(
+                    &vbuf,
+                    0,
+                    (core::mem::size_of::<[[f32; 2]; 2]>() * 4) as _,
+                    &[
+                        [[-1.0f32, -1.0], [1.0, 1.0]],
+                        [[1.0f32, -1.0], [-1.0, 1.0]],
+                        [[-1.0f32, 1.0], [1.0, -1.0]],
+                        [[1.0f32, 1.0], [-1.0, -1.0]],
+                    ],
+                )
+                .pipeline_barrier_2(&br::DependencyInfo::new(
+                    &[br::MemoryBarrier2::new()
+                        .from(
+                            br::PipelineStageFlags2::COPY,
+                            br::AccessFlags2::TRANSFER.write,
+                        )
+                        .to(
+                            br::PipelineStageFlags2::VERTEX_INPUT,
+                            br::AccessFlags2::VERTEX_ATTRIBUTE_READ,
+                        )],
+                    &[],
+                    &[],
+                ))
+            })
+            .unwrap();
+
+        (
+            Some(corner_cutout_atlas_rect),
+            Some(pipeline_layout),
+            Some(render_pipeline),
+            Some(render_pipeline_cont),
+            Some((vbuf, mem)),
+            Some((desc, dp, dsl)),
+        )
+    } else {
+        (None, None, None, None, None, None)
+    };
 
     let mut staging_scratch_buffer_locked =
         parking_lot::RwLockWriteGuard::map(staging_scratch_buffers.write(), |x| {
@@ -5057,6 +5337,27 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
 
                                 r
                             })
+                            .inject(|r| {
+                                if corner_cutout_atlas_rect.is_none() {
+                                    // no client size decoration
+                                    return r;
+                                }
+
+                                let rp_last_continued = last_composite_render_instructions.render_passes.last().map_or(false, |x| x.continued);
+                                assert!(last_composite_render_instructions.render_passes
+                                    .last()
+                                    .is_none_or(|x| x.after_operation == RenderPassAfterOperation::None));
+
+                                r.bind_pipeline(br::PipelineBindPoint::Graphics, if rp_last_continued {
+                                    corner_cutout_render_pipeline_cont.as_ref().unwrap()
+                                } else {
+                                    corner_cutout_render_pipeline.as_ref().unwrap()
+                                })
+                                .bind_descriptor_sets(br::PipelineBindPoint::Graphics, corner_cutout_render_pipeline_layout.as_ref().unwrap(),
+                                    0, &[corner_cutout_render_descriptors.as_ref().unwrap().0], &[])
+                                .bind_vertex_buffer_array(0, &[corner_cutout_render_data.as_ref().unwrap().0.as_transparent_ref()], &[0])
+                                .draw(4, 4, 0, 0)
+                            })
                             .end_render_pass2(&br::SubpassEndInfo::new())
                             .end()
                             .unwrap();
@@ -5463,6 +5764,110 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                         .collect::<Vec<_>>(),
                                 )
                                 .unwrap();
+
+                            if corner_cutout_render_pipeline.is_some() {
+                                let vsh = app_system
+                                    .require_shader("resources/corner_cutout_placement.vert");
+                                let fsh =
+                                    app_system.require_shader("resources/blit_alphamask.frag");
+                                let vsh_param = CornerCutoutVshConstants {
+                                    size: 16.0,
+                                    uv_scale_x: corner_cutout_atlas_rect.as_ref().unwrap().width()
+                                        as f32
+                                        / app_system.mask_atlas_size() as f32,
+                                    uv_scale_y: corner_cutout_atlas_rect.as_ref().unwrap().height()
+                                        as f32
+                                        / app_system.mask_atlas_size() as f32,
+                                    uv_trans_x: corner_cutout_atlas_rect.as_ref().unwrap().left
+                                        as f32
+                                        / app_system.mask_atlas_size() as f32,
+                                    uv_trans_y: corner_cutout_atlas_rect.as_ref().unwrap().top
+                                        as f32
+                                        / app_system.mask_atlas_size() as f32,
+                                    aspect_wh: sc.size.width as f32 / sc.size.height as f32,
+                                };
+                                let vsh_spec = br::SpecializationInfo::new(&vsh_param);
+                                let shader_stages = [
+                                    vsh.on_stage(br::ShaderStage::Vertex, c"main")
+                                        .with_specialization_info(&vsh_spec),
+                                    fsh.on_stage(br::ShaderStage::Fragment, c"main"),
+                                ];
+                                let vi_state: br::PipelineVertexInputStateCreateInfo<'static> =
+                                    br::PipelineVertexInputStateCreateInfo::new(
+                                        &[const {
+                                            br::VertexInputBindingDescription::per_instance_typed::<
+                                                [[f32; 2]; 2],
+                                            >(0)
+                                        }],
+                                        &[
+                                            br::VertexInputAttributeDescription {
+                                                location: 0,
+                                                binding: 0,
+                                                format: br::vk::VK_FORMAT_R32G32_SFLOAT,
+                                                offset: 0,
+                                            },
+                                            br::VertexInputAttributeDescription {
+                                                location: 1,
+                                                binding: 0,
+                                                format: br::vk::VK_FORMAT_R32G32_SFLOAT,
+                                                offset: core::mem::size_of::<[f32; 2]>() as _,
+                                            },
+                                        ],
+                                    );
+                                let viewport = [sc
+                                    .size
+                                    .into_rect(br::Offset2D::ZERO)
+                                    .make_viewport(0.0..1.0)];
+                                let scissor = [sc.size.into_rect(br::Offset2D::ZERO)];
+                                let viewport_state = br::PipelineViewportStateCreateInfo::new_array(
+                                    &viewport, &scissor,
+                                );
+                                let blend_state = br::PipelineColorBlendStateCreateInfo::new(&[
+                                    br::vk::VkPipelineColorBlendAttachmentState {
+                                        // simply overwrite only alpha
+                                        blendEnable: true as _,
+                                        srcColorBlendFactor: br::vk::VK_BLEND_FACTOR_ZERO,
+                                        dstColorBlendFactor: br::vk::VK_BLEND_FACTOR_SRC_ALPHA,
+                                        colorBlendOp: br::vk::VK_BLEND_OP_ADD,
+                                        srcAlphaBlendFactor: br::vk::VK_BLEND_FACTOR_ONE,
+                                        dstAlphaBlendFactor: br::vk::VK_BLEND_FACTOR_ZERO,
+                                        alphaBlendOp: br::vk::VK_BLEND_OP_ADD,
+                                        colorWriteMask: br::vk::VK_COLOR_COMPONENT_A_BIT
+                                            | br::vk::VK_COLOR_COMPONENT_B_BIT
+                                            | br::vk::VK_COLOR_COMPONENT_G_BIT
+                                            | br::vk::VK_COLOR_COMPONENT_R_BIT,
+                                    },
+                                ]);
+                                let [render_pipeline, render_pipeline_cont] = app_system
+                                    .create_graphics_pipelines_array(&[
+                                        br::GraphicsPipelineCreateInfo::new(
+                                            corner_cutout_render_pipeline_layout.as_ref().unwrap(),
+                                            main_rp_final.subpass(0),
+                                            &shader_stages,
+                                            &vi_state,
+                                            IA_STATE_TRISTRIP,
+                                            &viewport_state,
+                                            RASTER_STATE_DEFAULT_FILL_NOCULL,
+                                            &blend_state,
+                                        )
+                                        .set_multisample_state(MS_STATE_EMPTY),
+                                        br::GraphicsPipelineCreateInfo::new(
+                                            corner_cutout_render_pipeline_layout.as_ref().unwrap(),
+                                            main_rp_continue_final.subpass(0),
+                                            &shader_stages,
+                                            &vi_state,
+                                            IA_STATE_TRISTRIP,
+                                            &viewport_state,
+                                            RASTER_STATE_DEFAULT_FILL_NOCULL,
+                                            &blend_state,
+                                        )
+                                        .set_multisample_state(MS_STATE_EMPTY),
+                                    ])
+                                    .unwrap();
+
+                                corner_cutout_render_pipeline = Some(render_pipeline);
+                                corner_cutout_render_pipeline_cont = Some(render_pipeline_cont);
+                            }
 
                             editing_atlas_renderer.borrow_mut().recreate(
                                 &app_system.subsystem,

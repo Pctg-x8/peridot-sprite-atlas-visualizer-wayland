@@ -188,6 +188,9 @@ impl Subsystem {
             instance_layers.set_len(instance_layers.capacity());
         }
         br::instance_layer_properties(&mut instance_layers).unwrap();
+        for x in instance_layers.iter() {
+            tracing::debug!(layer_name = ?x.layerName.as_cstr(), "vklayer");
+        }
         let validation_layer_found = instance_layers
             .iter()
             .find(|x| x.layerName.as_cstr().unwrap() == c"VK_LAYER_KHRONOS_validation")

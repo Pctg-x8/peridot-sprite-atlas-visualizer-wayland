@@ -12,7 +12,7 @@ use crate::{
     hittest::CursorShape,
     input::PointerInputManager,
     platform::linux::input_event_codes::BTN_LEFT,
-    thirdparty::wl::{self, Interface, WpCursorShapeDeviceV1Shape, WpCursorShapeManagerV1},
+    thirdparty::wl::{self, WpCursorShapeDeviceV1Shape, WpCursorShapeManagerV1},
 };
 
 enum PointerOnSurface {
@@ -208,6 +208,20 @@ impl wl::WpFractionalScaleV1EventListener for WaylandShellEventHandler<'_> {
         )
     }
 }
+impl wl::GtkShell1EventListener for WaylandShellEventHandler<'_> {
+    fn capabilities(&mut self, sender: &mut wl::GtkShell1, capabilities: u32) {
+        tracing::trace!(capabilities, "gtk_shell capabilities");
+    }
+}
+impl wl::GtkSurface1EventListener for WaylandShellEventHandler<'_> {
+    fn configure(&mut self, sender: &mut wl::GtkSurface1, states: &[u32]) {
+        tracing::trace!(?states, "gtk_surface configure");
+    }
+
+    fn configure_edges(&mut self, sender: &mut wl::GtkSurface1, constraints: &[u32]) {
+        tracing::trace!(?constraints, "gtk_surface configure edges");
+    }
+}
 
 pub struct AppShell<'a, 'subsystem> {
     shell_event_handler: Box<UnsafeCell<WaylandShellEventHandler<'a>>>,
@@ -217,6 +231,7 @@ pub struct AppShell<'a, 'subsystem> {
     zxdg_exporter_v2: Option<core::ptr::NonNull<wl::ZxdgExporterV2>>,
     cursor_shape_device: core::ptr::NonNull<wl::WpCursorShapeDeviceV1>,
     frame_callback: Cell<core::ptr::NonNull<wl::Callback>>,
+    _gtk_surface: Option<core::ptr::NonNull<wl::GtkSurface1>>,
     pub pointer_input_manager: Pin<Box<UnsafeCell<PointerInputManager>>>,
     _marker: core::marker::PhantomData<*mut AppBaseSystem<'subsystem>>,
 }
@@ -232,6 +247,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             cursor_shape_manager: Option<wl::Owned<WpCursorShapeManagerV1>>,
             zxdg_exporter_v2: Option<wl::Owned<wl::ZxdgExporterV2>>,
             fractional_scale_manager_v1: Option<wl::Owned<wl::WpFractionalScaleManagerV1>>,
+            gtk_shell1: Option<wl::Owned<wl::GtkShell1>>,
         }
         impl wl::RegistryListener for RegistryListener {
             #[tracing::instrument(name = "RegistryListener::global", skip(self, registry))]
@@ -303,6 +319,16 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
                         }
                     };
                 }
+
+                if interface == c"gtk_shell1" {
+                    self.gtk_shell1 = match registry.bind(name, version) {
+                        Ok(x) => Some(x),
+                        Err(e) => {
+                            tracing::warn!(reason = ?e, "Failed to bind");
+                            None
+                        }
+                    };
+                }
             }
 
             fn global_remove(&mut self, _registry: &mut wl::Registry, name: u32) {
@@ -316,6 +342,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             cursor_shape_manager: None,
             zxdg_exporter_v2: None,
             fractional_scale_manager_v1: None,
+            gtk_shell1: None,
         };
         if let Err(e) = registry.add_listener(&mut rl) {
             tracing::warn!(target = "registry", reason = ?e, "Failed to set listener");
@@ -332,6 +359,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             cursor_shape_manager,
             zxdg_exporter_v2,
             fractional_scale_manager_v1,
+            mut gtk_shell1,
         );
         match rl {
             RegistryListener {
@@ -341,6 +369,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
                 cursor_shape_manager: Some(cursor_shape_manager1),
                 zxdg_exporter_v2: zxdg_exporter_v21,
                 fractional_scale_manager_v1: fractional_scale_manager_v11,
+                gtk_shell1: gtk_shell11,
             } => {
                 compositor = compositor1;
                 xdg_wm_base = xdg_wm_base1;
@@ -348,6 +377,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
                 cursor_shape_manager = cursor_shape_manager1;
                 zxdg_exporter_v2 = zxdg_exporter_v21;
                 fractional_scale_manager_v1 = fractional_scale_manager_v11;
+                gtk_shell1 = gtk_shell11;
             }
             rl => {
                 if rl.compositor.is_none() {
@@ -458,6 +488,22 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             }
         };
 
+        let mut gtk_surface = if let Some(ref x) = gtk_shell1 {
+            match x.get_gtk_surface(&wl_surface) {
+                Ok(x) => Some(x),
+                Err(e) => {
+                    tracing::warn!(reason = ?e, "Failed to create gtk_surface1");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if let Some(ref x) = gtk_surface {
+            x.present(0).unwrap();
+        }
+
         let mut shell_event_handler = Box::new(UnsafeCell::new(WaylandShellEventHandler {
             app_event_bus: events,
             // 現時点ではわからないので適当な値を設定
@@ -504,6 +550,17 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             fs.leak();
         }
 
+        if let Some(ref mut x) = gtk_shell1
+            && let Err(e) = x.add_listener(shell_event_handler.get_mut())
+        {
+            tracing::warn!(target = "gtk_shell1", reason = ?e, "Failed to set listener");
+        }
+        if let Some(ref mut x) = gtk_surface
+            && let Err(e) = x.add_listener(shell_event_handler.get_mut())
+        {
+            tracing::warn!(target = "gtk_surface1", reason = ?e, "Failed to set listener");
+        }
+
         if let Err(e) = wl_surface.commit() {
             tracing::warn!(reason = ?e, "Failed to commit wl_surface");
         }
@@ -519,6 +576,9 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
         if let Some(x) = fractional_scale_manager_v1 {
             x.leak();
         }
+        if let Some(x) = gtk_shell1 {
+            x.leak();
+        }
 
         Self {
             shell_event_handler,
@@ -528,6 +588,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             cursor_shape_device: cursor_shape_device.unwrap(),
             frame_callback: Cell::new(frame.unwrap()),
             zxdg_exporter_v2: zxdg_exporter_v2.map(|x| x.unwrap()),
+            _gtk_surface: gtk_surface.map(|x| x.unwrap()),
             pointer_input_manager,
             _marker: core::marker::PhantomData,
         }
@@ -541,6 +602,12 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
 
     pub const fn is_floating_window(&self) -> bool {
         // TODO: detect floating/tiling window system
+        false
+    }
+
+    pub const fn server_side_decoration_provided(&self) -> bool {
+        // Ubuntu(Mutter/GNOME) has not server side decoration(no zxdg_decoration_manager_v1 provided)
+        // TODO: detect this
         false
     }
 

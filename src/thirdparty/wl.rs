@@ -7,6 +7,7 @@ use std::{cell::UnsafeCell, os::fd::AsRawFd};
 mod cursor_shape;
 mod ffi;
 mod fractional_scale;
+mod gtk_shell;
 mod xdg_foreign;
 mod xdg_shell;
 use ffi::wl_proxy_destroy;
@@ -14,6 +15,7 @@ use ffi::wl_proxy_destroy;
 pub use self::cursor_shape::*;
 pub use self::ffi::Fixed;
 pub use self::fractional_scale::*;
+pub use self::gtk_shell::*;
 pub use self::xdg_foreign::*;
 pub use self::xdg_shell::*;
 

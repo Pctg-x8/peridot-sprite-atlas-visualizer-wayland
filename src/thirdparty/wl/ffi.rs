@@ -48,6 +48,10 @@ unsafe impl Send for Interface {}
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Fixed(i32);
 impl Fixed {
+    pub const fn from_f32_lossy(v: f32) -> Self {
+        Self((v * 256.0) as _)
+    }
+
     pub const fn to_f32(&self) -> f32 {
         self.0 as f32 / 256.0
     }

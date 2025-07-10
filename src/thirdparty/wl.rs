@@ -8,6 +8,7 @@ mod cursor_shape;
 mod ffi;
 mod fractional_scale;
 mod gtk_shell;
+mod viewporter;
 mod xdg_foreign;
 mod xdg_shell;
 use ffi::wl_proxy_destroy;
@@ -16,6 +17,7 @@ pub use self::cursor_shape::*;
 pub use self::ffi::Fixed;
 pub use self::fractional_scale::*;
 pub use self::gtk_shell::*;
+pub use self::viewporter::*;
 pub use self::xdg_foreign::*;
 pub use self::xdg_shell::*;
 
@@ -67,7 +69,12 @@ impl Proxy {
 
     #[inline(always)]
     pub fn version(&self) -> u32 {
-        unsafe { ffi::wl_proxy_get_version(self as *const _ as _) }
+        unsafe { ffi::wl_proxy_get_version(self.0.get()) }
+    }
+
+    #[inline(always)]
+    pub fn display(&self) -> *mut ffi::Display {
+        unsafe { ffi::wl_proxy_get_display(self.0.get()) }
     }
 
     #[inline(always)]
@@ -106,6 +113,18 @@ impl Proxy {
     }
 
     #[inline]
+    fn marshal_array_flags_typed<T: Interface>(
+        &self,
+        opcode: u32,
+        version: u32,
+        flags: u32,
+        args: &mut [ffi::Argument],
+    ) -> Result<NonNull<T>, std::io::Error> {
+        self.marshal_array_flags(opcode, T::def(), version, flags, args)
+            .map(|x| unsafe { T::from_proxy_ptr_unchecked(x) })
+    }
+
+    #[inline]
     fn marshal_array_flags_void(
         &self,
         opcode: u32,
@@ -139,6 +158,14 @@ impl Proxy {
 /// must be transparent with ffi::Proxy(or Proxy wrapper newtype)
 pub unsafe trait Interface {
     fn def() -> &'static ffi::Interface;
+
+    #[inline(always)]
+    unsafe fn from_proxy_ptr_unchecked(p: NonNull<Proxy>) -> NonNull<Self>
+    where
+        Self: Sized,
+    {
+        unsafe { core::mem::transmute(p) }
+    }
 
     unsafe fn destruct(&mut self) {
         unsafe {
@@ -174,6 +201,10 @@ impl<T: Interface> DerefMut for Owned<T> {
 impl<T: Interface> Owned<T> {
     pub const unsafe fn from_untyped_unchecked(untyped: NonNull<Proxy>) -> Self {
         Self(untyped.cast())
+    }
+
+    pub const unsafe fn wrap_unchecked(p: NonNull<T>) -> Self {
+        Self(p)
     }
 
     pub const fn leak(self) {
@@ -449,6 +480,24 @@ impl Surface {
     }
 
     #[inline]
+    pub fn attach(&self, buffer: Option<&Buffer>, x: i32, y: i32) -> Result<(), std::io::Error> {
+        self.0.marshal_array_flags_void(
+            1,
+            0,
+            &mut [
+                buffer.map_or(
+                    ffi::Argument {
+                        o: core::ptr::null_mut(),
+                    },
+                    |x| x.0.as_arg(),
+                ),
+                ffi::Argument { i: x },
+                ffi::Argument { i: y },
+            ],
+        )
+    }
+
+    #[inline]
     pub fn frame(&self) -> Result<Owned<Callback>, std::io::Error> {
         let proxy_ptr = self.0.marshal_array_flags(
             3,
@@ -464,6 +513,12 @@ impl Surface {
     #[inline]
     pub fn commit(&self) -> Result<(), std::io::Error> {
         self.0.marshal_array_flags_void(6, 0, &mut [])
+    }
+
+    #[inline]
+    pub fn set_buffer_transform(&self, transform: OutputTransform) -> Result<(), std::io::Error> {
+        self.0
+            .marshal_array_flags_void(7, 0, &mut [ffi::Argument { i: transform as _ }])
     }
 
     #[inline]
@@ -546,6 +601,208 @@ pub trait SurfaceEventListener {
     // --- version 6 additions ---
     fn preferred_buffer_scale(&mut self, surface: &mut Surface, factor: i32);
     fn preferred_buffer_transform(&mut self, surface: &mut Surface, transform: u32);
+}
+
+#[repr(transparent)]
+pub struct Subcompositor(Proxy);
+unsafe impl Interface for Subcompositor {
+    fn def() -> &'static ffi::Interface {
+        unsafe { &wl_subcompositor_interface }
+    }
+
+    unsafe fn destruct(&mut self) {
+        if let Err(e) = self
+            .0
+            .marshal_array_flags_void(0, ffi::MARSHAL_FLAG_DESTROY, &mut [])
+        {
+            let de = unsafe { ffi::wl_display_get_error(self.0.display()) };
+
+            panic!("Failed to call destroy: {de} {e:?}");
+        }
+    }
+}
+impl Subcompositor {
+    #[inline]
+    pub fn get_subsurface(
+        &self,
+        surface: &Surface,
+        parent: &Surface,
+    ) -> Result<Owned<Subsurface>, std::io::Error> {
+        Ok(unsafe {
+            Owned::from_untyped_unchecked(self.0.marshal_array_flags(
+                1,
+                Subsurface::def(),
+                self.0.version(),
+                0,
+                &mut [NEWID_ARG, surface.0.as_arg(), parent.0.as_arg()],
+            )?)
+        })
+    }
+}
+
+#[repr(transparent)]
+pub struct Subsurface(Proxy);
+unsafe impl Interface for Subsurface {
+    fn def() -> &'static ffi::Interface {
+        unsafe { &wl_subsurface_interface }
+    }
+
+    unsafe fn destruct(&mut self) {
+        if let Err(e) = self
+            .0
+            .marshal_array_flags_void(0, ffi::MARSHAL_FLAG_DESTROY, &mut [])
+        {
+            let de = unsafe { ffi::wl_display_get_error(self.0.display()) };
+            panic!("Failed to call destroy: {de} {e:?}");
+        }
+    }
+}
+impl Subsurface {
+    #[inline]
+    pub fn set_position(&self, x: i32, y: i32) -> Result<(), std::io::Error> {
+        self.0
+            .marshal_array_flags_void(1, 0, &mut [ffi::Argument { i: x }, ffi::Argument { i: y }])
+    }
+
+    #[inline]
+    pub fn place_below(&self, sibling: &Surface) -> Result<(), std::io::Error> {
+        self.0
+            .marshal_array_flags_void(3, 0, &mut [sibling.0.as_arg()])
+    }
+}
+
+#[repr(transparent)]
+pub struct Shm(Proxy);
+unsafe impl Interface for Shm {
+    fn def() -> &'static ffi::Interface {
+        unsafe { &wl_shm_interface }
+    }
+
+    unsafe fn destruct(&mut self) {
+        if self.0.version() < 2 {
+            // no destructors defined prior version 2
+            return;
+        }
+
+        if let Err(e) = self
+            .0
+            .marshal_array_flags_void(1, ffi::MARSHAL_FLAG_DESTROY, &mut [])
+        {
+            panic!("Failed to call destroy: {} {e:?}", unsafe {
+                ffi::wl_display_get_error(self.0.display())
+            });
+        }
+    }
+}
+impl Shm {
+    #[inline]
+    pub fn create_pool_rawfd(
+        &self,
+        fd: std::os::fd::RawFd,
+        size: i32,
+    ) -> Result<Owned<ShmPool>, std::io::Error> {
+        Ok(unsafe {
+            Owned::from_untyped_unchecked(self.0.marshal_array_flags(
+                0,
+                ShmPool::def(),
+                self.0.version(),
+                0,
+                &mut [
+                    NEWID_ARG,
+                    ffi::Argument { h: fd.as_raw_fd() },
+                    ffi::Argument { i: size },
+                ],
+            )?)
+        })
+    }
+
+    #[inline(always)]
+    pub fn create_pool(
+        &self,
+        fd: &impl AsRawFd,
+        size: i32,
+    ) -> Result<Owned<ShmPool>, std::io::Error> {
+        self.create_pool_rawfd(fd.as_raw_fd(), size)
+    }
+}
+
+#[repr(u32)]
+#[derive(Clone, Copy)]
+pub enum ShmFormat {
+    ARGB8888 = 0,
+    XRGB8888 = 1,
+}
+
+#[repr(transparent)]
+pub struct ShmPool(Proxy);
+unsafe impl Interface for ShmPool {
+    fn def() -> &'static ffi::Interface {
+        unsafe { &wl_shm_pool_interface }
+    }
+
+    unsafe fn destruct(&mut self) {
+        if let Err(e) = self
+            .0
+            .marshal_array_flags_void(1, ffi::MARSHAL_FLAG_DESTROY, &mut [])
+        {
+            panic!("Failed to call destroy: {} {e:?}", unsafe {
+                ffi::wl_display_get_error(self.0.display())
+            });
+        }
+    }
+}
+impl ShmPool {
+    #[inline]
+    pub fn create_buffer(
+        &self,
+        offset: i32,
+        width: i32,
+        height: i32,
+        stride: i32,
+        format: ShmFormat,
+    ) -> Result<Owned<Buffer>, std::io::Error> {
+        Ok(unsafe {
+            Owned::from_untyped_unchecked(self.0.marshal_array_flags(
+                0,
+                Buffer::def(),
+                self.0.version(),
+                0,
+                &mut [
+                    NEWID_ARG,
+                    ffi::Argument { i: offset },
+                    ffi::Argument { i: width },
+                    ffi::Argument { i: height },
+                    ffi::Argument { i: stride },
+                    ffi::Argument { u: format as _ },
+                ],
+            )?)
+        })
+    }
+
+    #[inline]
+    pub fn resize(&self, size: i32) -> Result<(), std::io::Error> {
+        self.0
+            .marshal_array_flags_void(2, 0, &mut [ffi::Argument { i: size }])
+    }
+}
+
+#[repr(transparent)]
+pub struct Buffer(Proxy);
+unsafe impl Interface for Buffer {
+    fn def() -> &'static ffi::Interface {
+        unsafe { &wl_buffer_interface }
+    }
+
+    unsafe fn destruct(&mut self) {
+        if let Err(e) = self
+            .0
+            .marshal_array_flags_void(0, ffi::MARSHAL_FLAG_DESTROY, &mut [])
+        {
+            panic!("Failed to call destroy: {} {e:?}", unsafe {
+                ffi::wl_display_get_error(self.0.display())
+            });
+        }
+    }
 }
 
 #[repr(transparent)]
@@ -876,6 +1133,19 @@ pub enum PointerButtonState {
     Pressed = 1,
 }
 
+#[repr(u32)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum OutputTransform {
+    Normal = 0,
+    Rot90 = 1,
+    Rot180 = 2,
+    Rot270 = 3,
+    Flipped = 4,
+    Flipped90 = 5,
+    Flipped180 = 6,
+    Flipped270 = 7,
+}
+
 #[repr(transparent)]
 pub struct Output(Proxy);
 unsafe impl Interface for Output {
@@ -898,6 +1168,11 @@ unsafe extern "C" {
     static wl_registry_interface: ffi::Interface;
     static wl_compositor_interface: ffi::Interface;
     static wl_surface_interface: ffi::Interface;
+    static wl_subcompositor_interface: ffi::Interface;
+    static wl_subsurface_interface: ffi::Interface;
+    static wl_shm_interface: ffi::Interface;
+    static wl_shm_pool_interface: ffi::Interface;
+    static wl_buffer_interface: ffi::Interface;
     static wl_seat_interface: ffi::Interface;
     static wl_output_interface: ffi::Interface;
     static wl_callback_interface: ffi::Interface;

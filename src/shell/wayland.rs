@@ -11,7 +11,10 @@ use crate::{
     base_system::AppBaseSystem,
     hittest::CursorShape,
     input::PointerInputManager,
-    platform::linux::input_event_codes::BTN_LEFT,
+    platform::linux::{
+        MemoryMapFlags, MemoryProtectionFlags, OpenFlags, TemporalSharedMemory,
+        input_event_codes::BTN_LEFT,
+    },
     thirdparty::wl::{self, WpCursorShapeDeviceV1Shape, WpCursorShapeManagerV1},
 };
 
@@ -25,6 +28,7 @@ struct WaylandShellEventHandler<'a> {
     ui_scale_factor: f32,
     pointer_on_surface: PointerOnSurface,
     main_surface_proxy_ptr: *mut wl::Surface,
+    client_decoration: ClientDecorationResources,
 }
 impl wl::XdgWmBaseEventListener for WaylandShellEventHandler<'_> {
     fn ping(&mut self, wm_base: &mut wl::XdgWmBase, serial: u32) {
@@ -40,12 +44,31 @@ impl wl::XdgSurfaceEventListener for WaylandShellEventHandler<'_> {
     }
 }
 impl wl::XdgToplevelEventListener for WaylandShellEventHandler<'_> {
-    fn configure(&mut self, _: &mut wl::XdgToplevel, width: i32, height: i32, states: &[i32]) {
+    fn configure(
+        &mut self,
+        _: &mut wl::XdgToplevel,
+        mut width: i32,
+        mut height: i32,
+        states: &[i32],
+    ) {
+        if width == 0 {
+            width = self.cached_client_size.0 as i32 + 16;
+        }
+        if height == 0 {
+            height = self.cached_client_size.1 as i32 + 16;
+        }
+
+        // subtract margins for decorations
+        width -= 16;
+        height -= 16;
+
         self.cached_client_size = (width as _, height as _);
         self.app_event_bus.push(AppEvent::ToplevelWindowConfigure {
             width: width as _,
             height: height as _,
         });
+        self.client_decoration
+            .adjust_for_main_surface_size(width, height);
 
         tracing::trace!(width, height, ?states, "configure");
     }
@@ -77,6 +100,7 @@ impl wl::SurfaceEventListener for WaylandShellEventHandler<'_> {
         // 同じ値を適用することでdpi-awareになるらしい
         surface.set_buffer_scale(factor).unwrap();
         surface.commit().unwrap();
+        self.client_decoration.set_buffer_scale(factor);
     }
 
     fn preferred_buffer_transform(&mut self, _surface: &mut wl::Surface, transform: u32) {
@@ -223,10 +247,505 @@ impl wl::GtkSurface1EventListener for WaylandShellEventHandler<'_> {
     }
 }
 
+struct ClientDecorationResources {
+    shm: core::ptr::NonNull<wl::Shm>,
+    shadow_corner_buf: core::ptr::NonNull<wl::Buffer>,
+    shadow_straight_buf: core::ptr::NonNull<wl::Buffer>,
+    shadow_lt_surface: core::ptr::NonNull<wl::Surface>,
+    shadow_lb_surface: core::ptr::NonNull<wl::Surface>,
+    shadow_lb_subsurface: core::ptr::NonNull<wl::Subsurface>,
+    shadow_rt_surface: core::ptr::NonNull<wl::Surface>,
+    shadow_rt_subsurface: core::ptr::NonNull<wl::Subsurface>,
+    shadow_rb_surface: core::ptr::NonNull<wl::Surface>,
+    shadow_rb_subsurface: core::ptr::NonNull<wl::Subsurface>,
+    shadow_left_surface: core::ptr::NonNull<wl::Surface>,
+    shadow_left_viewport: core::ptr::NonNull<wl::WpViewport>,
+    shadow_right_surface: core::ptr::NonNull<wl::Surface>,
+    shadow_right_subsurface: core::ptr::NonNull<wl::Subsurface>,
+    shadow_right_viewport: core::ptr::NonNull<wl::WpViewport>,
+    shadow_top_surface: core::ptr::NonNull<wl::Surface>,
+    shadow_top_viewport: core::ptr::NonNull<wl::WpViewport>,
+    shadow_bottom_surface: core::ptr::NonNull<wl::Surface>,
+    shadow_bottom_subsurface: core::ptr::NonNull<wl::Subsurface>,
+    shadow_bottom_viewport: core::ptr::NonNull<wl::WpViewport>,
+}
+impl ClientDecorationResources {
+    pub fn new(
+        compositor: &wl::Compositor,
+        subcompositor: &wl::Subcompositor,
+        shm: wl::Owned<wl::Shm>,
+        viewporter: &wl::WpViewporter,
+        main_surface: &wl::Surface,
+    ) -> Self {
+        let shadow_lt_surface = compositor.create_surface().unwrap();
+        let shadow_lt_subsurface = subcompositor
+            .get_subsurface(&shadow_lt_surface, main_surface)
+            .unwrap();
+        let shadow_lb_surface = compositor.create_surface().unwrap();
+        let shadow_lb_subsurface = subcompositor
+            .get_subsurface(&shadow_lb_surface, main_surface)
+            .unwrap();
+        let shadow_rt_surface = compositor.create_surface().unwrap();
+        let shadow_rt_subsurface = subcompositor
+            .get_subsurface(&shadow_rt_surface, main_surface)
+            .unwrap();
+        let shadow_rb_surface = compositor.create_surface().unwrap();
+        let shadow_rb_subsurface = subcompositor
+            .get_subsurface(&shadow_rb_surface, main_surface)
+            .unwrap();
+
+        shadow_rt_surface
+            .set_buffer_transform(wl::OutputTransform::Rot90)
+            .unwrap();
+        shadow_rb_surface
+            .set_buffer_transform(wl::OutputTransform::Rot180)
+            .unwrap();
+        shadow_lb_surface
+            .set_buffer_transform(wl::OutputTransform::Rot270)
+            .unwrap();
+
+        shadow_lt_subsurface.set_position(-8, -8).unwrap();
+        shadow_lt_subsurface.place_below(main_surface).unwrap();
+        shadow_lb_subsurface.set_position(-8, 240 - 8).unwrap();
+        shadow_lb_subsurface.place_below(main_surface).unwrap();
+        shadow_rt_subsurface.set_position(320 - 8, -8).unwrap();
+        shadow_rt_subsurface.place_below(main_surface).unwrap();
+        shadow_rb_subsurface.set_position(320 - 8, 240 - 8).unwrap();
+        shadow_rb_subsurface.place_below(main_surface).unwrap();
+
+        let shadow_left_surface = compositor.create_surface().unwrap();
+        let shadow_left_subsurface = subcompositor
+            .get_subsurface(&shadow_left_surface, &main_surface)
+            .unwrap();
+        let shadow_left_viewport = viewporter.get_viewport(&shadow_left_surface).unwrap();
+        let shadow_right_surface = compositor.create_surface().unwrap();
+        let shadow_right_subsurface = subcompositor
+            .get_subsurface(&shadow_right_surface, &main_surface)
+            .unwrap();
+        let shadow_right_viewport = viewporter.get_viewport(&shadow_right_surface).unwrap();
+        let shadow_top_surface = compositor.create_surface().unwrap();
+        let shadow_top_subsurface = subcompositor
+            .get_subsurface(&shadow_top_surface, &main_surface)
+            .unwrap();
+        let shadow_top_viewport = viewporter.get_viewport(&shadow_top_surface).unwrap();
+        let shadow_bottom_surface = compositor.create_surface().unwrap();
+        let shadow_bottom_subsurface = subcompositor
+            .get_subsurface(&shadow_bottom_surface, &main_surface)
+            .unwrap();
+        let shadow_bottom_viewport = viewporter.get_viewport(&shadow_bottom_surface).unwrap();
+
+        shadow_left_viewport
+            .set_source(0.0, 0.0, 16.0, 1.0)
+            .unwrap();
+        shadow_left_viewport.set_destination(16, 240 - 16).unwrap();
+        shadow_right_viewport
+            .set_source(0.0, 0.0, 16.0, 1.0)
+            .unwrap();
+        shadow_right_viewport.set_destination(16, 240 - 16).unwrap();
+        shadow_top_viewport.set_source(0.0, 0.0, 1.0, 16.0).unwrap();
+        shadow_top_viewport.set_destination(320 - 16, 16).unwrap();
+        shadow_bottom_viewport
+            .set_source(0.0, 0.0, 1.0, 16.0)
+            .unwrap();
+        shadow_bottom_viewport
+            .set_destination(320 - 16, 16)
+            .unwrap();
+
+        shadow_right_surface
+            .set_buffer_transform(wl::OutputTransform::Flipped)
+            .unwrap();
+        shadow_top_surface
+            .set_buffer_transform(wl::OutputTransform::Rot90)
+            .unwrap();
+        shadow_bottom_surface
+            .set_buffer_transform(wl::OutputTransform::Rot270)
+            .unwrap();
+
+        shadow_left_subsurface.set_position(-8, 8).unwrap();
+        shadow_left_subsurface.place_below(main_surface).unwrap();
+        shadow_right_subsurface.set_position(320 - 8, 8).unwrap();
+        shadow_right_subsurface.place_below(main_surface).unwrap();
+        shadow_top_subsurface.set_position(8, -8).unwrap();
+        shadow_top_subsurface.place_below(main_surface).unwrap();
+        shadow_bottom_subsurface.set_position(8, 240 - 8).unwrap();
+        shadow_bottom_subsurface.place_below(main_surface).unwrap();
+
+        let vertical_shadow_start_bytes: usize = 16 * 16 * 4;
+        let shm_size = vertical_shadow_start_bytes + 16 * 1 * 4;
+        let mut deco_shm_file_path_cstr = c"/peridot-sprite-atlas-visualizer-shell_deco_buf_XXXXXX"
+            .to_owned()
+            .into_bytes_with_nul();
+        let deco_shm = 'try_shm_random_name: {
+            // random name gen: https://wayland-book.com/surfaces/shared-memory.html
+            for _ in 0..100 {
+                let mut ts = core::mem::MaybeUninit::uninit();
+                if unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, ts.as_mut_ptr()) } < 0 {
+                    continue;
+                }
+                let ts = unsafe { ts.assume_init_ref() };
+                let mut r = ts.tv_nsec;
+                for p in 0..6 {
+                    let fplen = deco_shm_file_path_cstr.len();
+                    deco_shm_file_path_cstr[fplen - p - 2] =
+                        b'A' + (r & 15) as u8 + (r & 16) as u8 * 2;
+                    r >>= 5;
+                }
+
+                match TemporalSharedMemory::create(
+                    unsafe {
+                        std::ffi::CString::from_vec_with_nul_unchecked(deco_shm_file_path_cstr)
+                    },
+                    OpenFlags::READ_WRITE | OpenFlags::EXCLUSIVE,
+                    0o600,
+                ) {
+                    Ok(x) => {
+                        break 'try_shm_random_name x;
+                    }
+                    Err((e, name)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        // name conflict: retry
+                        deco_shm_file_path_cstr = name.into_bytes_with_nul();
+                        continue;
+                    }
+                    Err((e, _)) => {
+                        tracing::error!(reason = ?e, "Failed to create shm");
+                        std::process::abort();
+                    }
+                }
+            }
+
+            tracing::error!("shm already exists(try limit reached)");
+            std::process::abort();
+        };
+        if let Err(e) = deco_shm.truncate(shm_size as _) {
+            tracing::error!(reason = ?e, "Failed to set deco shm file size");
+            std::process::abort();
+        }
+        let deco_shm_mapped = deco_shm
+            .mmap_random(
+                0..shm_size,
+                MemoryProtectionFlags::READ | MemoryProtectionFlags::WRITE,
+                MemoryMapFlags::SHARED,
+            )
+            .unwrap();
+        unsafe {
+            for y in 0..16 {
+                for x in 0..16 {
+                    let (x1, y1) = ((16 - x) as f32, (16 - y) as f32);
+                    let d = (x1 * x1 + y1 * y1).sqrt();
+                    deco_shm_mapped.ptr_of::<[u8; 4]>().add(x + y * 16).write([
+                        0,
+                        0,
+                        0,
+                        (255.0 * (1.0 - d / 16.0).powf(1.0)) as _,
+                    ]);
+                }
+            }
+        }
+
+        let deco_shm_pool = shm.create_pool(&deco_shm, shm_size as _).unwrap();
+        let shadow_corner_buf = deco_shm_pool
+            .create_buffer(0, 16, 16, 16 * 4, wl::ShmFormat::ARGB8888)
+            .unwrap();
+        let shadow_straight_buf = deco_shm_pool
+            .create_buffer(
+                vertical_shadow_start_bytes as _,
+                16,
+                1,
+                16 * 4,
+                wl::ShmFormat::ARGB8888,
+            )
+            .unwrap();
+
+        shadow_lt_subsurface.leak();
+        shadow_left_subsurface.leak();
+        shadow_top_subsurface.leak();
+
+        Self {
+            shm: shm.unwrap(),
+            shadow_corner_buf: shadow_corner_buf.unwrap(),
+            shadow_straight_buf: shadow_straight_buf.unwrap(),
+            shadow_lt_surface: shadow_lt_surface.unwrap(),
+            shadow_lb_surface: shadow_lb_surface.unwrap(),
+            shadow_lb_subsurface: shadow_lb_subsurface.unwrap(),
+            shadow_rt_surface: shadow_rt_surface.unwrap(),
+            shadow_rt_subsurface: shadow_rt_subsurface.unwrap(),
+            shadow_rb_surface: shadow_rb_surface.unwrap(),
+            shadow_rb_subsurface: shadow_rb_subsurface.unwrap(),
+            shadow_left_surface: shadow_left_surface.unwrap(),
+            shadow_left_viewport: shadow_left_viewport.unwrap(),
+            shadow_right_surface: shadow_right_surface.unwrap(),
+            shadow_right_subsurface: shadow_right_subsurface.unwrap(),
+            shadow_right_viewport: shadow_right_viewport.unwrap(),
+            shadow_top_surface: shadow_top_surface.unwrap(),
+            shadow_top_viewport: shadow_top_viewport.unwrap(),
+            shadow_bottom_surface: shadow_bottom_surface.unwrap(),
+            shadow_bottom_subsurface: shadow_bottom_subsurface.unwrap(),
+            shadow_bottom_viewport: shadow_bottom_viewport.unwrap(),
+        }
+    }
+
+    pub fn set_buffer_scale(&mut self, scale: i32) {
+        // recreate pix buffer
+        let vertical_shadow_start_bytes: usize = 16 * scale as usize * 16 * scale as usize * 4;
+        let shm_size = vertical_shadow_start_bytes + 16 * scale as usize * 1 * scale as usize * 4;
+        let mut deco_shm_file_path_cstr = c"/peridot-sprite-atlas-visualizer-shell_deco_buf_XXXXXX"
+            .to_owned()
+            .into_bytes_with_nul();
+        let deco_shm = 'try_shm_random_name: {
+            // random name gen: https://wayland-book.com/surfaces/shared-memory.html
+            for _ in 0..100 {
+                let mut ts = core::mem::MaybeUninit::uninit();
+                if unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, ts.as_mut_ptr()) } < 0 {
+                    continue;
+                }
+                let ts = unsafe { ts.assume_init_ref() };
+                let mut r = ts.tv_nsec;
+                for p in 0..6 {
+                    let fplen = deco_shm_file_path_cstr.len();
+                    deco_shm_file_path_cstr[fplen - p - 2] =
+                        b'A' + (r & 15) as u8 + (r & 16) as u8 * 2;
+                    r >>= 5;
+                }
+
+                match TemporalSharedMemory::create(
+                    unsafe {
+                        std::ffi::CString::from_vec_with_nul_unchecked(deco_shm_file_path_cstr)
+                    },
+                    OpenFlags::READ_WRITE | OpenFlags::EXCLUSIVE,
+                    0o600,
+                ) {
+                    Ok(x) => {
+                        break 'try_shm_random_name x;
+                    }
+                    Err((e, name)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        // name conflict: retry
+                        deco_shm_file_path_cstr = name.into_bytes_with_nul();
+                        continue;
+                    }
+                    Err((e, _)) => {
+                        tracing::error!(reason = ?e, "Failed to create shm");
+                        std::process::abort();
+                    }
+                }
+            }
+
+            tracing::error!("shm already exists(try limit reached)");
+            std::process::abort();
+        };
+        if let Err(e) = deco_shm.truncate(shm_size as _) {
+            tracing::error!(reason = ?e, "Failed to set deco shm file size");
+            std::process::abort();
+        }
+        let deco_shm_mapped = deco_shm
+            .mmap_random(
+                0..shm_size,
+                MemoryProtectionFlags::READ | MemoryProtectionFlags::WRITE,
+                MemoryMapFlags::SHARED,
+            )
+            .unwrap();
+        unsafe {
+            for y in 0..16 * scale as usize {
+                for x in 0..16 * scale as usize {
+                    let (x1, y1) = (
+                        (16 * scale as usize - x) as f32,
+                        (16 * scale as usize - y) as f32,
+                    );
+                    let d = (x1 * x1 + y1 * y1).sqrt();
+                    deco_shm_mapped
+                        .ptr_of::<[u8; 4]>()
+                        .add(x + y * 16 * scale as usize)
+                        .write([
+                            0,
+                            0,
+                            0,
+                            (255.0 * (1.0 - d / (16.0 * scale as f32)).powf(1.0)) as _,
+                        ]);
+                }
+            }
+            for y in 0..scale as usize {
+                for x in 0..16 * scale as usize {
+                    deco_shm_mapped
+                        .ptr()
+                        .byte_add(vertical_shadow_start_bytes)
+                        .cast::<[u8; 4]>()
+                        .add(x + y * 16 * scale as usize)
+                        .write([
+                            0,
+                            0,
+                            0,
+                            (255.0 * (x as f32 / (16.0 * scale as f32)).powf(1.0)) as _,
+                        ]);
+                }
+            }
+        }
+
+        let deco_shm_pool = unsafe { self.shm.as_ref() }
+            .create_pool(&deco_shm, shm_size as _)
+            .unwrap();
+        self.shadow_corner_buf = deco_shm_pool
+            .create_buffer(
+                0,
+                16 * scale,
+                16 * scale,
+                16 * scale * 4,
+                wl::ShmFormat::ARGB8888,
+            )
+            .unwrap()
+            .unwrap();
+        self.shadow_straight_buf = deco_shm_pool
+            .create_buffer(
+                vertical_shadow_start_bytes as _,
+                16 * scale,
+                1 * scale,
+                16 * scale * 4,
+                wl::ShmFormat::ARGB8888,
+            )
+            .unwrap()
+            .unwrap();
+        self.show();
+
+        unsafe { self.shadow_lt_surface.as_ref() }
+            .set_buffer_scale(scale)
+            .unwrap();
+        unsafe { self.shadow_lt_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_lb_surface.as_ref() }
+            .set_buffer_scale(scale)
+            .unwrap();
+        unsafe { self.shadow_lb_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_rt_surface.as_ref() }
+            .set_buffer_scale(scale)
+            .unwrap();
+        unsafe { self.shadow_rt_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_rb_surface.as_ref() }
+            .set_buffer_scale(scale)
+            .unwrap();
+        unsafe { self.shadow_rb_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_left_surface.as_ref() }
+            .set_buffer_scale(scale)
+            .unwrap();
+        unsafe { self.shadow_left_surface.as_ref() }
+            .commit()
+            .unwrap();
+        unsafe { self.shadow_right_surface.as_ref() }
+            .set_buffer_scale(scale)
+            .unwrap();
+        unsafe { self.shadow_right_surface.as_ref() }
+            .commit()
+            .unwrap();
+        unsafe { self.shadow_top_surface.as_ref() }
+            .set_buffer_scale(scale)
+            .unwrap();
+        unsafe { self.shadow_top_surface.as_ref() }
+            .commit()
+            .unwrap();
+        unsafe { self.shadow_bottom_surface.as_ref() }
+            .set_buffer_scale(scale)
+            .unwrap();
+        unsafe { self.shadow_bottom_surface.as_ref() }
+            .commit()
+            .unwrap();
+    }
+
+    pub fn show(&self) {
+        unsafe { self.shadow_lt_surface.as_ref() }
+            .attach(Some(unsafe { self.shadow_corner_buf.as_ref() }), 0, 0)
+            .unwrap();
+        unsafe { self.shadow_lt_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_lb_surface.as_ref() }
+            .attach(Some(unsafe { self.shadow_corner_buf.as_ref() }), 0, 0)
+            .unwrap();
+        unsafe { self.shadow_lb_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_rb_surface.as_ref() }
+            .attach(Some(unsafe { self.shadow_corner_buf.as_ref() }), 0, 0)
+            .unwrap();
+        unsafe { self.shadow_rb_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_rt_surface.as_ref() }
+            .attach(Some(unsafe { self.shadow_corner_buf.as_ref() }), 0, 0)
+            .unwrap();
+        unsafe { self.shadow_rt_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_left_surface.as_ref() }
+            .attach(Some(unsafe { self.shadow_straight_buf.as_ref() }), 0, 0)
+            .unwrap();
+        unsafe { self.shadow_left_surface.as_ref() }
+            .commit()
+            .unwrap();
+        unsafe { self.shadow_right_surface.as_ref() }
+            .attach(Some(unsafe { self.shadow_straight_buf.as_ref() }), 0, 0)
+            .unwrap();
+        unsafe { self.shadow_right_surface.as_ref() }
+            .commit()
+            .unwrap();
+        unsafe { self.shadow_top_surface.as_ref() }
+            .attach(Some(unsafe { self.shadow_straight_buf.as_ref() }), 0, 0)
+            .unwrap();
+        unsafe { self.shadow_top_surface.as_ref() }
+            .commit()
+            .unwrap();
+        unsafe { self.shadow_bottom_surface.as_ref() }
+            .attach(Some(unsafe { self.shadow_straight_buf.as_ref() }), 0, 0)
+            .unwrap();
+        unsafe { self.shadow_bottom_surface.as_ref() }
+            .commit()
+            .unwrap();
+    }
+
+    pub fn adjust_for_main_surface_size(&self, width: i32, height: i32) {
+        // corner positioning
+        unsafe { self.shadow_lb_subsurface.as_ref() }
+            .set_position(-8, height - 8)
+            .unwrap();
+        unsafe { self.shadow_rt_subsurface.as_ref() }
+            .set_position(width - 8, -8)
+            .unwrap();
+        unsafe { self.shadow_rb_subsurface.as_ref() }
+            .set_position(width - 8, height - 8)
+            .unwrap();
+
+        // ltrb stretch
+        unsafe { self.shadow_left_viewport.as_ref() }
+            .set_destination(16, height - 16)
+            .unwrap();
+        unsafe { self.shadow_right_viewport.as_ref() }
+            .set_destination(16, height - 16)
+            .unwrap();
+        unsafe { self.shadow_top_viewport.as_ref() }
+            .set_destination(width - 16, 16)
+            .unwrap();
+        unsafe { self.shadow_bottom_viewport.as_ref() }
+            .set_destination(width - 16, 16)
+            .unwrap();
+
+        // rb positioning
+        unsafe { self.shadow_right_subsurface.as_ref() }
+            .set_position(width - 8, 8)
+            .unwrap();
+        unsafe { self.shadow_bottom_subsurface.as_ref() }
+            .set_position(8, height - 8)
+            .unwrap();
+
+        // commit
+        unsafe { self.shadow_lb_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_rt_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_rb_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_left_surface.as_ref() }
+            .commit()
+            .unwrap();
+        unsafe { self.shadow_right_surface.as_ref() }
+            .commit()
+            .unwrap();
+        unsafe { self.shadow_top_surface.as_ref() }
+            .commit()
+            .unwrap();
+        unsafe { self.shadow_bottom_surface.as_ref() }
+            .commit()
+            .unwrap();
+    }
+}
+
 pub struct AppShell<'a, 'subsystem> {
     shell_event_handler: Box<UnsafeCell<WaylandShellEventHandler<'a>>>,
     display: wl::Display,
-    surface: core::ptr::NonNull<wl::Surface>,
+    content_surface: core::ptr::NonNull<wl::Surface>,
     xdg_surface: core::ptr::NonNull<wl::XdgSurface>,
     zxdg_exporter_v2: Option<core::ptr::NonNull<wl::ZxdgExporterV2>>,
     cursor_shape_device: core::ptr::NonNull<wl::WpCursorShapeDeviceV1>,
@@ -238,16 +757,19 @@ pub struct AppShell<'a, 'subsystem> {
 impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
     #[tracing::instrument(skip(events, _base_sys))]
     pub fn new(events: &'a AppEventBus, _base_sys: *mut AppBaseSystem<'subsystem>) -> Self {
-        let mut dp = wl::Display::connect().unwrap();
+        let dp = wl::Display::connect().unwrap();
         let mut registry = dp.get_registry().unwrap();
         struct RegistryListener {
             compositor: Option<wl::Owned<wl::Compositor>>,
+            subcompositor: Option<wl::Owned<wl::Subcompositor>>,
             xdg_wm_base: Option<wl::Owned<wl::XdgWmBase>>,
             seat: Option<wl::Owned<wl::Seat>>,
             cursor_shape_manager: Option<wl::Owned<WpCursorShapeManagerV1>>,
             zxdg_exporter_v2: Option<wl::Owned<wl::ZxdgExporterV2>>,
             fractional_scale_manager_v1: Option<wl::Owned<wl::WpFractionalScaleManagerV1>>,
             gtk_shell1: Option<wl::Owned<wl::GtkShell1>>,
+            shm: Option<wl::Owned<wl::Shm>>,
+            viewporter: Option<wl::Owned<wl::WpViewporter>>,
         }
         impl wl::RegistryListener for RegistryListener {
             #[tracing::instrument(name = "RegistryListener::global", skip(self, registry))]
@@ -260,48 +782,13 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             ) {
                 tracing::debug!("wl global");
 
-                if interface == c"wl_compositor" {
-                    self.compositor = match registry.bind(name, version) {
-                        Ok(x) => Some(x),
-                        Err(e) => {
-                            tracing::warn!(reason = ?e, "Failed to bind");
-                            None
-                        }
-                    };
-                }
-
-                if interface == c"xdg_wm_base" {
-                    self.xdg_wm_base = match registry.bind(name, version) {
-                        Ok(x) => Some(x),
-                        Err(e) => {
-                            tracing::warn!(reason = ?e, "Failed to bind");
-                            None
-                        }
-                    };
-                }
-
-                if interface == c"wl_seat" {
-                    self.seat = match registry.bind(name, version) {
-                        Ok(x) => Some(x),
-                        Err(e) => {
-                            tracing::warn!(reason = ?e, "Failed to bind");
-                            None
-                        }
-                    };
-                }
-
-                if interface == c"wp_cursor_shape_manager_v1" {
-                    self.cursor_shape_manager = match registry.bind(name, version) {
-                        Ok(x) => Some(x),
-                        Err(e) => {
-                            tracing::warn!(reason = ?e, "Failed to bind");
-                            None
-                        }
-                    };
-                }
-
-                if interface == c"zxdg_exporter_v2" {
-                    self.zxdg_exporter_v2 = match registry.bind(name, version) {
+                #[inline]
+                fn try_bind<T: wl::Interface>(
+                    registry: &mut wl::Registry,
+                    name: u32,
+                    version: u32,
+                ) -> Option<wl::Owned<T>> {
+                    match registry.bind(name, version) {
                         Ok(x) => Some(x),
                         Err(e) => {
                             tracing::warn!(reason = ?e, "Failed to bind");
@@ -310,24 +797,26 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
                     }
                 }
 
-                if interface == c"wp_fractional_scale_manager_v1" {
-                    self.fractional_scale_manager_v1 = match registry.bind(name, version) {
-                        Ok(x) => Some(x),
-                        Err(e) => {
-                            tracing::warn!(reason = ?e, "Failed to bind");
-                            None
-                        }
-                    };
-                }
-
-                if interface == c"gtk_shell1" {
-                    self.gtk_shell1 = match registry.bind(name, version) {
-                        Ok(x) => Some(x),
-                        Err(e) => {
-                            tracing::warn!(reason = ?e, "Failed to bind");
-                            None
-                        }
-                    };
+                if interface == c"wl_compositor" {
+                    self.compositor = try_bind(registry, name, version);
+                } else if interface == c"wl_subcompositor" {
+                    self.subcompositor = try_bind(registry, name, version);
+                } else if interface == c"xdg_wm_base" {
+                    self.xdg_wm_base = try_bind(registry, name, version);
+                } else if interface == c"wl_seat" {
+                    self.seat = try_bind(registry, name, version);
+                } else if interface == c"wp_cursor_shape_manager_v1" {
+                    self.cursor_shape_manager = try_bind(registry, name, version);
+                } else if interface == c"zxdg_exporter_v2" {
+                    self.zxdg_exporter_v2 = try_bind(registry, name, version);
+                } else if interface == c"wp_fractional_scale_manager_v1" {
+                    self.fractional_scale_manager_v1 = try_bind(registry, name, version);
+                } else if interface == c"gtk_shell1" {
+                    self.gtk_shell1 = try_bind(registry, name, version);
+                } else if interface == c"wl_shm" {
+                    self.shm = try_bind(registry, name, version);
+                } else if interface == c"wp_viewporter" {
+                    self.viewporter = try_bind(registry, name, version);
                 }
             }
 
@@ -337,12 +826,15 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
         }
         let mut rl = RegistryListener {
             compositor: None,
+            subcompositor: None,
             xdg_wm_base: None,
             seat: None,
             cursor_shape_manager: None,
             zxdg_exporter_v2: None,
             fractional_scale_manager_v1: None,
             gtk_shell1: None,
+            shm: None,
+            viewporter: None,
         };
         if let Err(e) = registry.add_listener(&mut rl) {
             tracing::warn!(target = "registry", reason = ?e, "Failed to set listener");
@@ -354,35 +846,50 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
 
         let (
             compositor,
+            subcompositor,
             mut xdg_wm_base,
             mut seat,
             cursor_shape_manager,
             zxdg_exporter_v2,
             fractional_scale_manager_v1,
             mut gtk_shell1,
+            shm,
+            viewporter,
         );
         match rl {
             RegistryListener {
                 compositor: Some(compositor1),
+                subcompositor: Some(subcompositor1),
                 xdg_wm_base: Some(xdg_wm_base1),
                 seat: Some(seat1),
                 cursor_shape_manager: Some(cursor_shape_manager1),
                 zxdg_exporter_v2: zxdg_exporter_v21,
                 fractional_scale_manager_v1: fractional_scale_manager_v11,
                 gtk_shell1: gtk_shell11,
+                shm: Some(shm1),
+                viewporter: Some(viewporter1),
             } => {
                 compositor = compositor1;
+                subcompositor = subcompositor1;
                 xdg_wm_base = xdg_wm_base1;
                 seat = seat1;
                 cursor_shape_manager = cursor_shape_manager1;
                 zxdg_exporter_v2 = zxdg_exporter_v21;
                 fractional_scale_manager_v1 = fractional_scale_manager_v11;
                 gtk_shell1 = gtk_shell11;
+                shm = shm1;
+                viewporter = viewporter1;
             }
             rl => {
                 if rl.compositor.is_none() {
                     tracing::error!(
                         interface = "wl_compositor",
+                        "Missing required wayland interface"
+                    );
+                }
+                if rl.subcompositor.is_none() {
+                    tracing::error!(
+                        interface = "wl_subcompositor",
                         "Missing required wayland interface"
                     );
                 }
@@ -398,6 +905,15 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
                 if rl.cursor_shape_manager.is_none() {
                     tracing::error!(
                         interface = "wp_cursor_shape_manager_v1",
+                        "Missing required wayland interface"
+                    );
+                }
+                if rl.shm.is_none() {
+                    tracing::error!(interface = "wl_shm", "Missing required wayland interface");
+                }
+                if rl.viewporter.is_none() {
+                    tracing::error!(
+                        interface = "wp_viewporter",
                         "Missing required wayland interface"
                     );
                 }
@@ -452,14 +968,14 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             }
         };
 
-        let mut wl_surface = match compositor.create_surface() {
+        let mut main_surface = match compositor.create_surface() {
             Ok(x) => x,
             Err(e) => {
-                tracing::error!(reason = ?e, "Failed to create wl_surface");
-                std::process::abort();
+                tracing::error!(reason = ?e, "Failed to create main surface");
+                std::process::exit(1);
             }
         };
-        let mut xdg_surface = match xdg_wm_base.get_xdg_surface(&mut wl_surface) {
+        let mut xdg_surface = match xdg_wm_base.get_xdg_surface(&main_surface) {
             Ok(x) => x,
             Err(e) => {
                 tracing::error!(reason = ?e, "Failed to get xdg surface");
@@ -480,7 +996,18 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             tracing::warn!(reason = ?e, "Failed to set app title");
         }
 
-        let mut frame = match wl_surface.frame() {
+        // client decoration: backdrop shadow
+        // TODO: detect whether need this(if xdg_decoration is not provided, then needs client decoration)
+        let client_decoration_resources = ClientDecorationResources::new(
+            &compositor,
+            &subcompositor,
+            shm,
+            &viewporter,
+            &main_surface,
+        );
+        client_decoration_resources.show();
+
+        let mut frame = match main_surface.frame() {
             Ok(x) => x,
             Err(e) => {
                 tracing::error!(reason = ?e, "Failed to request next frame");
@@ -489,7 +1016,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
         };
 
         let mut gtk_surface = if let Some(ref x) = gtk_shell1 {
-            match x.get_gtk_surface(&wl_surface) {
+            match x.get_gtk_surface(&main_surface) {
                 Ok(x) => Some(x),
                 Err(e) => {
                     tracing::warn!(reason = ?e, "Failed to create gtk_surface1");
@@ -510,7 +1037,8 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             cached_client_size: (640, 480),
             ui_scale_factor: 2.0,
             pointer_on_surface: PointerOnSurface::None,
-            main_surface_proxy_ptr: wl_surface.as_raw() as _,
+            main_surface_proxy_ptr: main_surface.as_raw() as _,
+            client_decoration: client_decoration_resources,
         }));
 
         if let Err(e) = pointer.add_listener(shell_event_handler.get_mut()) {
@@ -525,7 +1053,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
         if let Err(e) = xdg_wm_base.add_listener(shell_event_handler.get_mut()) {
             tracing::warn!(target = "xdg_wm_base", reason = ?e, "Failed to set listener");
         }
-        if let Err(e) = wl_surface.add_listener(shell_event_handler.get_mut()) {
+        if let Err(e) = main_surface.add_listener(shell_event_handler.get_mut()) {
             tracing::warn!(target = "wl_surface", reason = ?e, "Failed to set listener");
         }
         if let Err(e) = frame.add_listener(shell_event_handler.get_mut()) {
@@ -538,7 +1066,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
                 break 'optin_fractional_scale;
             };
 
-            let Ok(mut fs) = m.get_fractional_scale(&wl_surface) else {
+            let Ok(mut fs) = m.get_fractional_scale(&main_surface) else {
                 // errored(logged via tracing::instrument)
                 break 'optin_fractional_scale;
             };
@@ -561,13 +1089,15 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             tracing::warn!(target = "gtk_surface1", reason = ?e, "Failed to set listener");
         }
 
-        if let Err(e) = wl_surface.commit() {
+        if let Err(e) = main_surface.commit() {
             tracing::warn!(reason = ?e, "Failed to commit wl_surface");
         }
 
         let pointer_input_manager = Box::pin(UnsafeCell::new(PointerInputManager::new()));
 
         compositor.leak();
+        subcompositor.leak();
+        viewporter.leak();
         xdg_wm_base.leak();
         seat.leak();
         cursor_shape_manager.leak();
@@ -583,7 +1113,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
         Self {
             shell_event_handler,
             display: dp,
-            surface: wl_surface.unwrap(),
+            content_surface: main_surface.unwrap(),
             xdg_surface: xdg_surface.unwrap(),
             cursor_shape_device: cursor_shape_device.unwrap(),
             frame_callback: Cell::new(frame.unwrap()),
@@ -618,7 +1148,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
         unsafe {
             br::WaylandSurfaceCreateInfo::new(
                 self.display.as_raw() as _,
-                self.surface.as_ptr() as _,
+                self.content_surface.as_ptr() as _,
             )
             .execute(instance, None)
         }
@@ -689,7 +1219,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
 
     #[tracing::instrument(skip(self))]
     pub fn request_next_frame(&self) {
-        let mut next_callback = match unsafe { self.surface.as_ref() }.frame() {
+        let mut next_callback = match unsafe { self.content_surface.as_ref() }.frame() {
             Ok(cb) => cb,
             Err(e) => {
                 tracing::warn!(reason = ?e, "Failed to request next frame");
@@ -753,7 +1283,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             return None;
         };
 
-        match unsafe { x.as_ref() }.export_toplevel(unsafe { self.surface.as_ref() }) {
+        match unsafe { x.as_ref() }.export_toplevel(unsafe { self.content_surface.as_ref() }) {
             Ok(x) => Some(x),
             Err(e) => {
                 tracing::warn!(reason = ?e, "Failed to get exported toplevel");

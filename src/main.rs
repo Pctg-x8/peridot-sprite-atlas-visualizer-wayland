@@ -5418,7 +5418,9 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                 }
                 AppEvent::ToplevelWindowSurfaceConfigure { serial } => {
                     if let Some((w, h)) = frame_resize_request.take() {
-                        if w != sc.size.width || h != sc.size.height {
+                        let pxw = (w as f32 * app_shell.ui_scale_factor()) as u32;
+                        let pxh = (h as f32 * app_shell.ui_scale_factor()) as u32;
+                        if pxw != sc.size.width || pxh != sc.size.height {
                             tracing::trace!(w, h, last_rendering, "frame resize");
 
                             client_size.set((w as f32, h as f32));
@@ -5435,8 +5437,8 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                             main_cb_invalid = true;
 
                             sc.resize(br::Extent2D {
-                                width: (w as f32 * app_shell.ui_scale_factor()) as _,
-                                height: (h as f32 * app_shell.ui_scale_factor()) as _,
+                                width: pxw,
+                                height: pxh,
                             });
 
                             main_grabbed_fbs = sc

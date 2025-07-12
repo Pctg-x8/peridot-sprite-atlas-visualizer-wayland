@@ -37,6 +37,7 @@ struct WaylandShellEventHandler<'a, 'subsystem> {
     base_system_ptr: *mut AppBaseSystem<'subsystem>,
     cursor_shape_device: *mut wl::WpCursorShapeDeviceV1,
     pointer_last_surface_pos: (wl::Fixed, wl::Fixed),
+    tiled: bool,
 }
 impl wl::XdgWmBaseEventListener for WaylandShellEventHandler<'_, '_> {
     fn ping(&mut self, wm_base: &mut wl::XdgWmBase, serial: u32) {
@@ -70,6 +71,7 @@ impl wl::XdgToplevelEventListener for WaylandShellEventHandler<'_, '_> {
     ) {
         tracing::trace!("configure");
         let activated = states.contains(&4);
+        self.tiled = states.iter().any(|&x| x == 5 || x == 6 || x == 7 || x == 8);
 
         if width == 0 {
             width = self.cached_client_size.0 as i32;
@@ -1503,6 +1505,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
                 wl::Fixed::from_f32_lossy(0.0),
                 wl::Fixed::from_f32_lossy(0.0),
             ),
+            tiled: false,
         }));
 
         if let Err(e) = pointer.add_listener(shell_event_handler.get_mut()) {
@@ -1727,6 +1730,10 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
 
     pub fn maximize(&self) {
         // do nothing currently(maybe requires on floating-window system)
+    }
+
+    pub fn is_tiled(&self) -> bool {
+        unsafe { &*self.shell_event_handler.get() }.tiled
     }
 
     #[tracing::instrument(skip(self))]

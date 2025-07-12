@@ -5350,6 +5350,11 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                 r
                             })
                             .inject(|r| {
+                                if app_shell.is_tiled() {
+                                    // shell window is tiled(no decorations needed)
+                                    return r;
+                                }
+
                                 if corner_cutout_atlas_rect.is_none() {
                                     // no client size decoration
                                     return r;

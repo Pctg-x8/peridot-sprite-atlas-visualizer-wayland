@@ -507,6 +507,15 @@ impl XdgToplevel {
     }
 
     #[inline]
+    pub fn set_min_size(&self, width: i32, height: i32) -> Result<(), std::io::Error> {
+        self.0.marshal_array_flags_void(
+            8,
+            0,
+            &mut [ffi::Argument { i: width }, ffi::Argument { i: height }],
+        )
+    }
+
+    #[inline]
     pub fn set_maximized(&self) -> Result<(), std::io::Error> {
         self.0.marshal_array_flags_void(9, 0, &mut [])
     }

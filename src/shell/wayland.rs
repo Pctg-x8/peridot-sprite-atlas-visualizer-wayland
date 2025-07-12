@@ -1282,6 +1282,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
         if let Err(e) = xdg_toplevel.set_title(c"Peridot SpriteAtlas Visualizer/Editor") {
             tracing::warn!(reason = ?e, "Failed to set app title");
         }
+        xdg_toplevel.set_min_size(160, 120).unwrap();
 
         // client decoration: backdrop shadow
         // TODO: detect whether need this(if xdg_decoration is not provided, then needs client decoration)

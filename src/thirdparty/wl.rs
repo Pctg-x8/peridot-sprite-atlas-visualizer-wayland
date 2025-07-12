@@ -135,6 +135,7 @@ impl Proxy {
         args: &mut [ffi::Argument],
     ) -> Result<(), std::io::Error> {
         unsafe {
+            // wl_proxy_marshal_array_flags without any interface will returns NULL
             ffi::wl_proxy_marshal_array_flags(
                 self.0.get(),
                 opcode,

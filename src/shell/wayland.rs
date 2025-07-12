@@ -94,9 +94,9 @@ impl wl::XdgToplevelEventListener for WaylandShellEventHandler<'_, '_> {
         self.client_decoration
             .adjust_for_main_surface_size(width, height);
         if activated {
-            self.client_decoration.show();
+            self.client_decoration.active();
         } else {
-            self.client_decoration.hide();
+            self.client_decoration.inactive();
         }
         unsafe { &*self.main_surface_proxy_ptr }.commit().unwrap();
     }
@@ -360,13 +360,55 @@ impl wl::GtkSurface1EventListener for WaylandShellEventHandler<'_, '_> {
     }
 }
 
+fn try_create_shm_random_suffix(
+    prefix: String,
+) -> Result<Option<TemporalSharedMemory>, std::io::Error> {
+    let mut path_cstr_bytes = prefix.into_bytes();
+    path_cstr_bytes.extend(b"XXXXXX\0");
+    // random name gen: https://wayland-book.com/surfaces/shared-memory.html
+    for _ in 0..100 {
+        let mut ts = core::mem::MaybeUninit::uninit();
+        if unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, ts.as_mut_ptr()) } < 0 {
+            continue;
+        }
+        let ts = unsafe { ts.assume_init_ref() };
+        let mut r = ts.tv_nsec;
+        for p in 0..6 {
+            let fplen = path_cstr_bytes.len();
+            path_cstr_bytes[fplen - p - 2] = b'A' + (r & 15) as u8 + (r & 16) as u8 * 2;
+            r >>= 5;
+        }
+
+        match TemporalSharedMemory::create(
+            unsafe { std::ffi::CString::from_vec_with_nul_unchecked(path_cstr_bytes) },
+            OpenFlags::READ_WRITE | OpenFlags::EXCLUSIVE,
+            0o600,
+        ) {
+            Ok(x) => {
+                return Ok(Some(x));
+            }
+            Err((e, name)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // name conflict: retry
+                path_cstr_bytes = name.into_bytes_with_nul();
+                continue;
+            }
+            Err((e, _)) => {
+                return Err(e);
+            }
+        }
+    }
+
+    tracing::error!("shm creation failed(similar names already exists, try limit reached)");
+    Ok(None)
+}
+
 struct ClientDecorationResources {
     compositor: core::ptr::NonNull<wl::Compositor>,
     shm: core::ptr::NonNull<wl::Shm>,
     deco_shm: TemporalSharedMemory,
     straight_shadow_start_bytes: usize,
     shm_size: usize,
-    scale: i32,
+    buffer_scale: i32,
     shadow_corner_buf: core::ptr::NonNull<wl::Buffer>,
     shadow_straight_buf: core::ptr::NonNull<wl::Buffer>,
     shadow_lt_surface: core::ptr::NonNull<wl::Surface>,
@@ -492,54 +534,7 @@ impl ClientDecorationResources {
 
         let vertical_shadow_start_bytes: usize = Self::SHADOW_SIZE * 2 * Self::SHADOW_SIZE * 2 * 4;
         let shm_size = vertical_shadow_start_bytes + Self::SHADOW_SIZE * 2 * 1 * 4;
-        let mut deco_shm_file_path_cstr = c"/peridot-sprite-atlas-visualizer-shell_deco_buf_XXXXXX"
-            .to_owned()
-            .into_bytes_with_nul();
-        let deco_shm = 'try_shm_random_name: {
-            // random name gen: https://wayland-book.com/surfaces/shared-memory.html
-            for _ in 0..100 {
-                let mut ts = core::mem::MaybeUninit::uninit();
-                if unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, ts.as_mut_ptr()) } < 0 {
-                    continue;
-                }
-                let ts = unsafe { ts.assume_init_ref() };
-                let mut r = ts.tv_nsec;
-                for p in 0..6 {
-                    let fplen = deco_shm_file_path_cstr.len();
-                    deco_shm_file_path_cstr[fplen - p - 2] =
-                        b'A' + (r & 15) as u8 + (r & 16) as u8 * 2;
-                    r >>= 5;
-                }
-
-                match TemporalSharedMemory::create(
-                    unsafe {
-                        std::ffi::CString::from_vec_with_nul_unchecked(deco_shm_file_path_cstr)
-                    },
-                    OpenFlags::READ_WRITE | OpenFlags::EXCLUSIVE,
-                    0o600,
-                ) {
-                    Ok(x) => {
-                        break 'try_shm_random_name x;
-                    }
-                    Err((e, name)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                        // name conflict: retry
-                        deco_shm_file_path_cstr = name.into_bytes_with_nul();
-                        continue;
-                    }
-                    Err((e, _)) => {
-                        tracing::error!(reason = ?e, "Failed to create shm");
-                        std::process::abort();
-                    }
-                }
-            }
-
-            tracing::error!("shm already exists(try limit reached)");
-            std::process::abort();
-        };
-        if let Err(e) = deco_shm.truncate(shm_size as _) {
-            tracing::error!(reason = ?e, "Failed to set deco shm file size");
-            std::process::abort();
-        }
+        let deco_shm = Self::create_shm_or_abort(shm_size);
 
         let deco_shm_pool = shm.create_pool(&deco_shm, shm_size as _).unwrap();
         let shadow_corner_buf = deco_shm_pool
@@ -604,7 +599,7 @@ impl ClientDecorationResources {
             deco_shm,
             straight_shadow_start_bytes: vertical_shadow_start_bytes,
             shm_size,
-            scale: 1,
+            buffer_scale: 1,
             shadow_corner_buf: shadow_corner_buf.unwrap(),
             shadow_straight_buf: shadow_straight_buf.unwrap(),
             shadow_lt_surface: shadow_lt_surface.unwrap(),
@@ -628,145 +623,14 @@ impl ClientDecorationResources {
     }
 
     pub fn set_buffer_scale(&mut self, scale: i32) {
-        self.scale = scale;
-
-        // detach buffers before recreating
-        unsafe { self.shadow_lt_surface.as_ref() }
-            .attach(None, 0, 0)
-            .unwrap();
-        unsafe { self.shadow_lt_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_lb_surface.as_ref() }
-            .attach(None, 0, 0)
-            .unwrap();
-        unsafe { self.shadow_lb_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_rb_surface.as_ref() }
-            .attach(None, 0, 0)
-            .unwrap();
-        unsafe { self.shadow_rb_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_rt_surface.as_ref() }
-            .attach(None, 0, 0)
-            .unwrap();
-        unsafe { self.shadow_rt_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_left_surface.as_ref() }
-            .attach(None, 0, 0)
-            .unwrap();
-        unsafe { self.shadow_left_surface.as_ref() }
-            .commit()
-            .unwrap();
-        unsafe { self.shadow_right_surface.as_ref() }
-            .attach(None, 0, 0)
-            .unwrap();
-        unsafe { self.shadow_right_surface.as_ref() }
-            .commit()
-            .unwrap();
-        unsafe { self.shadow_top_surface.as_ref() }
-            .attach(None, 0, 0)
-            .unwrap();
-        unsafe { self.shadow_top_surface.as_ref() }
-            .commit()
-            .unwrap();
-        unsafe { self.shadow_bottom_surface.as_ref() }
-            .attach(None, 0, 0)
-            .unwrap();
-        unsafe { self.shadow_bottom_surface.as_ref() }
-            .commit()
-            .unwrap();
-
-        unsafe { self.shadow_lt_surface.as_ref() }
-            .set_buffer_scale(scale)
-            .unwrap();
-        unsafe { self.shadow_lt_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_lb_surface.as_ref() }
-            .set_buffer_scale(scale)
-            .unwrap();
-        unsafe { self.shadow_lb_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_rt_surface.as_ref() }
-            .set_buffer_scale(scale)
-            .unwrap();
-        unsafe { self.shadow_rt_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_rb_surface.as_ref() }
-            .set_buffer_scale(scale)
-            .unwrap();
-        unsafe { self.shadow_rb_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_left_surface.as_ref() }
-            .set_buffer_scale(scale)
-            .unwrap();
-        unsafe { self.shadow_left_surface.as_ref() }
-            .commit()
-            .unwrap();
-        unsafe { self.shadow_right_surface.as_ref() }
-            .set_buffer_scale(scale)
-            .unwrap();
-        unsafe { self.shadow_right_surface.as_ref() }
-            .commit()
-            .unwrap();
-        unsafe { self.shadow_top_surface.as_ref() }
-            .set_buffer_scale(scale)
-            .unwrap();
-        unsafe { self.shadow_top_surface.as_ref() }
-            .commit()
-            .unwrap();
-        unsafe { self.shadow_bottom_surface.as_ref() }
-            .set_buffer_scale(scale)
-            .unwrap();
-        unsafe { self.shadow_bottom_surface.as_ref() }
-            .commit()
-            .unwrap();
+        self.buffer_scale = scale;
 
         // recreate pix buffer
         self.straight_shadow_start_bytes =
             (Self::SHADOW_SIZE * 2) * scale as usize * (Self::SHADOW_SIZE * 2) * scale as usize * 4;
         self.shm_size = self.straight_shadow_start_bytes
             + (Self::SHADOW_SIZE * 2) * scale as usize * 1 * scale as usize * 4;
-        let mut deco_shm_file_path_cstr = c"/peridot-sprite-atlas-visualizer-shell_deco_buf_XXXXXX"
-            .to_owned()
-            .into_bytes_with_nul();
-        self.deco_shm = 'try_shm_random_name: {
-            // random name gen: https://wayland-book.com/surfaces/shared-memory.html
-            for _ in 0..100 {
-                let mut ts = core::mem::MaybeUninit::uninit();
-                if unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, ts.as_mut_ptr()) } < 0 {
-                    continue;
-                }
-                let ts = unsafe { ts.assume_init_ref() };
-                let mut r = ts.tv_nsec;
-                for p in 0..6 {
-                    let fplen = deco_shm_file_path_cstr.len();
-                    deco_shm_file_path_cstr[fplen - p - 2] =
-                        b'A' + (r & 15) as u8 + (r & 16) as u8 * 2;
-                    r >>= 5;
-                }
-
-                match TemporalSharedMemory::create(
-                    unsafe {
-                        std::ffi::CString::from_vec_with_nul_unchecked(deco_shm_file_path_cstr)
-                    },
-                    OpenFlags::READ_WRITE | OpenFlags::EXCLUSIVE,
-                    0o600,
-                ) {
-                    Ok(x) => {
-                        break 'try_shm_random_name x;
-                    }
-                    Err((e, name)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                        // name conflict: retry
-                        deco_shm_file_path_cstr = name.into_bytes_with_nul();
-                        continue;
-                    }
-                    Err((e, _)) => {
-                        tracing::error!(reason = ?e, "Failed to create shm");
-                        std::process::abort();
-                    }
-                }
-            }
-
-            tracing::error!("shm already exists(try limit reached)");
-            std::process::abort();
-        };
-        if let Err(e) = self.deco_shm.truncate(self.shm_size as _) {
-            tracing::error!(reason = ?e, "Failed to set deco shm file size");
-            std::process::abort();
-        }
-
+        self.deco_shm = Self::create_shm_or_abort(self.shm_size);
         let deco_shm_pool = unsafe { self.shm.as_ref() }
             .create_pool(&self.deco_shm, self.shm_size as _)
             .unwrap();
@@ -794,47 +658,73 @@ impl ClientDecorationResources {
         unsafe { self.shadow_lt_surface.as_ref() }
             .attach(Some(unsafe { self.shadow_corner_buf.as_ref() }), 0, 0)
             .unwrap();
-        unsafe { self.shadow_lt_surface.as_ref() }.commit().unwrap();
         unsafe { self.shadow_lb_surface.as_ref() }
             .attach(Some(unsafe { self.shadow_corner_buf.as_ref() }), 0, 0)
             .unwrap();
-        unsafe { self.shadow_lb_surface.as_ref() }.commit().unwrap();
         unsafe { self.shadow_rb_surface.as_ref() }
             .attach(Some(unsafe { self.shadow_corner_buf.as_ref() }), 0, 0)
             .unwrap();
-        unsafe { self.shadow_rb_surface.as_ref() }.commit().unwrap();
         unsafe { self.shadow_rt_surface.as_ref() }
             .attach(Some(unsafe { self.shadow_corner_buf.as_ref() }), 0, 0)
             .unwrap();
-        unsafe { self.shadow_rt_surface.as_ref() }.commit().unwrap();
         unsafe { self.shadow_left_surface.as_ref() }
             .attach(Some(unsafe { self.shadow_straight_buf.as_ref() }), 0, 0)
-            .unwrap();
-        unsafe { self.shadow_left_surface.as_ref() }
-            .commit()
             .unwrap();
         unsafe { self.shadow_right_surface.as_ref() }
             .attach(Some(unsafe { self.shadow_straight_buf.as_ref() }), 0, 0)
             .unwrap();
-        unsafe { self.shadow_right_surface.as_ref() }
-            .commit()
-            .unwrap();
         unsafe { self.shadow_top_surface.as_ref() }
             .attach(Some(unsafe { self.shadow_straight_buf.as_ref() }), 0, 0)
-            .unwrap();
-        unsafe { self.shadow_top_surface.as_ref() }
-            .commit()
             .unwrap();
         unsafe { self.shadow_bottom_surface.as_ref() }
             .attach(Some(unsafe { self.shadow_straight_buf.as_ref() }), 0, 0)
+            .unwrap();
+
+        unsafe { self.shadow_lt_surface.as_ref() }
+            .set_buffer_scale(scale)
+            .unwrap();
+        unsafe { self.shadow_lb_surface.as_ref() }
+            .set_buffer_scale(scale)
+            .unwrap();
+        unsafe { self.shadow_rt_surface.as_ref() }
+            .set_buffer_scale(scale)
+            .unwrap();
+        unsafe { self.shadow_rb_surface.as_ref() }
+            .set_buffer_scale(scale)
+            .unwrap();
+        unsafe { self.shadow_left_surface.as_ref() }
+            .set_buffer_scale(scale)
+            .unwrap();
+        unsafe { self.shadow_right_surface.as_ref() }
+            .set_buffer_scale(scale)
+            .unwrap();
+        unsafe { self.shadow_top_surface.as_ref() }
+            .set_buffer_scale(scale)
+            .unwrap();
+        unsafe { self.shadow_bottom_surface.as_ref() }
+            .set_buffer_scale(scale)
+            .unwrap();
+
+        unsafe { self.shadow_lt_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_lb_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_rb_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_rt_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_left_surface.as_ref() }
+            .commit()
+            .unwrap();
+        unsafe { self.shadow_right_surface.as_ref() }
+            .commit()
+            .unwrap();
+        unsafe { self.shadow_top_surface.as_ref() }
+            .commit()
             .unwrap();
         unsafe { self.shadow_bottom_surface.as_ref() }
             .commit()
             .unwrap();
     }
 
-    pub fn show(&self) {
-        let deco_shm_mapped = self
+    fn render_content(&self, base_alpha_u8: f32) {
+        let mapped = self
             .deco_shm
             .mmap_random(
                 0..self.shm_size,
@@ -842,185 +732,94 @@ impl ClientDecorationResources {
                 MemoryMapFlags::SHARED,
             )
             .unwrap();
-        unsafe {
-            for y in 0..(Self::SHADOW_SIZE * 2) * self.scale as usize {
-                for x in 0..(Self::SHADOW_SIZE * 2) * self.scale as usize {
-                    let (x1, y1) = (
-                        ((Self::SHADOW_SIZE * 2) * self.scale as usize - x) as f32,
-                        ((Self::SHADOW_SIZE * 2) * self.scale as usize - y) as f32,
-                    );
-                    let d = (x1 * x1 + y1 * y1).sqrt();
-                    deco_shm_mapped
-                        .ptr_of::<[u8; 4]>()
-                        .add(x + y * (Self::SHADOW_SIZE * 2) * self.scale as usize)
-                        .write([
-                            0,
-                            0,
-                            0,
-                            (255.0
-                                * (1.0
-                                    - d / ((Self::SHADOW_SIZE as f32 * 2.0) * self.scale as f32))
-                                    .clamp(0.0, 1.0)
-                                    .powf(2.0)) as _,
-                        ]);
-                }
-            }
-            for y in 0..self.scale as usize {
-                for x in 0..(Self::SHADOW_SIZE * 2) * self.scale as usize {
-                    deco_shm_mapped
-                        .ptr()
-                        .byte_add(self.straight_shadow_start_bytes)
-                        .cast::<[u8; 4]>()
-                        .add(x + y * (Self::SHADOW_SIZE * 2) * self.scale as usize)
-                        .write([
-                            0,
-                            0,
-                            0,
-                            (255.0
-                                * (x as f32
-                                    / ((Self::SHADOW_SIZE as f32 * 2.0) * self.scale as f32))
-                                    .powf(2.0)) as _,
-                        ]);
+
+        let render_size_px = Self::SHADOW_SIZE * 2 * self.buffer_scale as usize;
+
+        let pixels = mapped.ptr_of::<[u8; 4]>();
+        for y in 0..render_size_px {
+            for x in 0..render_size_px {
+                let (x1, y1) = ((render_size_px - x) as f32, (render_size_px - y) as f32);
+                let dn = (x1 * x1 + y1 * y1).sqrt() / render_size_px as f32;
+                let a = (1.0 - dn).clamp(0.0, 1.0).powf(2.0);
+
+                unsafe {
+                    pixels
+                        .add(x + y * render_size_px)
+                        .write([0, 0, 0, (base_alpha_u8 * a) as _]);
                 }
             }
         }
 
+        let pixels = unsafe {
+            mapped
+                .ptr_of::<[u8; 4]>()
+                .byte_add(self.straight_shadow_start_bytes)
+        };
+        for y in 0..self.buffer_scale as usize {
+            for x in 0..render_size_px {
+                let a = (x as f32 / (render_size_px as f32)).powf(2.0);
+
+                unsafe {
+                    pixels
+                        .add(x + y * render_size_px)
+                        .write([0, 0, 0, (base_alpha_u8 * a) as _]);
+                }
+            }
+        }
+    }
+
+    fn refresh_surface_contents(&self) {
         unsafe { self.shadow_lt_surface.as_ref() }
             .damage(0, 0, i32::MAX, i32::MAX)
             .unwrap();
-        unsafe { self.shadow_lt_surface.as_ref() }.commit().unwrap();
         unsafe { self.shadow_lb_surface.as_ref() }
             .damage(0, 0, i32::MAX, i32::MAX)
             .unwrap();
-        unsafe { self.shadow_lb_surface.as_ref() }.commit().unwrap();
         unsafe { self.shadow_rb_surface.as_ref() }
             .damage(0, 0, i32::MAX, i32::MAX)
             .unwrap();
-        unsafe { self.shadow_rb_surface.as_ref() }.commit().unwrap();
         unsafe { self.shadow_rt_surface.as_ref() }
             .damage(0, 0, i32::MAX, i32::MAX)
             .unwrap();
-        unsafe { self.shadow_rt_surface.as_ref() }.commit().unwrap();
         unsafe { self.shadow_left_surface.as_ref() }
             .damage(0, 0, i32::MAX, i32::MAX)
-            .unwrap();
-        unsafe { self.shadow_left_surface.as_ref() }
-            .commit()
             .unwrap();
         unsafe { self.shadow_right_surface.as_ref() }
             .damage(0, 0, i32::MAX, i32::MAX)
             .unwrap();
-        unsafe { self.shadow_right_surface.as_ref() }
-            .commit()
-            .unwrap();
         unsafe { self.shadow_top_surface.as_ref() }
             .damage(0, 0, i32::MAX, i32::MAX)
-            .unwrap();
-        unsafe { self.shadow_top_surface.as_ref() }
-            .commit()
             .unwrap();
         unsafe { self.shadow_bottom_surface.as_ref() }
             .damage(0, 0, i32::MAX, i32::MAX)
+            .unwrap();
+
+        unsafe { self.shadow_lt_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_lb_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_rb_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_rt_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_left_surface.as_ref() }
+            .commit()
+            .unwrap();
+        unsafe { self.shadow_right_surface.as_ref() }
+            .commit()
+            .unwrap();
+        unsafe { self.shadow_top_surface.as_ref() }
+            .commit()
             .unwrap();
         unsafe { self.shadow_bottom_surface.as_ref() }
             .commit()
             .unwrap();
     }
 
-    pub fn hide(&self) {
-        let deco_shm_mapped = self
-            .deco_shm
-            .mmap_random(
-                0..self.shm_size,
-                MemoryProtectionFlags::READ | MemoryProtectionFlags::WRITE,
-                MemoryMapFlags::SHARED,
-            )
-            .unwrap();
-        unsafe {
-            for y in 0..(Self::SHADOW_SIZE * 2) * self.scale as usize {
-                for x in 0..(Self::SHADOW_SIZE * 2) * self.scale as usize {
-                    let (x1, y1) = (
-                        ((Self::SHADOW_SIZE * 2) * self.scale as usize - x) as f32,
-                        ((Self::SHADOW_SIZE * 2) * self.scale as usize - y) as f32,
-                    );
-                    let d = (x1 * x1 + y1 * y1).sqrt();
-                    deco_shm_mapped
-                        .ptr_of::<[u8; 4]>()
-                        .add(x + y * (Self::SHADOW_SIZE * 2) * self.scale as usize)
-                        .write([
-                            0,
-                            0,
-                            0,
-                            (255.0
-                                * 0.5
-                                * (1.0
-                                    - d / ((Self::SHADOW_SIZE as f32 * 2.0) * self.scale as f32))
-                                    .clamp(0.0, 1.0)
-                                    .powf(2.0)) as _,
-                        ]);
-                }
-            }
-            for y in 0..self.scale as usize {
-                for x in 0..(Self::SHADOW_SIZE * 2) * self.scale as usize {
-                    deco_shm_mapped
-                        .ptr()
-                        .byte_add(self.straight_shadow_start_bytes)
-                        .cast::<[u8; 4]>()
-                        .add(x + y * (Self::SHADOW_SIZE * 2) * self.scale as usize)
-                        .write([
-                            0,
-                            0,
-                            0,
-                            (255.0
-                                * 0.5
-                                * (x as f32
-                                    / ((Self::SHADOW_SIZE as f32 * 2.0) * self.scale as f32))
-                                    .powf(2.0)) as _,
-                        ]);
-                }
-            }
-        }
+    pub fn active(&self) {
+        self.render_content(255.0);
+        self.refresh_surface_contents();
+    }
 
-        unsafe { self.shadow_lt_surface.as_ref() }
-            .damage(0, 0, i32::MAX, i32::MAX)
-            .unwrap();
-        unsafe { self.shadow_lt_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_lb_surface.as_ref() }
-            .damage(0, 0, i32::MAX, i32::MAX)
-            .unwrap();
-        unsafe { self.shadow_lb_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_rb_surface.as_ref() }
-            .damage(0, 0, i32::MAX, i32::MAX)
-            .unwrap();
-        unsafe { self.shadow_rb_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_rt_surface.as_ref() }
-            .damage(0, 0, i32::MAX, i32::MAX)
-            .unwrap();
-        unsafe { self.shadow_rt_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_left_surface.as_ref() }
-            .damage(0, 0, i32::MAX, i32::MAX)
-            .unwrap();
-        unsafe { self.shadow_left_surface.as_ref() }
-            .commit()
-            .unwrap();
-        unsafe { self.shadow_right_surface.as_ref() }
-            .damage(0, 0, i32::MAX, i32::MAX)
-            .unwrap();
-        unsafe { self.shadow_right_surface.as_ref() }
-            .commit()
-            .unwrap();
-        unsafe { self.shadow_top_surface.as_ref() }
-            .damage(0, 0, i32::MAX, i32::MAX)
-            .unwrap();
-        unsafe { self.shadow_top_surface.as_ref() }
-            .commit()
-            .unwrap();
-        unsafe { self.shadow_bottom_surface.as_ref() }
-            .damage(0, 0, i32::MAX, i32::MAX)
-            .unwrap();
-        unsafe { self.shadow_bottom_surface.as_ref() }
-            .commit()
-            .unwrap();
+    pub fn inactive(&self) {
+        self.render_content(128.0);
+        self.refresh_surface_contents();
     }
 
     pub fn adjust_for_main_surface_size(&self, width: i32, height: i32) {
@@ -1206,6 +1005,28 @@ impl ClientDecorationResources {
         }
 
         None
+    }
+
+    #[tracing::instrument(name = "ClientDecorationResources::create_shm_or_abort")]
+    fn create_shm_or_abort(size: usize) -> TemporalSharedMemory {
+        let shm = match try_create_shm_random_suffix(
+            "/peridot-sprite-atlas-visualizer-shell_deco_buf_".into(),
+        ) {
+            Ok(Some(x)) => x,
+            Ok(None) => {
+                std::process::abort();
+            }
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to create shm");
+                std::process::abort();
+            }
+        };
+        if let Err(e) = shm.truncate(size as _) {
+            tracing::error!(reason = ?e, "Failed to set shm file size");
+            std::process::abort();
+        }
+
+        shm
     }
 }
 
@@ -1471,7 +1292,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             &viewporter,
             &main_surface,
         );
-        client_decoration_resources.show();
+        client_decoration_resources.active();
 
         let mut frame = match main_surface.frame() {
             Ok(x) => x,

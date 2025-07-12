@@ -2737,6 +2737,7 @@ pub struct PrimaryRenderTarget<'s> {
     format: br::SurfaceFormat,
     transform: br::SurfaceTransformFlags,
     composite_alpha: br::CompositeAlphaFlags,
+    present_mode: br::PresentMode,
 }
 impl Drop for PrimaryRenderTarget<'_> {
     fn drop(&mut self) {
@@ -2805,6 +2806,11 @@ impl<'s> PrimaryRenderTarget<'s> {
             .adapter()
             .surface_formats_alloc(&surface)
             .unwrap();
+        let surface_present_modes = surface
+            .subsystem
+            .adapter()
+            .surface_present_modes_alloc(&surface)
+            .unwrap();
         let sc_transform = if surface_caps
             .supported_transforms()
             .has_any(br::SurfaceTransformFlags::IDENTITY)
@@ -2841,6 +2847,11 @@ impl<'s> PrimaryRenderTarget<'s> {
                 surface_caps.currentExtent.height
             },
         };
+        let present_mode = if surface_present_modes.contains(&br::PresentMode::Mailbox) {
+            br::PresentMode::Mailbox
+        } else {
+            surface_present_modes[0]
+        };
 
         let sc = TemporalSwapchain {
             handle: unsafe {
@@ -2854,7 +2865,8 @@ impl<'s> PrimaryRenderTarget<'s> {
                         br::ImageUsageFlags::COLOR_ATTACHMENT | br::ImageUsageFlags::TRANSFER_SRC,
                     )
                     .pre_transform(sc_transform)
-                    .composite_alpha(sc_composite_alpha),
+                    .composite_alpha(sc_composite_alpha)
+                    .present_mode(present_mode),
                     None,
                 )
                 .unwrap()
@@ -2904,6 +2916,7 @@ impl<'s> PrimaryRenderTarget<'s> {
             format: sc_format,
             transform: sc_transform,
             composite_alpha: sc_composite_alpha,
+            present_mode,
         }
     }
 
@@ -2951,7 +2964,8 @@ impl<'s> PrimaryRenderTarget<'s> {
                     br::ImageUsageFlags::COLOR_ATTACHMENT | br::ImageUsageFlags::TRANSFER_SRC,
                 )
                 .pre_transform(self.transform)
-                .composite_alpha(self.composite_alpha),
+                .composite_alpha(self.composite_alpha)
+                .present_mode(self.present_mode),
                 None,
             )
             .unwrap()

@@ -327,12 +327,9 @@ impl wl::CallbackEventListener for WaylandShellEventHandler<'_, '_> {
     }
 }
 impl wl::WpFractionalScaleV1EventListener for WaylandShellEventHandler<'_, '_> {
+    #[tracing::instrument(name = "<WaylandShellEventHandler as WpFractionalScaleV1EventListener>::preferred_scale", skip(self, _object), fields(scale_f = scale as f32 / 120.0))]
     fn preferred_scale(&mut self, _object: &mut wl::WpFractionalScaleV1, scale: u32) {
-        tracing::trace!(
-            scale,
-            scale_f = scale as f32 / 120.0,
-            "preferred fractional scale"
-        )
+        tracing::trace!("TODO: fractional scale")
     }
 }
 impl wl::GtkShell1EventListener for WaylandShellEventHandler<'_, '_> {
@@ -1492,7 +1489,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             app_event_bus: events,
             // 現時点ではわからないので適当な値を設定
             cached_client_size: (640, 480),
-            ui_scale_factor: 2.0,
+            ui_scale_factor: 1.0,
             pointer_on_surface: PointerOnSurface::None,
             main_surface_proxy_ptr: main_surface.as_raw() as _,
             xdg_surface_proxy_ptr: xdg_surface.as_raw() as _,
@@ -1558,6 +1555,10 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
 
         if let Err(e) = main_surface.commit() {
             tracing::warn!(reason = ?e, "Failed to commit wl_surface");
+        }
+
+        if let Err(e) = dp.roundtrip() {
+            tracing::warn!(reason = ?e, "Failed to final roundtrip");
         }
 
         compositor.leak();

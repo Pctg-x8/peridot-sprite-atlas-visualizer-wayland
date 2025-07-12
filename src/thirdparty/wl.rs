@@ -180,7 +180,7 @@ pub unsafe trait Interface {
 pub struct Owned<T: Interface>(NonNull<T>);
 impl<T: Interface> Drop for Owned<T> {
     fn drop(&mut self) {
-        tracing::trace!(type_name = core::any::type_name::<T>(), "drop wl owned");
+        tracing::trace!(target: "wl_drop_log", type_name = core::any::type_name::<T>(), "drop wl owned");
 
         unsafe {
             self.0.as_mut().destruct();

@@ -187,6 +187,10 @@ unsafe impl Interface for XdgSurface {
     }
 }
 impl XdgSurface {
+    pub const fn as_raw(&mut self) -> *mut ffi::Proxy {
+        &mut self.0 as *mut _ as _
+    }
+
     pub fn add_listener<'l, L: XdgSurfaceEventListener + 'l>(
         &'l mut self,
         listener: &'l mut L,
@@ -456,6 +460,26 @@ impl XdgToplevel {
     pub fn set_app_id(&self, id: &core::ffi::CStr) -> Result<(), std::io::Error> {
         self.0
             .marshal_array_flags_void(3, 0, &mut [ffi::Argument { s: id.as_ptr() }])
+    }
+
+    #[inline]
+    pub fn show_window_menu(
+        &self,
+        seat: &super::Seat,
+        serial: u32,
+        x: i32,
+        y: i32,
+    ) -> Result<(), std::io::Error> {
+        self.0.marshal_array_flags_void(
+            4,
+            0,
+            &mut [
+                seat.0.as_arg(),
+                ffi::Argument { u: serial },
+                ffi::Argument { i: x },
+                ffi::Argument { i: y },
+            ],
+        )
     }
 
     #[inline]

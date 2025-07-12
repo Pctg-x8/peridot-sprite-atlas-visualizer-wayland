@@ -13,7 +13,7 @@ use crate::{
     input::PointerInputManager,
     platform::linux::{
         MemoryMapFlags, MemoryProtectionFlags, OpenFlags, TemporalSharedMemory,
-        input_event_codes::BTN_LEFT,
+        input_event_codes::{BTN_LEFT, BTN_RIGHT},
     },
     thirdparty::wl::{self, WpCursorShapeDeviceV1Shape, WpCursorShapeManagerV1},
 };
@@ -29,12 +29,14 @@ struct WaylandShellEventHandler<'a, 'subsystem> {
     ui_scale_factor: f32,
     pointer_on_surface: PointerOnSurface,
     main_surface_proxy_ptr: *mut wl::Surface,
+    xdg_surface_proxy_ptr: *mut wl::XdgSurface,
     xdg_toplevel_proxy_ptr: *mut wl::XdgToplevel,
     primary_seat_ptr: *mut wl::Seat,
     client_decoration: ClientDecorationResources,
     pointer_input_manager: Pin<Box<UnsafeCell<PointerInputManager>>>,
     base_system_ptr: *mut AppBaseSystem<'subsystem>,
     cursor_shape_device: *mut wl::WpCursorShapeDeviceV1,
+    pointer_last_surface_pos: (wl::Fixed, wl::Fixed),
 }
 impl wl::XdgWmBaseEventListener for WaylandShellEventHandler<'_, '_> {
     fn ping(&mut self, wm_base: &mut wl::XdgWmBase, serial: u32) {
@@ -44,41 +46,56 @@ impl wl::XdgWmBaseEventListener for WaylandShellEventHandler<'_, '_> {
     }
 }
 impl wl::XdgSurfaceEventListener for WaylandShellEventHandler<'_, '_> {
-    fn configure(&mut self, _: &mut wl::XdgSurface, serial: u32) {
-        self.app_event_bus
-            .push(AppEvent::ToplevelWindowSurfaceConfigure { serial });
+    #[tracing::instrument(
+        name = "<WaylandShellEventHandler as wl::XdgSurfaceEventListener>::configure",
+        skip(self, sender)
+    )]
+    fn configure(&mut self, sender: &mut wl::XdgSurface, serial: u32) {
+        if let Err(e) = sender.ack_configure(serial) {
+            tracing::warn!(reason = ?e, "ack_configure failed");
+        }
     }
 }
 impl wl::XdgToplevelEventListener for WaylandShellEventHandler<'_, '_> {
+    #[tracing::instrument(
+        name = "<WaylandShellEventHandler as wl::XdgToplevelEventListener>::configure",
+        skip(self, _toplevel)
+    )]
     fn configure(
         &mut self,
-        _: &mut wl::XdgToplevel,
+        _toplevel: &mut wl::XdgToplevel,
         mut width: i32,
         mut height: i32,
         states: &[i32],
     ) {
+        tracing::trace!("configure");
+        let activated = states.contains(&4);
+
         if width == 0 {
-            width = self.cached_client_size.0 as i32
-                + (ClientDecorationResources::SHADOW_SIZE * 2) as i32;
+            width = self.cached_client_size.0 as i32;
         }
         if height == 0 {
-            height = self.cached_client_size.1 as i32
-                + (ClientDecorationResources::SHADOW_SIZE * 2) as i32;
+            height = self.cached_client_size.1 as i32;
         }
 
-        // subtract margins for decorations
-        width -= (ClientDecorationResources::SHADOW_SIZE * 2) as i32;
-        height -= (ClientDecorationResources::SHADOW_SIZE * 2) as i32;
-
         self.cached_client_size = (width as _, height as _);
-        self.app_event_bus.push(AppEvent::ToplevelWindowConfigure {
+        self.app_event_bus.push(AppEvent::ToplevelWindowNewSize {
             width: width as _,
             height: height as _,
         });
+
+        // TODO: determine using client side decoration
+        unsafe { &*self.xdg_surface_proxy_ptr }
+            .set_window_geometry(0, 0, width, height)
+            .unwrap();
         self.client_decoration
             .adjust_for_main_surface_size(width, height);
-
-        tracing::trace!(width, height, ?states, "configure");
+        if activated {
+            self.client_decoration.show();
+        } else {
+            self.client_decoration.hide();
+        }
+        unsafe { &*self.main_surface_proxy_ptr }.commit().unwrap();
     }
 
     fn close(&mut self, _: &mut wl::XdgToplevel) {
@@ -179,6 +196,7 @@ impl wl::PointerEventListener for WaylandShellEventHandler<'_, '_> {
             }
             PointerOnSurface::Main { .. } => {
                 if core::ptr::addr_eq(surface, self.main_surface_proxy_ptr) {
+                    // TODO: notify pointer_leave for currently entering element
                     self.pointer_on_surface = PointerOnSurface::None;
                 }
             }
@@ -196,6 +214,9 @@ impl wl::PointerEventListener for WaylandShellEventHandler<'_, '_> {
             PointerOnSurface::None => (),
             PointerOnSurface::ResizeEdge { .. } => (),
             PointerOnSurface::Main { serial } => {
+                // TODO: pointer recognition
+                self.pointer_last_surface_pos = (surface_x, surface_y);
+
                 self.app_event_bus.push(AppEvent::MainWindowPointerMove {
                     enter_serial: serial,
                     surface_x: surface_x.to_f32(),
@@ -247,6 +268,26 @@ impl wl::PointerEventListener for WaylandShellEventHandler<'_, '_> {
                 } else if button == BTN_LEFT && state == wl::PointerButtonState::Released {
                     self.app_event_bus
                         .push(AppEvent::MainWindowPointerLeftUp { enter_serial });
+                } else if button == BTN_RIGHT && state == wl::PointerButtonState::Pressed {
+                    // TODO: detect whether floating window system and client side decorated
+                    let role = self
+                        .pointer_input_manager
+                        .get_mut()
+                        .role_focus(unsafe { &(*self.base_system_ptr).hit_tree });
+                    match role {
+                        Some(Role::TitleBar) => {
+                            unsafe { &*self.xdg_toplevel_proxy_ptr }
+                                .show_window_menu(
+                                    unsafe { &*self.primary_seat_ptr },
+                                    serial,
+                                    self.pointer_last_surface_pos.0.to_f32() as _,
+                                    self.pointer_last_surface_pos.1.to_f32() as _,
+                                )
+                                .unwrap();
+                            return;
+                        }
+                        _ => (),
+                    }
                 }
             }
         }
@@ -312,6 +353,10 @@ impl wl::GtkSurface1EventListener for WaylandShellEventHandler<'_, '_> {
 struct ClientDecorationResources {
     compositor: core::ptr::NonNull<wl::Compositor>,
     shm: core::ptr::NonNull<wl::Shm>,
+    deco_shm: TemporalSharedMemory,
+    straight_shadow_start_bytes: usize,
+    shm_size: usize,
+    scale: i32,
     shadow_corner_buf: core::ptr::NonNull<wl::Buffer>,
     shadow_straight_buf: core::ptr::NonNull<wl::Buffer>,
     shadow_lt_surface: core::ptr::NonNull<wl::Surface>,
@@ -485,33 +530,6 @@ impl ClientDecorationResources {
             tracing::error!(reason = ?e, "Failed to set deco shm file size");
             std::process::abort();
         }
-        let deco_shm_mapped = deco_shm
-            .mmap_random(
-                0..shm_size,
-                MemoryProtectionFlags::READ | MemoryProtectionFlags::WRITE,
-                MemoryMapFlags::SHARED,
-            )
-            .unwrap();
-        unsafe {
-            for y in 0..Self::SHADOW_SIZE * 2 {
-                for x in 0..Self::SHADOW_SIZE * 2 {
-                    let (x1, y1) = (
-                        (Self::SHADOW_SIZE * 2 - x) as f32,
-                        (Self::SHADOW_SIZE * 2 - y) as f32,
-                    );
-                    let d = (x1 * x1 + y1 * y1).sqrt();
-                    deco_shm_mapped
-                        .ptr_of::<[u8; 4]>()
-                        .add(x + y * Self::SHADOW_SIZE * 2)
-                        .write([
-                            0,
-                            0,
-                            0,
-                            (255.0 * (1.0 - d / (Self::SHADOW_SIZE as f32 * 2.0)).powf(1.0)) as _,
-                        ]);
-                }
-            }
-        }
 
         let deco_shm_pool = shm.create_pool(&deco_shm, shm_size as _).unwrap();
         let shadow_corner_buf = deco_shm_pool
@@ -533,6 +551,39 @@ impl ClientDecorationResources {
             )
             .unwrap();
 
+        shadow_lt_surface
+            .attach(Some(&shadow_corner_buf), 0, 0)
+            .unwrap();
+        shadow_lt_surface.commit().unwrap();
+        shadow_lb_surface
+            .attach(Some(&shadow_corner_buf), 0, 0)
+            .unwrap();
+        shadow_lb_surface.commit().unwrap();
+        shadow_rb_surface
+            .attach(Some(&shadow_corner_buf), 0, 0)
+            .unwrap();
+        shadow_rb_surface.commit().unwrap();
+        shadow_rt_surface
+            .attach(Some(&shadow_corner_buf), 0, 0)
+            .unwrap();
+        shadow_rt_surface.commit().unwrap();
+        shadow_left_surface
+            .attach(Some(&shadow_straight_buf), 0, 0)
+            .unwrap();
+        shadow_left_surface.commit().unwrap();
+        shadow_right_surface
+            .attach(Some(&shadow_straight_buf), 0, 0)
+            .unwrap();
+        shadow_right_surface.commit().unwrap();
+        shadow_top_surface
+            .attach(Some(&shadow_straight_buf), 0, 0)
+            .unwrap();
+        shadow_top_surface.commit().unwrap();
+        shadow_bottom_surface
+            .attach(Some(&shadow_straight_buf), 0, 0)
+            .unwrap();
+        shadow_bottom_surface.commit().unwrap();
+
         shadow_lt_subsurface.leak();
         shadow_left_subsurface.leak();
         shadow_top_subsurface.leak();
@@ -540,6 +591,10 @@ impl ClientDecorationResources {
         Self {
             compositor: unsafe { compositor.copy_ptr() },
             shm: shm.unwrap(),
+            deco_shm,
+            straight_shadow_start_bytes: vertical_shadow_start_bytes,
+            shm_size,
+            scale: 1,
             shadow_corner_buf: shadow_corner_buf.unwrap(),
             shadow_straight_buf: shadow_straight_buf.unwrap(),
             shadow_lt_surface: shadow_lt_surface.unwrap(),
@@ -563,8 +618,49 @@ impl ClientDecorationResources {
     }
 
     pub fn set_buffer_scale(&mut self, scale: i32) {
+        self.scale = scale;
+
         // detach buffers before recreating
-        self.hide();
+        unsafe { self.shadow_lt_surface.as_ref() }
+            .attach(None, 0, 0)
+            .unwrap();
+        unsafe { self.shadow_lt_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_lb_surface.as_ref() }
+            .attach(None, 0, 0)
+            .unwrap();
+        unsafe { self.shadow_lb_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_rb_surface.as_ref() }
+            .attach(None, 0, 0)
+            .unwrap();
+        unsafe { self.shadow_rb_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_rt_surface.as_ref() }
+            .attach(None, 0, 0)
+            .unwrap();
+        unsafe { self.shadow_rt_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_left_surface.as_ref() }
+            .attach(None, 0, 0)
+            .unwrap();
+        unsafe { self.shadow_left_surface.as_ref() }
+            .commit()
+            .unwrap();
+        unsafe { self.shadow_right_surface.as_ref() }
+            .attach(None, 0, 0)
+            .unwrap();
+        unsafe { self.shadow_right_surface.as_ref() }
+            .commit()
+            .unwrap();
+        unsafe { self.shadow_top_surface.as_ref() }
+            .attach(None, 0, 0)
+            .unwrap();
+        unsafe { self.shadow_top_surface.as_ref() }
+            .commit()
+            .unwrap();
+        unsafe { self.shadow_bottom_surface.as_ref() }
+            .attach(None, 0, 0)
+            .unwrap();
+        unsafe { self.shadow_bottom_surface.as_ref() }
+            .commit()
+            .unwrap();
 
         unsafe { self.shadow_lt_surface.as_ref() }
             .set_buffer_scale(scale)
@@ -608,14 +704,14 @@ impl ClientDecorationResources {
             .unwrap();
 
         // recreate pix buffer
-        let vertical_shadow_start_bytes: usize =
+        self.straight_shadow_start_bytes =
             (Self::SHADOW_SIZE * 2) * scale as usize * (Self::SHADOW_SIZE * 2) * scale as usize * 4;
-        let shm_size = vertical_shadow_start_bytes
+        self.shm_size = self.straight_shadow_start_bytes
             + (Self::SHADOW_SIZE * 2) * scale as usize * 1 * scale as usize * 4;
         let mut deco_shm_file_path_cstr = c"/peridot-sprite-atlas-visualizer-shell_deco_buf_XXXXXX"
             .to_owned()
             .into_bytes_with_nul();
-        let deco_shm = 'try_shm_random_name: {
+        self.deco_shm = 'try_shm_random_name: {
             // random name gen: https://wayland-book.com/surfaces/shared-memory.html
             for _ in 0..100 {
                 let mut ts = core::mem::MaybeUninit::uninit();
@@ -656,60 +752,13 @@ impl ClientDecorationResources {
             tracing::error!("shm already exists(try limit reached)");
             std::process::abort();
         };
-        if let Err(e) = deco_shm.truncate(shm_size as _) {
+        if let Err(e) = self.deco_shm.truncate(self.shm_size as _) {
             tracing::error!(reason = ?e, "Failed to set deco shm file size");
             std::process::abort();
         }
-        let deco_shm_mapped = deco_shm
-            .mmap_random(
-                0..shm_size,
-                MemoryProtectionFlags::READ | MemoryProtectionFlags::WRITE,
-                MemoryMapFlags::SHARED,
-            )
-            .unwrap();
-        unsafe {
-            for y in 0..(Self::SHADOW_SIZE * 2) * scale as usize {
-                for x in 0..(Self::SHADOW_SIZE * 2) * scale as usize {
-                    let (x1, y1) = (
-                        ((Self::SHADOW_SIZE * 2) * scale as usize - x) as f32,
-                        ((Self::SHADOW_SIZE * 2) * scale as usize - y) as f32,
-                    );
-                    let d = (x1 * x1 + y1 * y1).sqrt();
-                    deco_shm_mapped
-                        .ptr_of::<[u8; 4]>()
-                        .add(x + y * (Self::SHADOW_SIZE * 2) * scale as usize)
-                        .write([
-                            0,
-                            0,
-                            0,
-                            (255.0
-                                * (1.0 - d / ((Self::SHADOW_SIZE as f32 * 2.0) * scale as f32))
-                                    .clamp(0.0, 1.0)
-                                    .powf(2.0)) as _,
-                        ]);
-                }
-            }
-            for y in 0..scale as usize {
-                for x in 0..(Self::SHADOW_SIZE * 2) * scale as usize {
-                    deco_shm_mapped
-                        .ptr()
-                        .byte_add(vertical_shadow_start_bytes)
-                        .cast::<[u8; 4]>()
-                        .add(x + y * (Self::SHADOW_SIZE * 2) * scale as usize)
-                        .write([
-                            0,
-                            0,
-                            0,
-                            (255.0
-                                * (x as f32 / ((Self::SHADOW_SIZE as f32 * 2.0) * scale as f32))
-                                    .powf(2.0)) as _,
-                        ]);
-                }
-            }
-        }
 
         let deco_shm_pool = unsafe { self.shm.as_ref() }
-            .create_pool(&deco_shm, shm_size as _)
+            .create_pool(&self.deco_shm, self.shm_size as _)
             .unwrap();
         self.shadow_corner_buf = deco_shm_pool
             .create_buffer(
@@ -723,7 +772,7 @@ impl ClientDecorationResources {
             .unwrap();
         self.shadow_straight_buf = deco_shm_pool
             .create_buffer(
-                vertical_shadow_start_bytes as _,
+                self.straight_shadow_start_bytes as _,
                 (Self::SHADOW_SIZE * 2) as i32 * scale,
                 1 * scale,
                 (Self::SHADOW_SIZE * 2) as i32 * scale * 4,
@@ -731,10 +780,7 @@ impl ClientDecorationResources {
             )
             .unwrap()
             .unwrap();
-        self.show();
-    }
 
-    pub fn show(&self) {
         unsafe { self.shadow_lt_surface.as_ref() }
             .attach(Some(unsafe { self.shadow_corner_buf.as_ref() }), 0, 0)
             .unwrap();
@@ -771,6 +817,100 @@ impl ClientDecorationResources {
             .unwrap();
         unsafe { self.shadow_bottom_surface.as_ref() }
             .attach(Some(unsafe { self.shadow_straight_buf.as_ref() }), 0, 0)
+            .unwrap();
+        unsafe { self.shadow_bottom_surface.as_ref() }
+            .commit()
+            .unwrap();
+    }
+
+    pub fn show(&self) {
+        let deco_shm_mapped = self
+            .deco_shm
+            .mmap_random(
+                0..self.shm_size,
+                MemoryProtectionFlags::READ | MemoryProtectionFlags::WRITE,
+                MemoryMapFlags::SHARED,
+            )
+            .unwrap();
+        unsafe {
+            for y in 0..(Self::SHADOW_SIZE * 2) * self.scale as usize {
+                for x in 0..(Self::SHADOW_SIZE * 2) * self.scale as usize {
+                    let (x1, y1) = (
+                        ((Self::SHADOW_SIZE * 2) * self.scale as usize - x) as f32,
+                        ((Self::SHADOW_SIZE * 2) * self.scale as usize - y) as f32,
+                    );
+                    let d = (x1 * x1 + y1 * y1).sqrt();
+                    deco_shm_mapped
+                        .ptr_of::<[u8; 4]>()
+                        .add(x + y * (Self::SHADOW_SIZE * 2) * self.scale as usize)
+                        .write([
+                            0,
+                            0,
+                            0,
+                            (255.0
+                                * (1.0
+                                    - d / ((Self::SHADOW_SIZE as f32 * 2.0) * self.scale as f32))
+                                    .clamp(0.0, 1.0)
+                                    .powf(2.0)) as _,
+                        ]);
+                }
+            }
+            for y in 0..self.scale as usize {
+                for x in 0..(Self::SHADOW_SIZE * 2) * self.scale as usize {
+                    deco_shm_mapped
+                        .ptr()
+                        .byte_add(self.straight_shadow_start_bytes)
+                        .cast::<[u8; 4]>()
+                        .add(x + y * (Self::SHADOW_SIZE * 2) * self.scale as usize)
+                        .write([
+                            0,
+                            0,
+                            0,
+                            (255.0
+                                * (x as f32
+                                    / ((Self::SHADOW_SIZE as f32 * 2.0) * self.scale as f32))
+                                    .powf(2.0)) as _,
+                        ]);
+                }
+            }
+        }
+
+        unsafe { self.shadow_lt_surface.as_ref() }
+            .damage(0, 0, i32::MAX, i32::MAX)
+            .unwrap();
+        unsafe { self.shadow_lt_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_lb_surface.as_ref() }
+            .damage(0, 0, i32::MAX, i32::MAX)
+            .unwrap();
+        unsafe { self.shadow_lb_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_rb_surface.as_ref() }
+            .damage(0, 0, i32::MAX, i32::MAX)
+            .unwrap();
+        unsafe { self.shadow_rb_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_rt_surface.as_ref() }
+            .damage(0, 0, i32::MAX, i32::MAX)
+            .unwrap();
+        unsafe { self.shadow_rt_surface.as_ref() }.commit().unwrap();
+        unsafe { self.shadow_left_surface.as_ref() }
+            .damage(0, 0, i32::MAX, i32::MAX)
+            .unwrap();
+        unsafe { self.shadow_left_surface.as_ref() }
+            .commit()
+            .unwrap();
+        unsafe { self.shadow_right_surface.as_ref() }
+            .damage(0, 0, i32::MAX, i32::MAX)
+            .unwrap();
+        unsafe { self.shadow_right_surface.as_ref() }
+            .commit()
+            .unwrap();
+        unsafe { self.shadow_top_surface.as_ref() }
+            .damage(0, 0, i32::MAX, i32::MAX)
+            .unwrap();
+        unsafe { self.shadow_top_surface.as_ref() }
+            .commit()
+            .unwrap();
+        unsafe { self.shadow_bottom_surface.as_ref() }
+            .damage(0, 0, i32::MAX, i32::MAX)
             .unwrap();
         unsafe { self.shadow_bottom_surface.as_ref() }
             .commit()
@@ -778,42 +918,95 @@ impl ClientDecorationResources {
     }
 
     pub fn hide(&self) {
+        let deco_shm_mapped = self
+            .deco_shm
+            .mmap_random(
+                0..self.shm_size,
+                MemoryProtectionFlags::READ | MemoryProtectionFlags::WRITE,
+                MemoryMapFlags::SHARED,
+            )
+            .unwrap();
+        unsafe {
+            for y in 0..(Self::SHADOW_SIZE * 2) * self.scale as usize {
+                for x in 0..(Self::SHADOW_SIZE * 2) * self.scale as usize {
+                    let (x1, y1) = (
+                        ((Self::SHADOW_SIZE * 2) * self.scale as usize - x) as f32,
+                        ((Self::SHADOW_SIZE * 2) * self.scale as usize - y) as f32,
+                    );
+                    let d = (x1 * x1 + y1 * y1).sqrt();
+                    deco_shm_mapped
+                        .ptr_of::<[u8; 4]>()
+                        .add(x + y * (Self::SHADOW_SIZE * 2) * self.scale as usize)
+                        .write([
+                            0,
+                            0,
+                            0,
+                            (255.0
+                                * 0.5
+                                * (1.0
+                                    - d / ((Self::SHADOW_SIZE as f32 * 2.0) * self.scale as f32))
+                                    .clamp(0.0, 1.0)
+                                    .powf(2.0)) as _,
+                        ]);
+                }
+            }
+            for y in 0..self.scale as usize {
+                for x in 0..(Self::SHADOW_SIZE * 2) * self.scale as usize {
+                    deco_shm_mapped
+                        .ptr()
+                        .byte_add(self.straight_shadow_start_bytes)
+                        .cast::<[u8; 4]>()
+                        .add(x + y * (Self::SHADOW_SIZE * 2) * self.scale as usize)
+                        .write([
+                            0,
+                            0,
+                            0,
+                            (255.0
+                                * 0.5
+                                * (x as f32
+                                    / ((Self::SHADOW_SIZE as f32 * 2.0) * self.scale as f32))
+                                    .powf(2.0)) as _,
+                        ]);
+                }
+            }
+        }
+
         unsafe { self.shadow_lt_surface.as_ref() }
-            .attach(None, 0, 0)
+            .damage(0, 0, i32::MAX, i32::MAX)
             .unwrap();
         unsafe { self.shadow_lt_surface.as_ref() }.commit().unwrap();
         unsafe { self.shadow_lb_surface.as_ref() }
-            .attach(None, 0, 0)
+            .damage(0, 0, i32::MAX, i32::MAX)
             .unwrap();
         unsafe { self.shadow_lb_surface.as_ref() }.commit().unwrap();
         unsafe { self.shadow_rb_surface.as_ref() }
-            .attach(None, 0, 0)
+            .damage(0, 0, i32::MAX, i32::MAX)
             .unwrap();
         unsafe { self.shadow_rb_surface.as_ref() }.commit().unwrap();
         unsafe { self.shadow_rt_surface.as_ref() }
-            .attach(None, 0, 0)
+            .damage(0, 0, i32::MAX, i32::MAX)
             .unwrap();
         unsafe { self.shadow_rt_surface.as_ref() }.commit().unwrap();
         unsafe { self.shadow_left_surface.as_ref() }
-            .attach(None, 0, 0)
+            .damage(0, 0, i32::MAX, i32::MAX)
             .unwrap();
         unsafe { self.shadow_left_surface.as_ref() }
             .commit()
             .unwrap();
         unsafe { self.shadow_right_surface.as_ref() }
-            .attach(None, 0, 0)
+            .damage(0, 0, i32::MAX, i32::MAX)
             .unwrap();
         unsafe { self.shadow_right_surface.as_ref() }
             .commit()
             .unwrap();
         unsafe { self.shadow_top_surface.as_ref() }
-            .attach(None, 0, 0)
+            .damage(0, 0, i32::MAX, i32::MAX)
             .unwrap();
         unsafe { self.shadow_top_surface.as_ref() }
             .commit()
             .unwrap();
         unsafe { self.shadow_bottom_surface.as_ref() }
-            .attach(None, 0, 0)
+            .damage(0, 0, i32::MAX, i32::MAX)
             .unwrap();
         unsafe { self.shadow_bottom_surface.as_ref() }
             .commit()
@@ -1302,12 +1495,17 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             ui_scale_factor: 2.0,
             pointer_on_surface: PointerOnSurface::None,
             main_surface_proxy_ptr: main_surface.as_raw() as _,
+            xdg_surface_proxy_ptr: xdg_surface.as_raw() as _,
             xdg_toplevel_proxy_ptr: xdg_toplevel.as_raw() as _,
             primary_seat_ptr: seat.as_raw() as _,
             client_decoration: client_decoration_resources,
             pointer_input_manager,
             base_system_ptr: base_sys,
             cursor_shape_device: cursor_shape_device.as_raw() as _,
+            pointer_last_surface_pos: (
+                wl::Fixed::from_f32_lossy(0.0),
+                wl::Fixed::from_f32_lossy(0.0),
+            ),
         }));
 
         if let Err(e) = pointer.add_listener(shell_event_handler.get_mut()) {
@@ -1499,12 +1697,14 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
         self.frame_callback.set(next_callback.unwrap());
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(name = "AppShell::post_configure", skip(self))]
     pub fn post_configure(&self, serial: u32) {
-        tracing::trace!("ToplevelWindowSurfaceConfigure");
-
         if let Err(e) = unsafe { self.xdg_surface.as_ref() }.ack_configure(serial) {
             tracing::warn!(reason = ?e, "Failed to ack configure");
+        }
+
+        if let Err(e) = unsafe { self.content_surface.as_ref() }.commit() {
+            tracing::warn!(reason = ?e, "Failed to commit content surface");
         }
     }
 

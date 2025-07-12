@@ -56,12 +56,9 @@ use text::TextLayout;
 use trigger_cell::TriggerCell;
 
 pub enum AppEvent {
-    ToplevelWindowConfigure {
+    ToplevelWindowNewSize {
         width: u32,
         height: u32,
-    },
-    ToplevelWindowSurfaceConfigure {
-        serial: u32,
     },
     ToplevelWindowClose,
     ToplevelWindowFrameTiming,
@@ -4473,7 +4470,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     events.push(AppEvent::ToplevelWindowFrameTiming);
 
     let t = std::time::Instant::now();
-    let mut frame_resize_request = None;
     let mut last_pointer_pos = (0.0f32, 0.0f32);
     let mut last_composite_render_instructions = CompositeRenderingData {
         instructions: Vec::new(),
@@ -5428,170 +5424,183 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
 
                     app_shell.request_next_frame();
                 }
-                AppEvent::ToplevelWindowConfigure { width, height } => {
-                    tracing::trace!(width, height, "ToplevelWindowConfigure");
-                    frame_resize_request = Some((width, height));
-                }
-                AppEvent::ToplevelWindowSurfaceConfigure { serial } => {
-                    if let Some((w, h)) = frame_resize_request.take() {
-                        let pxw = (w as f32 * app_shell.ui_scale_factor()) as u32;
-                        let pxh = (h as f32 * app_shell.ui_scale_factor()) as u32;
-                        if pxw != sc.size.width || pxh != sc.size.height {
-                            tracing::trace!(w, h, last_rendering, "frame resize");
+                AppEvent::ToplevelWindowNewSize { width, height } => {
+                    let pxw = (width as f32 * app_shell.ui_scale_factor()) as u32;
+                    let pxh = (height as f32 * app_shell.ui_scale_factor()) as u32;
+                    if pxw != sc.size.width || pxh != sc.size.height {
+                        tracing::trace!(width, height, last_rendering, "frame resize");
 
-                            client_size.set((w as f32, h as f32));
+                        client_size.set((width as f32, height as f32));
 
-                            if last_rendering {
-                                last_render_command_fence.wait().unwrap();
-                                last_render_command_fence.reset().unwrap();
-                                last_rendering = false;
-                            }
+                        if last_rendering {
+                            last_render_command_fence.wait().unwrap();
+                            last_render_command_fence.reset().unwrap();
+                            last_rendering = false;
+                        }
 
-                            unsafe {
-                                main_cp.reset(br::CommandPoolResetFlags::EMPTY).unwrap();
-                            }
-                            main_cb_invalid = true;
+                        unsafe {
+                            main_cp.reset(br::CommandPoolResetFlags::EMPTY).unwrap();
+                        }
+                        main_cb_invalid = true;
 
-                            sc.resize(br::Extent2D {
-                                width: pxw,
-                                height: pxh,
-                            });
+                        sc.resize(br::Extent2D {
+                            width: pxw,
+                            height: pxh,
+                        });
 
-                            main_grabbed_fbs = sc
-                                .backbuffer_views()
-                                .map(|bb| {
-                                    br::FramebufferObject::new(
-                                        app_system.subsystem,
-                                        &br::FramebufferCreateInfo::new(
-                                            &main_rp_grabbed,
-                                            &[bb.as_transparent_ref()],
-                                            sc.size.width,
-                                            sc.size.height,
-                                        ),
-                                    )
-                                    .unwrap()
-                                })
-                                .collect::<Vec<_>>();
-                            main_final_fbs = sc
-                                .backbuffer_views()
-                                .map(|bb| {
-                                    br::FramebufferObject::new(
-                                        app_system.subsystem,
-                                        &br::FramebufferCreateInfo::new(
-                                            &main_rp_final,
-                                            &[bb.as_transparent_ref()],
-                                            sc.size.width,
-                                            sc.size.height,
-                                        ),
-                                    )
-                                    .unwrap()
-                                })
-                                .collect::<Vec<_>>();
-                            main_continue_grabbed_fbs = sc
-                                .backbuffer_views()
-                                .map(|bb| {
-                                    br::FramebufferObject::new(
-                                        app_system.subsystem,
-                                        &br::FramebufferCreateInfo::new(
-                                            &main_rp_continue_grabbed,
-                                            &[bb.as_transparent_ref()],
-                                            sc.size.width,
-                                            sc.size.height,
-                                        ),
-                                    )
-                                    .unwrap()
-                                })
-                                .collect::<Vec<_>>();
-                            main_continue_final_fbs = sc
-                                .backbuffer_views()
-                                .map(|bb| {
-                                    br::FramebufferObject::new(
-                                        app_system.subsystem,
-                                        &br::FramebufferCreateInfo::new(
-                                            &main_rp_continue_final,
-                                            &[bb.as_transparent_ref()],
-                                            sc.size.width,
-                                            sc.size.height,
-                                        ),
-                                    )
-                                    .unwrap()
-                                })
-                                .collect::<Vec<_>>();
-
-                            composite_backdrop_buffers_invalidated = true;
-
-                            drop(composite_grab_buffer);
-                            drop(composite_grab_buffer_memory);
-                            let mut composite_grab_buffer1 = br::ImageObject::new(
-                                app_system.subsystem,
-                                &br::ImageCreateInfo::new(sc.size, sc.color_format())
-                                    .sampled()
-                                    .transfer_dest(),
-                            )
-                            .unwrap();
-                            composite_grab_buffer_memory = app_system
-                                .alloc_device_local_memory_for_requirements(
-                                    &composite_grab_buffer1.requirements(),
-                                );
-                            composite_grab_buffer1
-                                .bind(&composite_grab_buffer_memory, 0)
-                                .unwrap();
-                            composite_grab_buffer = br::ImageViewBuilder::new(
-                                composite_grab_buffer1,
-                                br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
-                            )
-                            .create()
-                            .unwrap();
-
-                            blur_upsample_pass_fixed_fbs.clear();
-                            blur_downsample_pass_fbs.clear();
-                            blur_temporal_buffers.clear();
-                            drop(blur_temporal_buffer_memory);
-                            let mut resources_offsets = Vec::with_capacity(2);
-                            let mut top = 0;
-                            let mut memory_index_mask = !0u32;
-                            for lv in 0..2 {
-                                let r = br::ImageObject::new(
+                        main_grabbed_fbs = sc
+                            .backbuffer_views()
+                            .map(|bb| {
+                                br::FramebufferObject::new(
                                     app_system.subsystem,
-                                    &br::ImageCreateInfo::new(
-                                        br::Extent2D {
-                                            width: sc.size.width >> (lv + 1),
-                                            height: sc.size.height >> (lv + 1),
-                                        },
-                                        sc.color_format(),
-                                    )
-                                    .sampled()
-                                    .as_color_attachment(),
+                                    &br::FramebufferCreateInfo::new(
+                                        &main_rp_grabbed,
+                                        &[bb.as_transparent_ref()],
+                                        sc.size.width,
+                                        sc.size.height,
+                                    ),
                                 )
-                                .unwrap();
-                                let req = r.requirements();
-                                assert!(req.alignment.is_power_of_two());
-                                let offset = (top + req.alignment - 1) & !(req.alignment - 1);
+                                .unwrap()
+                            })
+                            .collect::<Vec<_>>();
+                        main_final_fbs = sc
+                            .backbuffer_views()
+                            .map(|bb| {
+                                br::FramebufferObject::new(
+                                    app_system.subsystem,
+                                    &br::FramebufferCreateInfo::new(
+                                        &main_rp_final,
+                                        &[bb.as_transparent_ref()],
+                                        sc.size.width,
+                                        sc.size.height,
+                                    ),
+                                )
+                                .unwrap()
+                            })
+                            .collect::<Vec<_>>();
+                        main_continue_grabbed_fbs = sc
+                            .backbuffer_views()
+                            .map(|bb| {
+                                br::FramebufferObject::new(
+                                    app_system.subsystem,
+                                    &br::FramebufferCreateInfo::new(
+                                        &main_rp_continue_grabbed,
+                                        &[bb.as_transparent_ref()],
+                                        sc.size.width,
+                                        sc.size.height,
+                                    ),
+                                )
+                                .unwrap()
+                            })
+                            .collect::<Vec<_>>();
+                        main_continue_final_fbs = sc
+                            .backbuffer_views()
+                            .map(|bb| {
+                                br::FramebufferObject::new(
+                                    app_system.subsystem,
+                                    &br::FramebufferCreateInfo::new(
+                                        &main_rp_continue_final,
+                                        &[bb.as_transparent_ref()],
+                                        sc.size.width,
+                                        sc.size.height,
+                                    ),
+                                )
+                                .unwrap()
+                            })
+                            .collect::<Vec<_>>();
 
-                                top = offset + req.size;
-                                memory_index_mask &= req.memoryTypeBits;
-                                resources_offsets.push((r, offset));
-                            }
-                            blur_temporal_buffer_memory =
-                                app_system.alloc_device_local_memory(top, memory_index_mask);
-                            for (mut r, o) in resources_offsets {
-                                r.bind(&blur_temporal_buffer_memory, o as _).unwrap();
+                        composite_backdrop_buffers_invalidated = true;
 
-                                blur_temporal_buffers.push(
-                                    br::ImageViewBuilder::new(
-                                        r,
-                                        br::ImageSubresourceRange::new(
-                                            br::AspectMask::COLOR,
-                                            0..1,
-                                            0..1,
-                                        ),
-                                    )
-                                    .create()
-                                    .unwrap(),
-                                );
-                            }
-                            blur_downsample_pass_fbs.extend(
-                                blur_temporal_buffers.iter().enumerate().map(|(lv, b)| {
+                        drop(composite_grab_buffer);
+                        drop(composite_grab_buffer_memory);
+                        let mut composite_grab_buffer1 = br::ImageObject::new(
+                            app_system.subsystem,
+                            &br::ImageCreateInfo::new(sc.size, sc.color_format())
+                                .sampled()
+                                .transfer_dest(),
+                        )
+                        .unwrap();
+                        composite_grab_buffer_memory = app_system
+                            .alloc_device_local_memory_for_requirements(
+                                &composite_grab_buffer1.requirements(),
+                            );
+                        composite_grab_buffer1
+                            .bind(&composite_grab_buffer_memory, 0)
+                            .unwrap();
+                        composite_grab_buffer = br::ImageViewBuilder::new(
+                            composite_grab_buffer1,
+                            br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+                        )
+                        .create()
+                        .unwrap();
+
+                        blur_upsample_pass_fixed_fbs.clear();
+                        blur_downsample_pass_fbs.clear();
+                        blur_temporal_buffers.clear();
+                        drop(blur_temporal_buffer_memory);
+                        let mut resources_offsets = Vec::with_capacity(2);
+                        let mut top = 0;
+                        let mut memory_index_mask = !0u32;
+                        for lv in 0..2 {
+                            let r = br::ImageObject::new(
+                                app_system.subsystem,
+                                &br::ImageCreateInfo::new(
+                                    br::Extent2D {
+                                        width: sc.size.width >> (lv + 1),
+                                        height: sc.size.height >> (lv + 1),
+                                    },
+                                    sc.color_format(),
+                                )
+                                .sampled()
+                                .as_color_attachment(),
+                            )
+                            .unwrap();
+                            let req = r.requirements();
+                            assert!(req.alignment.is_power_of_two());
+                            let offset = (top + req.alignment - 1) & !(req.alignment - 1);
+
+                            top = offset + req.size;
+                            memory_index_mask &= req.memoryTypeBits;
+                            resources_offsets.push((r, offset));
+                        }
+                        blur_temporal_buffer_memory =
+                            app_system.alloc_device_local_memory(top, memory_index_mask);
+                        for (mut r, o) in resources_offsets {
+                            r.bind(&blur_temporal_buffer_memory, o as _).unwrap();
+
+                            blur_temporal_buffers.push(
+                                br::ImageViewBuilder::new(
+                                    r,
+                                    br::ImageSubresourceRange::new(
+                                        br::AspectMask::COLOR,
+                                        0..1,
+                                        0..1,
+                                    ),
+                                )
+                                .create()
+                                .unwrap(),
+                            );
+                        }
+                        blur_downsample_pass_fbs.extend(
+                            blur_temporal_buffers.iter().enumerate().map(|(lv, b)| {
+                                br::FramebufferObject::new(
+                                    app_system.subsystem,
+                                    &br::FramebufferCreateInfo::new(
+                                        &composite_backdrop_blur_rp,
+                                        &[b.as_transparent_ref()],
+                                        sc.size.width >> (lv + 1),
+                                        sc.size.height >> (lv + 1),
+                                    ),
+                                )
+                                .unwrap()
+                            }),
+                        );
+                        blur_upsample_pass_fixed_fbs.extend(
+                            blur_temporal_buffers
+                                .iter()
+                                .take(blur_temporal_buffers.len() - 1)
+                                .enumerate()
+                                .map(|(lv, b)| {
                                     br::FramebufferObject::new(
                                         app_system.subsystem,
                                         &br::FramebufferCreateInfo::new(
@@ -5603,316 +5612,287 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                     )
                                     .unwrap()
                                 }),
-                            );
-                            blur_upsample_pass_fixed_fbs.extend(
-                                blur_temporal_buffers
-                                    .iter()
-                                    .take(blur_temporal_buffers.len() - 1)
-                                    .enumerate()
-                                    .map(|(lv, b)| {
-                                        br::FramebufferObject::new(
-                                            app_system.subsystem,
-                                            &br::FramebufferCreateInfo::new(
-                                                &composite_backdrop_blur_rp,
-                                                &[b.as_transparent_ref()],
-                                                sc.size.width >> (lv + 1),
-                                                sc.size.height >> (lv + 1),
-                                            ),
-                                        )
-                                        .unwrap()
-                                    }),
-                            );
+                        );
 
-                            let mut descriptor_writes =
-                                vec![blur_fixed_descriptors[0].binding_at(0).write(
-                                    br::DescriptorContents::CombinedImageSampler(vec![
+                        let mut descriptor_writes =
+                            vec![blur_fixed_descriptors[0].binding_at(0).write(
+                                br::DescriptorContents::CombinedImageSampler(vec![
                                     br::DescriptorImageInfo::new(
                                         &composite_grab_buffer,
                                         br::ImageLayout::ShaderReadOnlyOpt,
                                     )
                                     .with_sampler(&composite_sampler),
                                 ]),
-                                )];
-                            descriptor_writes.extend((0..BLUR_SAMPLE_STEPS).map(|n| {
-                                blur_fixed_descriptors[n + 1].binding_at(0).write(
-                                    br::DescriptorContents::CombinedImageSampler(vec![
-                                        br::DescriptorImageInfo::new(
-                                            &blur_temporal_buffers[n],
-                                            br::ImageLayout::ShaderReadOnlyOpt,
-                                        )
-                                        .with_sampler(&composite_sampler),
-                                    ]),
-                                )
-                            }));
-                            app_system
-                                .subsystem
-                                .update_descriptor_sets(&descriptor_writes, &[]);
+                            )];
+                        descriptor_writes.extend((0..BLUR_SAMPLE_STEPS).map(|n| {
+                            blur_fixed_descriptors[n + 1].binding_at(0).write(
+                                br::DescriptorContents::CombinedImageSampler(vec![
+                                    br::DescriptorImageInfo::new(
+                                        &blur_temporal_buffers[n],
+                                        br::ImageLayout::ShaderReadOnlyOpt,
+                                    )
+                                    .with_sampler(&composite_sampler),
+                                ]),
+                            )
+                        }));
+                        app_system
+                            .subsystem
+                            .update_descriptor_sets(&descriptor_writes, &[]);
 
-                            let screen_viewport = [sc
+                        let screen_viewport = [sc
+                            .size
+                            .into_rect(br::Offset2D::ZERO)
+                            .make_viewport(0.0..1.0)];
+                        let screen_scissor = [sc.size.into_rect(br::Offset2D::ZERO)];
+                        let screen_viewport_state = br::PipelineViewportStateCreateInfo::new_array(
+                            &screen_viewport,
+                            &screen_scissor,
+                        );
+                        let [
+                            composite_pipeline_grabbed1,
+                            composite_pipeline_final1,
+                            composite_pipeline_continue_grabbed1,
+                            composite_pipeline_continue_final1,
+                        ] = app_system
+                            .create_graphics_pipelines_array(&[
+                                br::GraphicsPipelineCreateInfo::new(
+                                    &composite_pipeline_layout,
+                                    main_rp_grabbed.subpass(0),
+                                    &composite_shader_stages,
+                                    &composite_vinput,
+                                    &composite_ia_state,
+                                    &screen_viewport_state,
+                                    &composite_raster_state,
+                                    &composite_blend_state,
+                                )
+                                .set_multisample_state(MS_STATE_EMPTY),
+                                br::GraphicsPipelineCreateInfo::new(
+                                    &composite_pipeline_layout,
+                                    main_rp_final.subpass(0),
+                                    &composite_shader_stages,
+                                    &composite_vinput,
+                                    &composite_ia_state,
+                                    &screen_viewport_state,
+                                    &composite_raster_state,
+                                    &composite_blend_state,
+                                )
+                                .set_multisample_state(MS_STATE_EMPTY),
+                                br::GraphicsPipelineCreateInfo::new(
+                                    &composite_pipeline_layout,
+                                    main_rp_continue_grabbed.subpass(0),
+                                    &composite_shader_stages,
+                                    &composite_vinput,
+                                    &composite_ia_state,
+                                    &screen_viewport_state,
+                                    &composite_raster_state,
+                                    &composite_blend_state,
+                                )
+                                .set_multisample_state(MS_STATE_EMPTY),
+                                br::GraphicsPipelineCreateInfo::new(
+                                    &composite_pipeline_layout,
+                                    main_rp_continue_final.subpass(0),
+                                    &composite_shader_stages,
+                                    &composite_vinput,
+                                    &composite_ia_state,
+                                    &screen_viewport_state,
+                                    &composite_raster_state,
+                                    &composite_blend_state,
+                                )
+                                .set_multisample_state(MS_STATE_EMPTY),
+                            ])
+                            .unwrap();
+                        composite_pipeline_grabbed = composite_pipeline_grabbed1;
+                        composite_pipeline_final = composite_pipeline_final1;
+                        composite_pipeline_continue_grabbed = composite_pipeline_continue_grabbed1;
+                        composite_pipeline_continue_final = composite_pipeline_continue_final1;
+
+                        drop(blur_upsample_pipelines);
+                        drop(blur_downsample_pipelines);
+                        let blur_sample_viewport_scissors = (0..BLUR_SAMPLE_STEPS + 1)
+                            .map(|lv| {
+                                let size = br::Extent2D {
+                                    width: sc.size.width >> lv,
+                                    height: sc.size.height >> lv,
+                                };
+
+                                (
+                                    [size.into_rect(br::Offset2D::ZERO).make_viewport(0.0..1.0)],
+                                    [size.into_rect(br::Offset2D::ZERO)],
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        let blur_sample_viewport_states = blur_sample_viewport_scissors
+                            .iter()
+                            .map(|(vp, sc)| br::PipelineViewportStateCreateInfo::new(vp, sc))
+                            .collect::<Vec<_>>();
+                        blur_downsample_pipelines = app_system
+                            .subsystem
+                            .create_graphics_pipelines(
+                                &blur_sample_viewport_states
+                                    .iter()
+                                    .skip(1)
+                                    .map(|vp_state| {
+                                        br::GraphicsPipelineCreateInfo::new(
+                                            &blur_pipeline_layout,
+                                            composite_backdrop_blur_rp.subpass(0),
+                                            &composite_backdrop_blur_downsample_stages,
+                                            VI_STATE_EMPTY,
+                                            IA_STATE_TRILIST,
+                                            vp_state,
+                                            RASTER_STATE_DEFAULT_FILL_NOCULL,
+                                            BLEND_STATE_SINGLE_NONE,
+                                        )
+                                        .set_multisample_state(MS_STATE_EMPTY)
+                                    })
+                                    .collect::<Vec<_>>(),
+                            )
+                            .unwrap();
+                        blur_upsample_pipelines = app_system
+                            .subsystem
+                            .create_graphics_pipelines(
+                                &blur_sample_viewport_states
+                                    .iter()
+                                    .take(blur_sample_viewport_states.len() - 1)
+                                    .map(|vp_state| {
+                                        br::GraphicsPipelineCreateInfo::new(
+                                            &blur_pipeline_layout,
+                                            composite_backdrop_blur_rp.subpass(0),
+                                            &composite_backdrop_blur_upsample_stages,
+                                            VI_STATE_EMPTY,
+                                            IA_STATE_TRILIST,
+                                            vp_state,
+                                            RASTER_STATE_DEFAULT_FILL_NOCULL,
+                                            BLEND_STATE_SINGLE_NONE,
+                                        )
+                                        .set_multisample_state(MS_STATE_EMPTY)
+                                    })
+                                    .collect::<Vec<_>>(),
+                            )
+                            .unwrap();
+
+                        if corner_cutout_render_pipeline.is_some() {
+                            let vsh =
+                                app_system.require_shader("resources/corner_cutout_placement.vert");
+                            let fsh = app_system.require_shader("resources/blit_alphamask.frag");
+                            let vsh_param = CornerCutoutVshConstants {
+                                width_vp: 32.0 / width as f32,
+                                height_vp: 32.0 / height as f32,
+                                uv_scale_x: corner_cutout_atlas_rect.as_ref().unwrap().width()
+                                    as f32
+                                    / app_system.mask_atlas_size() as f32,
+                                uv_scale_y: corner_cutout_atlas_rect.as_ref().unwrap().height()
+                                    as f32
+                                    / app_system.mask_atlas_size() as f32,
+                                uv_trans_x: corner_cutout_atlas_rect.as_ref().unwrap().left as f32
+                                    / app_system.mask_atlas_size() as f32,
+                                uv_trans_y: corner_cutout_atlas_rect.as_ref().unwrap().top as f32
+                                    / app_system.mask_atlas_size() as f32,
+                            };
+                            let vsh_spec = br::SpecializationInfo::new(&vsh_param);
+                            let shader_stages = [
+                                vsh.on_stage(br::ShaderStage::Vertex, c"main")
+                                    .with_specialization_info(&vsh_spec),
+                                fsh.on_stage(br::ShaderStage::Fragment, c"main"),
+                            ];
+                            let vi_state: br::PipelineVertexInputStateCreateInfo<'static> =
+                                br::PipelineVertexInputStateCreateInfo::new(
+                                    &[const {
+                                        br::VertexInputBindingDescription::per_instance_typed::<
+                                            [[f32; 2]; 2],
+                                        >(0)
+                                    }],
+                                    &[
+                                        br::VertexInputAttributeDescription {
+                                            location: 0,
+                                            binding: 0,
+                                            format: br::vk::VK_FORMAT_R32G32_SFLOAT,
+                                            offset: 0,
+                                        },
+                                        br::VertexInputAttributeDescription {
+                                            location: 1,
+                                            binding: 0,
+                                            format: br::vk::VK_FORMAT_R32G32_SFLOAT,
+                                            offset: core::mem::size_of::<[f32; 2]>() as _,
+                                        },
+                                    ],
+                                );
+                            let viewport = [sc
                                 .size
                                 .into_rect(br::Offset2D::ZERO)
                                 .make_viewport(0.0..1.0)];
-                            let screen_scissor = [sc.size.into_rect(br::Offset2D::ZERO)];
-                            let screen_viewport_state =
-                                br::PipelineViewportStateCreateInfo::new_array(
-                                    &screen_viewport,
-                                    &screen_scissor,
-                                );
-                            let [
-                                composite_pipeline_grabbed1,
-                                composite_pipeline_final1,
-                                composite_pipeline_continue_grabbed1,
-                                composite_pipeline_continue_final1,
-                            ] = app_system
+                            let scissor = [sc.size.into_rect(br::Offset2D::ZERO)];
+                            let viewport_state =
+                                br::PipelineViewportStateCreateInfo::new_array(&viewport, &scissor);
+                            let blend_state = br::PipelineColorBlendStateCreateInfo::new(&[
+                                br::vk::VkPipelineColorBlendAttachmentState {
+                                    // simply overwrite alpha
+                                    blendEnable: true as _,
+                                    srcColorBlendFactor: br::vk::VK_BLEND_FACTOR_ZERO,
+                                    dstColorBlendFactor: br::vk::VK_BLEND_FACTOR_SRC_ALPHA,
+                                    colorBlendOp: br::vk::VK_BLEND_OP_ADD,
+                                    srcAlphaBlendFactor: br::vk::VK_BLEND_FACTOR_ONE,
+                                    dstAlphaBlendFactor: br::vk::VK_BLEND_FACTOR_ZERO,
+                                    alphaBlendOp: br::vk::VK_BLEND_OP_ADD,
+                                    colorWriteMask: br::vk::VK_COLOR_COMPONENT_A_BIT
+                                        | br::vk::VK_COLOR_COMPONENT_B_BIT
+                                        | br::vk::VK_COLOR_COMPONENT_G_BIT
+                                        | br::vk::VK_COLOR_COMPONENT_R_BIT,
+                                },
+                            ]);
+                            let [render_pipeline, render_pipeline_cont] = app_system
                                 .create_graphics_pipelines_array(&[
                                     br::GraphicsPipelineCreateInfo::new(
-                                        &composite_pipeline_layout,
-                                        main_rp_grabbed.subpass(0),
-                                        &composite_shader_stages,
-                                        &composite_vinput,
-                                        &composite_ia_state,
-                                        &screen_viewport_state,
-                                        &composite_raster_state,
-                                        &composite_blend_state,
-                                    )
-                                    .set_multisample_state(MS_STATE_EMPTY),
-                                    br::GraphicsPipelineCreateInfo::new(
-                                        &composite_pipeline_layout,
+                                        corner_cutout_render_pipeline_layout.as_ref().unwrap(),
                                         main_rp_final.subpass(0),
-                                        &composite_shader_stages,
-                                        &composite_vinput,
-                                        &composite_ia_state,
-                                        &screen_viewport_state,
-                                        &composite_raster_state,
-                                        &composite_blend_state,
+                                        &shader_stages,
+                                        &vi_state,
+                                        IA_STATE_TRISTRIP,
+                                        &viewport_state,
+                                        RASTER_STATE_DEFAULT_FILL_NOCULL,
+                                        &blend_state,
                                     )
                                     .set_multisample_state(MS_STATE_EMPTY),
                                     br::GraphicsPipelineCreateInfo::new(
-                                        &composite_pipeline_layout,
-                                        main_rp_continue_grabbed.subpass(0),
-                                        &composite_shader_stages,
-                                        &composite_vinput,
-                                        &composite_ia_state,
-                                        &screen_viewport_state,
-                                        &composite_raster_state,
-                                        &composite_blend_state,
-                                    )
-                                    .set_multisample_state(MS_STATE_EMPTY),
-                                    br::GraphicsPipelineCreateInfo::new(
-                                        &composite_pipeline_layout,
+                                        corner_cutout_render_pipeline_layout.as_ref().unwrap(),
                                         main_rp_continue_final.subpass(0),
-                                        &composite_shader_stages,
-                                        &composite_vinput,
-                                        &composite_ia_state,
-                                        &screen_viewport_state,
-                                        &composite_raster_state,
-                                        &composite_blend_state,
+                                        &shader_stages,
+                                        &vi_state,
+                                        IA_STATE_TRISTRIP,
+                                        &viewport_state,
+                                        RASTER_STATE_DEFAULT_FILL_NOCULL,
+                                        &blend_state,
                                     )
                                     .set_multisample_state(MS_STATE_EMPTY),
                                 ])
                                 .unwrap();
-                            composite_pipeline_grabbed = composite_pipeline_grabbed1;
-                            composite_pipeline_final = composite_pipeline_final1;
-                            composite_pipeline_continue_grabbed =
-                                composite_pipeline_continue_grabbed1;
-                            composite_pipeline_continue_final = composite_pipeline_continue_final1;
 
-                            drop(blur_upsample_pipelines);
-                            drop(blur_downsample_pipelines);
-                            let blur_sample_viewport_scissors = (0..BLUR_SAMPLE_STEPS + 1)
-                                .map(|lv| {
-                                    let size = br::Extent2D {
-                                        width: sc.size.width >> lv,
-                                        height: sc.size.height >> lv,
-                                    };
-
-                                    (
-                                        [size
-                                            .into_rect(br::Offset2D::ZERO)
-                                            .make_viewport(0.0..1.0)],
-                                        [size.into_rect(br::Offset2D::ZERO)],
-                                    )
-                                })
-                                .collect::<Vec<_>>();
-                            let blur_sample_viewport_states = blur_sample_viewport_scissors
-                                .iter()
-                                .map(|(vp, sc)| br::PipelineViewportStateCreateInfo::new(vp, sc))
-                                .collect::<Vec<_>>();
-                            blur_downsample_pipelines = app_system
-                                .subsystem
-                                .create_graphics_pipelines(
-                                    &blur_sample_viewport_states
-                                        .iter()
-                                        .skip(1)
-                                        .map(|vp_state| {
-                                            br::GraphicsPipelineCreateInfo::new(
-                                                &blur_pipeline_layout,
-                                                composite_backdrop_blur_rp.subpass(0),
-                                                &composite_backdrop_blur_downsample_stages,
-                                                VI_STATE_EMPTY,
-                                                IA_STATE_TRILIST,
-                                                vp_state,
-                                                RASTER_STATE_DEFAULT_FILL_NOCULL,
-                                                BLEND_STATE_SINGLE_NONE,
-                                            )
-                                            .set_multisample_state(MS_STATE_EMPTY)
-                                        })
-                                        .collect::<Vec<_>>(),
-                                )
-                                .unwrap();
-                            blur_upsample_pipelines = app_system
-                                .subsystem
-                                .create_graphics_pipelines(
-                                    &blur_sample_viewport_states
-                                        .iter()
-                                        .take(blur_sample_viewport_states.len() - 1)
-                                        .map(|vp_state| {
-                                            br::GraphicsPipelineCreateInfo::new(
-                                                &blur_pipeline_layout,
-                                                composite_backdrop_blur_rp.subpass(0),
-                                                &composite_backdrop_blur_upsample_stages,
-                                                VI_STATE_EMPTY,
-                                                IA_STATE_TRILIST,
-                                                vp_state,
-                                                RASTER_STATE_DEFAULT_FILL_NOCULL,
-                                                BLEND_STATE_SINGLE_NONE,
-                                            )
-                                            .set_multisample_state(MS_STATE_EMPTY)
-                                        })
-                                        .collect::<Vec<_>>(),
-                                )
-                                .unwrap();
-
-                            if corner_cutout_render_pipeline.is_some() {
-                                let vsh = app_system
-                                    .require_shader("resources/corner_cutout_placement.vert");
-                                let fsh =
-                                    app_system.require_shader("resources/blit_alphamask.frag");
-                                let vsh_param = CornerCutoutVshConstants {
-                                    width_vp: 32.0 / w as f32,
-                                    height_vp: 32.0 / h as f32,
-                                    uv_scale_x: corner_cutout_atlas_rect.as_ref().unwrap().width()
-                                        as f32
-                                        / app_system.mask_atlas_size() as f32,
-                                    uv_scale_y: corner_cutout_atlas_rect.as_ref().unwrap().height()
-                                        as f32
-                                        / app_system.mask_atlas_size() as f32,
-                                    uv_trans_x: corner_cutout_atlas_rect.as_ref().unwrap().left
-                                        as f32
-                                        / app_system.mask_atlas_size() as f32,
-                                    uv_trans_y: corner_cutout_atlas_rect.as_ref().unwrap().top
-                                        as f32
-                                        / app_system.mask_atlas_size() as f32,
-                                };
-                                let vsh_spec = br::SpecializationInfo::new(&vsh_param);
-                                let shader_stages = [
-                                    vsh.on_stage(br::ShaderStage::Vertex, c"main")
-                                        .with_specialization_info(&vsh_spec),
-                                    fsh.on_stage(br::ShaderStage::Fragment, c"main"),
-                                ];
-                                let vi_state: br::PipelineVertexInputStateCreateInfo<'static> =
-                                    br::PipelineVertexInputStateCreateInfo::new(
-                                        &[const {
-                                            br::VertexInputBindingDescription::per_instance_typed::<
-                                                [[f32; 2]; 2],
-                                            >(0)
-                                        }],
-                                        &[
-                                            br::VertexInputAttributeDescription {
-                                                location: 0,
-                                                binding: 0,
-                                                format: br::vk::VK_FORMAT_R32G32_SFLOAT,
-                                                offset: 0,
-                                            },
-                                            br::VertexInputAttributeDescription {
-                                                location: 1,
-                                                binding: 0,
-                                                format: br::vk::VK_FORMAT_R32G32_SFLOAT,
-                                                offset: core::mem::size_of::<[f32; 2]>() as _,
-                                            },
-                                        ],
-                                    );
-                                let viewport = [sc
-                                    .size
-                                    .into_rect(br::Offset2D::ZERO)
-                                    .make_viewport(0.0..1.0)];
-                                let scissor = [sc.size.into_rect(br::Offset2D::ZERO)];
-                                let viewport_state = br::PipelineViewportStateCreateInfo::new_array(
-                                    &viewport, &scissor,
-                                );
-                                let blend_state = br::PipelineColorBlendStateCreateInfo::new(&[
-                                    br::vk::VkPipelineColorBlendAttachmentState {
-                                        // simply overwrite alpha
-                                        blendEnable: true as _,
-                                        srcColorBlendFactor: br::vk::VK_BLEND_FACTOR_ZERO,
-                                        dstColorBlendFactor: br::vk::VK_BLEND_FACTOR_SRC_ALPHA,
-                                        colorBlendOp: br::vk::VK_BLEND_OP_ADD,
-                                        srcAlphaBlendFactor: br::vk::VK_BLEND_FACTOR_ONE,
-                                        dstAlphaBlendFactor: br::vk::VK_BLEND_FACTOR_ZERO,
-                                        alphaBlendOp: br::vk::VK_BLEND_OP_ADD,
-                                        colorWriteMask: br::vk::VK_COLOR_COMPONENT_A_BIT
-                                            | br::vk::VK_COLOR_COMPONENT_B_BIT
-                                            | br::vk::VK_COLOR_COMPONENT_G_BIT
-                                            | br::vk::VK_COLOR_COMPONENT_R_BIT,
-                                    },
-                                ]);
-                                let [render_pipeline, render_pipeline_cont] = app_system
-                                    .create_graphics_pipelines_array(&[
-                                        br::GraphicsPipelineCreateInfo::new(
-                                            corner_cutout_render_pipeline_layout.as_ref().unwrap(),
-                                            main_rp_final.subpass(0),
-                                            &shader_stages,
-                                            &vi_state,
-                                            IA_STATE_TRISTRIP,
-                                            &viewport_state,
-                                            RASTER_STATE_DEFAULT_FILL_NOCULL,
-                                            &blend_state,
-                                        )
-                                        .set_multisample_state(MS_STATE_EMPTY),
-                                        br::GraphicsPipelineCreateInfo::new(
-                                            corner_cutout_render_pipeline_layout.as_ref().unwrap(),
-                                            main_rp_continue_final.subpass(0),
-                                            &shader_stages,
-                                            &vi_state,
-                                            IA_STATE_TRISTRIP,
-                                            &viewport_state,
-                                            RASTER_STATE_DEFAULT_FILL_NOCULL,
-                                            &blend_state,
-                                        )
-                                        .set_multisample_state(MS_STATE_EMPTY),
-                                    ])
-                                    .unwrap();
-
-                                corner_cutout_render_pipeline = Some(render_pipeline);
-                                corner_cutout_render_pipeline_cont = Some(render_pipeline_cont);
-                            }
-
-                            editing_atlas_renderer.borrow_mut().recreate(
-                                &app_system.subsystem,
-                                match editing_atlas_current_bound_pipeline {
-                                    RenderPassRequirements {
-                                        continued: false,
-                                        after_operation: RenderPassAfterOperation::Grab,
-                                    } => main_rp_grabbed.subpass(0),
-                                    RenderPassRequirements {
-                                        continued: false,
-                                        after_operation: RenderPassAfterOperation::None,
-                                    } => main_rp_final.subpass(0),
-                                    RenderPassRequirements {
-                                        continued: true,
-                                        after_operation: RenderPassAfterOperation::Grab,
-                                    } => main_rp_continue_grabbed.subpass(0),
-                                    RenderPassRequirements {
-                                        continued: true,
-                                        after_operation: RenderPassAfterOperation::None,
-                                    } => main_rp_continue_final.subpass(0),
-                                },
-                                sc.size,
-                            );
+                            corner_cutout_render_pipeline = Some(render_pipeline);
+                            corner_cutout_render_pipeline_cont = Some(render_pipeline_cont);
                         }
-                    }
 
-                    app_shell.post_configure(serial);
+                        editing_atlas_renderer.borrow_mut().recreate(
+                            &app_system.subsystem,
+                            match editing_atlas_current_bound_pipeline {
+                                RenderPassRequirements {
+                                    continued: false,
+                                    after_operation: RenderPassAfterOperation::Grab,
+                                } => main_rp_grabbed.subpass(0),
+                                RenderPassRequirements {
+                                    continued: false,
+                                    after_operation: RenderPassAfterOperation::None,
+                                } => main_rp_final.subpass(0),
+                                RenderPassRequirements {
+                                    continued: true,
+                                    after_operation: RenderPassAfterOperation::Grab,
+                                } => main_rp_continue_grabbed.subpass(0),
+                                RenderPassRequirements {
+                                    continued: true,
+                                    after_operation: RenderPassAfterOperation::None,
+                                } => main_rp_continue_final.subpass(0),
+                            },
+                            sc.size,
+                        );
+                    }
                 }
                 AppEvent::MainWindowPointerMove {
                     enter_serial,

@@ -522,6 +522,20 @@ impl Surface {
     }
 
     #[inline]
+    pub fn damage(&self, x: i32, y: i32, width: i32, height: i32) -> Result<(), std::io::Error> {
+        self.0.marshal_array_flags_void(
+            2,
+            0,
+            &mut [
+                ffi::Argument { i: x },
+                ffi::Argument { i: y },
+                ffi::Argument { i: width },
+                ffi::Argument { i: height },
+            ],
+        )
+    }
+
+    #[inline]
     pub fn frame(&self) -> Result<Owned<Callback>, std::io::Error> {
         let proxy_ptr = self.0.marshal_array_flags(
             3,

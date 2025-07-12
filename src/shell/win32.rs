@@ -454,6 +454,16 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
         )
     }
 
+    pub fn client_size_pixels(&self) -> (u32, u32) {
+        let mut rc = core::mem::MaybeUninit::uninit();
+        unsafe {
+            GetClientRect(self.hwnd, rc.as_mut_ptr()).unwrap();
+        }
+        let rc = unsafe { rc.assume_init_ref() };
+
+        ((rc.right - rc.left) as _, (rc.bottom - rc.top) as _)
+    }
+
     #[tracing::instrument(skip(self))]
     pub fn flush(&mut self) {}
 

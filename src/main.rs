@@ -4702,7 +4702,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     if let Some((width, height)) = newsize_request.take() {
                         let w_dip = width as f32 / app_shell.ui_scale_factor();
                         let h_dip = height as f32 / app_shell.ui_scale_factor();
-                        tracing::trace!(width, height, last_rendering, "frame resize");
+                        tracing::trace!(width, height, "frame resize");
 
                         client_size.set((w_dip, h_dip));
 
@@ -5854,8 +5854,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         Err(e) if e == br::vk::VK_ERROR_OUT_OF_DATE_KHR => {
                             tracing::warn!("swapchain out of date");
                             // force recreate resources
-                            newsize_request =
-                                Some((client_size.get().0 as _, client_size.get().1 as _));
+                            newsize_request = Some(app_shell.client_size_pixels());
                             continue;
                         }
                         Err(e) => Err(e).unwrap(),
@@ -5887,9 +5886,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         Err(e) if e == br::vk::VK_ERROR_OUT_OF_DATE_KHR => {
                             tracing::warn!(?results, "swapchain out of date");
                             // force recreate resources
-                            newsize_request =
-                                Some((client_size.get().0 as _, client_size.get().1 as _));
-                            panic!();
+                            newsize_request = Some(app_shell.client_size_pixels());
                             continue;
                         }
                         Err(e) => Err(e).unwrap(),
@@ -5901,7 +5898,9 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     width_px,
                     height_px,
                 } => {
-                    newsize_request = Some((width_px, height_px));
+                    if sc.size.width != width_px || sc.size.height != height_px {
+                        newsize_request = Some((width_px, height_px));
+                    }
                 }
                 AppEvent::MainWindowPointerMove {
                     enter_serial,

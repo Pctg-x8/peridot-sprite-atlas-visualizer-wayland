@@ -33,14 +33,14 @@ use windows::{
                 CW_USEDEFAULT, CloseWindow, CreateWindowExW, DefWindowProcW, DestroyWindow,
                 DispatchMessageW, GWLP_USERDATA, GetClientRect, GetSystemMetrics,
                 GetWindowLongPtrW, GetWindowRect, HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON,
-                HTMINBUTTON, IDC_ARROW, IDC_SIZEWE, IDI_APPLICATION, IsWindow, LoadCursorW,
-                LoadIconW, MSG, NCCALCSIZE_PARAMS, PM_REMOVE, PeekMessageW, RegisterClassExW,
-                SM_CXSIZEFRAME, SM_CYSIZEFRAME, SW_SHOWMAXIMIZED, SW_SHOWNORMAL, SWP_FRAMECHANGED,
-                SetCursor, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
-                WINDOW_LONG_PTR_INDEX, WM_ACTIVATE, WM_DESTROY, WM_DPICHANGED, WM_LBUTTONDOWN,
-                WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN,
-                WM_NCLBUTTONUP, WM_NCMOUSEMOVE, WM_SIZE, WNDCLASS_STYLES, WNDCLASSEXW,
-                WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW,
+                HTMINBUTTON, IDC_ARROW, IDC_SIZEWE, IDI_APPLICATION, IsWindow, IsZoomed,
+                LoadCursorW, LoadIconW, MSG, NCCALCSIZE_PARAMS, PM_REMOVE, PeekMessageW,
+                RegisterClassExW, SM_CXSIZEFRAME, SM_CYSIZEFRAME, SW_SHOWMAXIMIZED, SW_SHOWNORMAL,
+                SWP_FRAMECHANGED, SetCursor, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+                TranslateMessage, WINDOW_LONG_PTR_INDEX, WM_ACTIVATE, WM_DESTROY, WM_DPICHANGED,
+                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCHITTEST,
+                WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSEMOVE, WM_SIZE, WNDCLASS_STYLES,
+                WNDCLASSEXW, WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW,
             },
         },
     },
@@ -141,6 +141,15 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
             );
         }
 
+        unsafe {
+            // 96dpi as base
+            ui_scale_factor
+                .as_ref()
+                .set(GetDpiForWindow(hwnd) as f32 / 96.0);
+
+            let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
+        }
+
         // notify frame change
         let mut rc = core::mem::MaybeUninit::uninit();
         unsafe {
@@ -156,14 +165,6 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
                 SWP_FRAMECHANGED,
             )
             .unwrap();
-        }
-
-        unsafe {
-            let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
-            // 96dpi as base
-            ui_scale_factor
-                .as_ref()
-                .set(GetDpiForWindow(hwnd) as f32 / 96.0);
         }
 
         let hm = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY) };
@@ -244,7 +245,7 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
     }
 
     #[inline(always)]
-    fn pointer_input_manager<'a>(hwnd: HWND) -> &'a UnsafeCell<PointerInputManager> {
+    fn pointer_input_manager_st<'a>(hwnd: HWND) -> &'a UnsafeCell<PointerInputManager> {
         unsafe {
             &*core::ptr::with_exposed_provenance(GetWindowLongPtrW(
                 hwnd,
@@ -322,7 +323,7 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
             let rc = unsafe { rc.assume_init_ref() };
 
             let ui_scale_factor = Self::ui_scale_factor_cell(hwnd).get();
-            let pointer_input_manager = Self::pointer_input_manager(hwnd);
+            let pointer_input_manager = Self::pointer_input_manager_st(hwnd);
             let base_sys = Self::base_sys_mut(hwnd);
 
             return match unsafe { &*pointer_input_manager.get() }.role(
@@ -351,14 +352,11 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
 
         if msg == WM_SIZE {
             let app_event_bus = Self::app_event_bus(hwnd);
-            let ui_scale_factor = Self::ui_scale_factor_cell(hwnd).get();
 
-            // この順番で送ればok(Wayland側の仕様 あれに依存するのやめたいがどうしよう)
-            app_event_bus.push(AppEvent::ToplevelWindowConfigure {
-                width: ((lparam.0 & 0xffff) as u16 as f32 / ui_scale_factor) as _,
-                height: (((lparam.0 >> 16) & 0xffff) as u16 as f32 / ui_scale_factor) as _,
+            app_event_bus.push(AppEvent::ToplevelWindowNewSize {
+                width_px: (lparam.0 & 0xffff) as u16 as _,
+                height_px: ((lparam.0 >> 16) & 0xffff) as u16 as _,
             });
-            app_event_bus.push(AppEvent::ToplevelWindowSurfaceConfigure { serial: 0 });
             return LRESULT(0);
         }
 
@@ -412,6 +410,20 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
 
     pub const fn is_floating_window(&self) -> bool {
         true
+    }
+
+    pub const fn server_side_decoration_provided(&self) -> bool {
+        // windows always providing server(system)-side decoration
+        true
+    }
+
+    #[inline]
+    pub fn is_tiled(&self) -> bool {
+        unsafe { IsZoomed(self.hwnd).as_bool() }
+    }
+
+    pub fn pointer_input_manager(&self) -> &UnsafeCell<PointerInputManager> {
+        &self.pointer_input_manager
     }
 
     pub unsafe fn create_vulkan_surface(
@@ -484,9 +496,6 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
             / self.perf_counter_freq as f64)
             .trunc() as _
     }
-
-    #[tracing::instrument(skip(self))]
-    pub fn post_configure(&self, _serial: u32) {}
 
     #[tracing::instrument(skip(self))]
     pub fn set_cursor_shape(&self, _enter_serial: u32, shape: CursorShape) {

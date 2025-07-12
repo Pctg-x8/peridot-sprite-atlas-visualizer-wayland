@@ -57,8 +57,8 @@ use trigger_cell::TriggerCell;
 
 pub enum AppEvent {
     ToplevelWindowNewSize {
-        width: u32,
-        height: u32,
+        width_px: u32,
+        height_px: u32,
     },
     ToplevelWindowClose,
     ToplevelWindowFrameTiming,
@@ -4700,27 +4700,18 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     }
 
                     if let Some((width, height)) = newsize_request.take() {
-                        let pxw = (width as f32 * app_shell.ui_scale_factor()) as u32;
-                        let pxh = (height as f32 * app_shell.ui_scale_factor()) as u32;
+                        let w_dip = width as f32 / app_shell.ui_scale_factor();
+                        let h_dip = height as f32 / app_shell.ui_scale_factor();
                         tracing::trace!(width, height, last_rendering, "frame resize");
 
-                        client_size.set((width as f32, height as f32));
-
-                        if last_rendering {
-                            last_render_command_fence.wait().unwrap();
-                            last_render_command_fence.reset().unwrap();
-                            last_rendering = false;
-                        }
+                        client_size.set((w_dip, h_dip));
 
                         unsafe {
                             main_cp.reset(br::CommandPoolResetFlags::EMPTY).unwrap();
                         }
                         main_cb_invalid = true;
 
-                        sc.resize(br::Extent2D {
-                            width: pxw,
-                            height: pxh,
-                        });
+                        sc.resize(br::Extent2D { width, height });
 
                         main_grabbed_fbs = sc
                             .backbuffer_views()
@@ -5885,18 +5876,20 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         )
                         .unwrap();
                     last_rendering = true;
+                    let mut results = [br::vk::VkResult(0)];
                     match app_system.subsystem.queue_present(&br::PresentInfo::new(
                         &[render_completion_per_backbuffer[next as usize].as_transparent_ref()],
                         &[sc.as_transparent_ref()],
                         &[next],
-                        &mut [br::vk::VkResult(0)],
+                        &mut results,
                     )) {
                         Ok(_) => (),
                         Err(e) if e == br::vk::VK_ERROR_OUT_OF_DATE_KHR => {
-                            tracing::warn!("swapchain out of date");
+                            tracing::warn!(?results, "swapchain out of date");
                             // force recreate resources
                             newsize_request =
                                 Some((client_size.get().0 as _, client_size.get().1 as _));
+                            panic!();
                             continue;
                         }
                         Err(e) => Err(e).unwrap(),
@@ -5904,10 +5897,11 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
 
                     app_shell.request_next_frame();
                 }
-                AppEvent::ToplevelWindowNewSize { width, height } => {
-                    if width as f32 != client_size.get().0 || height as f32 != client_size.get().1 {
-                        newsize_request = Some((width, height));
-                    }
+                AppEvent::ToplevelWindowNewSize {
+                    width_px,
+                    height_px,
+                } => {
+                    newsize_request = Some((width_px, height_px));
                 }
                 AppEvent::MainWindowPointerMove {
                     enter_serial,

@@ -4687,7 +4687,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     app_shell.minimize();
                 }
                 AppEvent::ToplevelWindowMaximizeRequest => {
-                    app_shell.maximize();
+                    app_shell.toggle_maximize_restore();
                 }
                 AppEvent::ToplevelWindowFrameTiming => {
                     let current_t = t.elapsed();

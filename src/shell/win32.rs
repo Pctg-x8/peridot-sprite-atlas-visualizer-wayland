@@ -32,15 +32,16 @@ use windows::{
             WindowsAndMessaging::{
                 CW_USEDEFAULT, CloseWindow, CreateWindowExW, DefWindowProcW, DestroyWindow,
                 DispatchMessageW, GWLP_USERDATA, GetClientRect, GetSystemMetrics,
-                GetWindowLongPtrW, GetWindowRect, HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON,
-                HTMINBUTTON, IDC_ARROW, IDC_SIZEWE, IDI_APPLICATION, IsWindow, IsZoomed,
+                GetWindowLongPtrW, GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION,
+                HTCLIENT, HTCLOSE, HTLEFT, HTMAXBUTTON, HTMINBUTTON, HTRIGHT, HTTOP, HTTOPLEFT,
+                HTTOPRIGHT, IDC_ARROW, IDC_SIZEWE, IDI_APPLICATION, IsWindow, IsZoomed,
                 LoadCursorW, LoadIconW, MSG, NCCALCSIZE_PARAMS, PM_REMOVE, PeekMessageW,
-                RegisterClassExW, SM_CXSIZEFRAME, SM_CYSIZEFRAME, SW_SHOWMAXIMIZED, SW_SHOWNORMAL,
-                SWP_FRAMECHANGED, SetCursor, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-                TranslateMessage, WINDOW_LONG_PTR_INDEX, WM_ACTIVATE, WM_DESTROY, WM_DPICHANGED,
-                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCHITTEST,
-                WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSEMOVE, WM_SIZE, WNDCLASS_STYLES,
-                WNDCLASSEXW, WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW,
+                RegisterClassExW, SM_CXSIZEFRAME, SM_CYSIZEFRAME, SW_RESTORE, SW_SHOWMAXIMIZED,
+                SW_SHOWNORMAL, SWP_FRAMECHANGED, SetCursor, SetWindowLongPtrW, SetWindowPos,
+                ShowWindow, TranslateMessage, WINDOW_LONG_PTR_INDEX, WM_ACTIVATE, WM_DESTROY,
+                WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE,
+                WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSEMOVE, WM_SIZE,
+                WNDCLASS_STYLES, WNDCLASSEXW, WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW,
             },
         },
     },
@@ -315,6 +316,12 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
             unsafe {
                 MapWindowPoints(None, Some(hwnd), &mut p);
             }
+            let [
+                POINT {
+                    x: pointer_x_px,
+                    y: pointer_y_px,
+                },
+            ] = p;
 
             let mut rc = core::mem::MaybeUninit::uninit();
             unsafe {
@@ -322,13 +329,28 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
             }
             let rc = unsafe { rc.assume_init_ref() };
 
+            if 0 > pointer_x_px
+                || pointer_x_px > (rc.right - rc.left)
+                || 0 > pointer_y_px
+                || pointer_y_px > (rc.bottom - rc.top)
+            {
+                // ウィンドウ範囲外はシステムにおまかせ
+                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            }
+
+            let resize_h = unsafe { GetSystemMetrics(SM_CYSIZEFRAME) };
+            if pointer_y_px < resize_h {
+                // global override
+                return LRESULT(HTTOP as _);
+            }
+
             let ui_scale_factor = Self::ui_scale_factor_cell(hwnd).get();
             let pointer_input_manager = Self::pointer_input_manager_st(hwnd);
             let base_sys = Self::base_sys_mut(hwnd);
 
             return match unsafe { &*pointer_input_manager.get() }.role(
-                p[0].x as f32 / ui_scale_factor,
-                p[0].y as f32 / ui_scale_factor,
+                pointer_x_px as f32 / ui_scale_factor,
+                pointer_y_px as f32 / ui_scale_factor,
                 (rc.right - rc.left) as f32 / ui_scale_factor,
                 (rc.bottom - rc.top) as f32 / ui_scale_factor,
                 &base_sys.hit_tree,
@@ -358,6 +380,20 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
                 height_px: ((lparam.0 >> 16) & 0xffff) as u16 as _,
             });
             return LRESULT(0);
+        }
+
+        if (msg == WM_NCMOUSEMOVE || msg == WM_NCLBUTTONDOWN || msg == WM_NCLBUTTONUP)
+            && (wparam.0 == HTTOP as _
+                || wparam.0 == HTBOTTOM as _
+                || wparam.0 == HTLEFT as _
+                || wparam.0 == HTRIGHT as _
+                || wparam.0 == HTTOPLEFT as _
+                || wparam.0 == HTTOPRIGHT as _
+                || wparam.0 == HTBOTTOMLEFT as _
+                || wparam.0 == HTBOTTOMRIGHT as _)
+        {
+            // リサイズ境界上の処理はシステムにおまかせ
+            return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
         }
 
         if (msg == WM_NCLBUTTONDOWN || msg == WM_NCLBUTTONUP) && wparam.0 == HTCAPTION as _ {
@@ -550,8 +586,12 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
     }
 
     #[inline]
-    pub fn maximize(&self) {
-        let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWMAXIMIZED) };
+    pub fn toggle_maximize_restore(&self) {
+        if self.is_tiled() {
+            let _ = unsafe { ShowWindow(self.hwnd, SW_RESTORE) };
+        } else {
+            let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWMAXIMIZED) };
+        }
     }
 
     #[inline]

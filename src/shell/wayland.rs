@@ -38,6 +38,7 @@ struct WaylandShellEventHandler<'a, 'subsystem> {
     cursor_shape_device: *mut wl::WpCursorShapeDeviceV1,
     pointer_last_surface_pos: (wl::Fixed, wl::Fixed),
     tiled: bool,
+    title_bar_last_click: Option<std::time::Instant>,
 }
 impl wl::XdgWmBaseEventListener for WaylandShellEventHandler<'_, '_> {
     fn ping(&mut self, wm_base: &mut wl::XdgWmBase, serial: u32) {
@@ -257,9 +258,19 @@ impl wl::PointerEventListener for WaylandShellEventHandler<'_, '_> {
                         .role_focus(unsafe { &(*self.base_system_ptr).hit_tree });
                     match role {
                         Some(Role::TitleBar) => {
-                            unsafe { &*self.xdg_toplevel_proxy_ptr }
-                                .r#move(unsafe { &*self.primary_seat_ptr }, serial)
-                                .unwrap();
+                            if let Some(lc) = self.title_bar_last_click.take()
+                                && lc.elapsed() <= std::time::Duration::from_millis(400)
+                            {
+                                // double click
+                                self.app_event_bus
+                                    .push(AppEvent::ToplevelWindowMaximizeRequest);
+                            } else {
+                                unsafe { &*self.xdg_toplevel_proxy_ptr }
+                                    .r#move(unsafe { &*self.primary_seat_ptr }, serial)
+                                    .unwrap();
+                                self.title_bar_last_click = Some(std::time::Instant::now());
+                            }
+
                             return;
                         }
                         _ => (),
@@ -1203,6 +1214,7 @@ pub struct AppShell<'a, 'subsystem> {
     display: wl::Display,
     content_surface: core::ptr::NonNull<wl::Surface>,
     xdg_surface: core::ptr::NonNull<wl::XdgSurface>,
+    xdg_toplevel: core::ptr::NonNull<wl::XdgToplevel>,
     zxdg_exporter_v2: Option<core::ptr::NonNull<wl::ZxdgExporterV2>>,
     cursor_shape_device: core::ptr::NonNull<wl::WpCursorShapeDeviceV1>,
     frame_callback: Cell<core::ptr::NonNull<wl::Callback>>,
@@ -1506,6 +1518,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
                 wl::Fixed::from_f32_lossy(0.0),
             ),
             tiled: false,
+            title_bar_last_click: None,
         }));
 
         if let Err(e) = pointer.add_listener(shell_event_handler.get_mut()) {
@@ -1570,7 +1583,6 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
         xdg_wm_base.leak();
         seat.leak();
         cursor_shape_manager.leak();
-        xdg_toplevel.leak();
         pointer.leak();
         if let Some(x) = fractional_scale_manager_v1 {
             x.leak();
@@ -1584,6 +1596,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             display: dp,
             content_surface: main_surface.unwrap(),
             xdg_surface: xdg_surface.unwrap(),
+            xdg_toplevel: xdg_toplevel.unwrap(),
             cursor_shape_device: cursor_shape_device.unwrap(),
             frame_callback: Cell::new(frame.unwrap()),
             zxdg_exporter_v2: zxdg_exporter_v2.map(|x| x.unwrap()),
@@ -1726,10 +1739,22 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
 
     pub fn minimize(&self) {
         // do nothing currently(maybe requires on floating-window system)
+        if let Err(e) = unsafe { self.xdg_toplevel.as_ref() }.set_minimized() {
+            tracing::warn!(reason = ?e, "Failed to call set_minimized");
+        }
     }
 
     pub fn maximize(&self) {
         // do nothing currently(maybe requires on floating-window system)
+        if self.is_tiled() {
+            if let Err(e) = unsafe { self.xdg_toplevel.as_ref() }.unset_maximized() {
+                tracing::warn!(reason = ?e, "Failed to call unset_maximized");
+            }
+        } else {
+            if let Err(e) = unsafe { self.xdg_toplevel.as_ref() }.set_maximized() {
+                tracing::warn!(reason = ?e, "Failed to call set_maximized");
+            }
+        }
     }
 
     pub fn is_tiled(&self) -> bool {

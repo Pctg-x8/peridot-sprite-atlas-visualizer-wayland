@@ -505,6 +505,21 @@ impl XdgToplevel {
             ],
         )
     }
+
+    #[inline]
+    pub fn set_maximized(&self) -> Result<(), std::io::Error> {
+        self.0.marshal_array_flags_void(9, 0, &mut [])
+    }
+
+    #[inline]
+    pub fn unset_maximized(&self) -> Result<(), std::io::Error> {
+        self.0.marshal_array_flags_void(10, 0, &mut [])
+    }
+
+    #[inline]
+    pub fn set_minimized(&self) -> Result<(), std::io::Error> {
+        self.0.marshal_array_flags_void(13, 0, &mut [])
+    }
 }
 
 pub trait XdgToplevelEventListener {

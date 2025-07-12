@@ -332,6 +332,19 @@ static XDG_TOPLEVEL_INTERFACE: ffi::Interface = ffi::Interface {
     .as_ptr(),
 };
 
+#[repr(u32)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum XdgToplevelResizeEdge {
+    Top = 1,
+    Bottom = 2,
+    Left = 4,
+    TopLeft = 5,
+    BottomLeft = 6,
+    Right = 8,
+    TopRight = 9,
+    BottomRight = 10,
+}
+
 #[repr(transparent)]
 pub struct XdgToplevel(Proxy);
 unsafe impl Interface for XdgToplevel {
@@ -449,6 +462,24 @@ impl XdgToplevel {
     pub fn r#move(&self, seat: &super::Seat, serial: u32) -> Result<(), std::io::Error> {
         self.0
             .marshal_array_flags_void(5, 0, &mut [seat.0.as_arg(), ffi::Argument { u: serial }])
+    }
+
+    #[inline]
+    pub fn resize(
+        &self,
+        seat: &super::Seat,
+        serial: u32,
+        edges: XdgToplevelResizeEdge,
+    ) -> Result<(), std::io::Error> {
+        self.0.marshal_array_flags_void(
+            6,
+            0,
+            &mut [
+                seat.0.as_arg(),
+                ffi::Argument { u: serial },
+                ffi::Argument { u: edges as _ },
+            ],
+        )
     }
 }
 

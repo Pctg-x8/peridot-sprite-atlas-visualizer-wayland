@@ -201,17 +201,17 @@ pub struct RoundedRectConstants {
 #[derive(br::SpecializationConstants)]
 struct CornerCutoutVshConstants {
     #[constant_id = 0]
-    size: f32,
+    width_vp: f32,
     #[constant_id = 1]
-    uv_scale_x: f32,
+    height_vp: f32,
     #[constant_id = 2]
-    uv_scale_y: f32,
+    uv_scale_x: f32,
     #[constant_id = 3]
-    uv_trans_x: f32,
+    uv_scale_y: f32,
     #[constant_id = 4]
-    uv_trans_y: f32,
+    uv_trans_x: f32,
     #[constant_id = 5]
-    aspect_wh: f32,
+    uv_trans_y: f32,
 }
 
 pub trait ViewUpdate {
@@ -3843,14 +3843,16 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         let vsh = app_system.require_shader("resources/corner_cutout_placement.vert");
         let fsh = app_system.require_shader("resources/blit_alphamask.frag");
         let vsh_param = CornerCutoutVshConstants {
-            size: 16.0,
-            uv_scale_x: corner_cutout_atlas_rect.width() as f32
+            width_vp: 32.0 / sc.size.width as f32,
+            height_vp: 32.0 / sc.size.height as f32,
+            uv_scale_x: (corner_cutout_atlas_rect.width() as f32 - 0.5)
                 / app_system.mask_atlas_size() as f32,
-            uv_scale_y: corner_cutout_atlas_rect.height() as f32
+            uv_scale_y: (corner_cutout_atlas_rect.height() as f32 - 0.5)
                 / app_system.mask_atlas_size() as f32,
-            uv_trans_x: corner_cutout_atlas_rect.left as f32 / app_system.mask_atlas_size() as f32,
-            uv_trans_y: corner_cutout_atlas_rect.top as f32 / app_system.mask_atlas_size() as f32,
-            aspect_wh: sc.size.width as f32 / sc.size.height as f32,
+            uv_trans_x: (corner_cutout_atlas_rect.left as f32 + 0.5)
+                / app_system.mask_atlas_size() as f32,
+            uv_trans_y: (corner_cutout_atlas_rect.top as f32 + 0.5)
+                / app_system.mask_atlas_size() as f32,
         };
         let vsh_spec = br::SpecializationInfo::new(&vsh_param);
         let shader_stages = [
@@ -5773,7 +5775,8 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                 let fsh =
                                     app_system.require_shader("resources/blit_alphamask.frag");
                                 let vsh_param = CornerCutoutVshConstants {
-                                    size: 16.0,
+                                    width_vp: 32.0 / w as f32,
+                                    height_vp: 32.0 / h as f32,
                                     uv_scale_x: corner_cutout_atlas_rect.as_ref().unwrap().width()
                                         as f32
                                         / app_system.mask_atlas_size() as f32,
@@ -5786,7 +5789,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                     uv_trans_y: corner_cutout_atlas_rect.as_ref().unwrap().top
                                         as f32
                                         / app_system.mask_atlas_size() as f32,
-                                    aspect_wh: sc.size.width as f32 / sc.size.height as f32,
                                 };
                                 let vsh_spec = br::SpecializationInfo::new(&vsh_param);
                                 let shader_stages = [
@@ -5826,7 +5828,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                 );
                                 let blend_state = br::PipelineColorBlendStateCreateInfo::new(&[
                                     br::vk::VkPipelineColorBlendAttachmentState {
-                                        // simply overwrite only alpha
+                                        // simply overwrite alpha
                                         blendEnable: true as _,
                                         srcColorBlendFactor: br::vk::VK_BLEND_FACTOR_ZERO,
                                         dstColorBlendFactor: br::vk::VK_BLEND_FACTOR_SRC_ALPHA,

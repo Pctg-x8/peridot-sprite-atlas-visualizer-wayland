@@ -22,6 +22,9 @@ pub use self::xdg_foreign::*;
 pub use self::xdg_shell::*;
 
 const NEWID_ARG: ffi::Argument = ffi::Argument { n: 0 };
+const NULLOBJ_ARG: ffi::Argument = ffi::Argument {
+    o: core::ptr::null_mut(),
+};
 
 #[repr(transparent)]
 pub struct OwnedProxy(NonNull<ffi::Proxy>);
@@ -203,8 +206,14 @@ impl<T: Interface> Owned<T> {
         Self(untyped.cast())
     }
 
+    /// # Safety
+    /// passed pointer must be a valid typed proxy reference.
     pub const unsafe fn wrap_unchecked(p: NonNull<T>) -> Self {
         Self(p)
+    }
+
+    pub const unsafe fn copy_ptr(&self) -> NonNull<T> {
+        self.0
     }
 
     pub const fn leak(self) {
@@ -459,11 +468,26 @@ unsafe impl Interface for Compositor {
 impl Compositor {
     #[inline]
     pub fn create_surface(&self) -> Result<Owned<Surface>, std::io::Error> {
-        let proxy_ptr =
-            self.0
-                .marshal_array_flags(0, Surface::def(), self.0.version(), 0, &mut [NEWID_ARG])?;
+        Ok(unsafe {
+            Owned::wrap_unchecked(self.0.marshal_array_flags_typed(
+                0,
+                self.0.version(),
+                0,
+                &mut [NEWID_ARG],
+            )?)
+        })
+    }
 
-        Ok(unsafe { Owned::from_untyped_unchecked(proxy_ptr) })
+    #[inline]
+    pub fn create_region(&self) -> Result<Owned<Region>, std::io::Error> {
+        Ok(unsafe {
+            Owned::wrap_unchecked(self.0.marshal_array_flags_typed(
+                1,
+                self.0.version(),
+                0,
+                &mut [NEWID_ARG],
+            )?)
+        })
     }
 }
 
@@ -508,6 +532,12 @@ impl Surface {
         )?;
 
         Ok(unsafe { Owned::from_untyped_unchecked(proxy_ptr) })
+    }
+
+    #[inline]
+    pub fn set_input_region(&self, region: Option<&Region>) -> Result<(), std::io::Error> {
+        self.0
+            .marshal_array_flags_void(5, 0, &mut [region.map_or(NULLOBJ_ARG, |x| x.0.as_arg())])
     }
 
     #[inline]
@@ -802,6 +832,40 @@ unsafe impl Interface for Buffer {
                 ffi::wl_display_get_error(self.0.display())
             });
         }
+    }
+}
+
+#[repr(transparent)]
+pub struct Region(Proxy);
+unsafe impl Interface for Region {
+    fn def() -> &'static ffi::Interface {
+        unsafe { &wl_region_interface }
+    }
+
+    unsafe fn destruct(&mut self) {
+        if let Err(e) = self
+            .0
+            .marshal_array_flags_void(0, ffi::MARSHAL_FLAG_DESTROY, &mut [])
+        {
+            panic!("Failed to call destroy: {} {e:?}", unsafe {
+                ffi::wl_display_get_error(self.0.display())
+            })
+        }
+    }
+}
+impl Region {
+    #[inline]
+    pub fn add(&self, x: i32, y: i32, width: i32, height: i32) -> Result<(), std::io::Error> {
+        self.0.marshal_array_flags_void(
+            1,
+            0,
+            &mut [
+                ffi::Argument { i: x },
+                ffi::Argument { i: y },
+                ffi::Argument { i: width },
+                ffi::Argument { i: height },
+            ],
+        )
     }
 }
 
@@ -1177,6 +1241,7 @@ unsafe extern "C" {
     static wl_shm_interface: ffi::Interface;
     static wl_shm_pool_interface: ffi::Interface;
     static wl_buffer_interface: ffi::Interface;
+    static wl_region_interface: ffi::Interface;
     static wl_seat_interface: ffi::Interface;
     static wl_output_interface: ffi::Interface;
     static wl_callback_interface: ffi::Interface;

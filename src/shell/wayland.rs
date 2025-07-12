@@ -21,6 +21,7 @@ use crate::{
 enum PointerOnSurface {
     None,
     Main { serial: u32 },
+    ResizeEdge { edge: wl::XdgToplevelResizeEdge },
 }
 struct WaylandShellEventHandler<'a, 'subsystem> {
     app_event_bus: &'a AppEventBus,
@@ -33,6 +34,7 @@ struct WaylandShellEventHandler<'a, 'subsystem> {
     client_decoration: ClientDecorationResources,
     pointer_input_manager: Pin<Box<UnsafeCell<PointerInputManager>>>,
     base_system_ptr: *mut AppBaseSystem<'subsystem>,
+    cursor_shape_device: *mut wl::WpCursorShapeDeviceV1,
 }
 impl wl::XdgWmBaseEventListener for WaylandShellEventHandler<'_, '_> {
     fn ping(&mut self, wm_base: &mut wl::XdgWmBase, serial: u32) {
@@ -124,12 +126,41 @@ impl wl::PointerEventListener for WaylandShellEventHandler<'_, '_> {
     ) {
         self.pointer_on_surface = if core::ptr::addr_eq(surface, self.main_surface_proxy_ptr) {
             PointerOnSurface::Main { serial }
+        } else if let Some(e) = self.client_decoration.resize_edge(surface) {
+            PointerOnSurface::ResizeEdge { edge: e }
         } else {
             PointerOnSurface::None
         };
 
         match self.pointer_on_surface {
-            PointerOnSurface::None => (),
+            PointerOnSurface::None => {}
+            PointerOnSurface::ResizeEdge { edge } => {
+                unsafe { &*self.cursor_shape_device }
+                    .set_shape(
+                        serial,
+                        match edge {
+                            wl::XdgToplevelResizeEdge::Top | wl::XdgToplevelResizeEdge::Bottom => {
+                                wl::WpCursorShapeDeviceV1Shape::NsResize
+                            }
+                            wl::XdgToplevelResizeEdge::Left | wl::XdgToplevelResizeEdge::Right => {
+                                wl::WpCursorShapeDeviceV1Shape::EwResize
+                            }
+                            wl::XdgToplevelResizeEdge::TopLeft => {
+                                wl::WpCursorShapeDeviceV1Shape::NwResize
+                            }
+                            wl::XdgToplevelResizeEdge::BottomLeft => {
+                                wl::WpCursorShapeDeviceV1Shape::SwResize
+                            }
+                            wl::XdgToplevelResizeEdge::TopRight => {
+                                wl::WpCursorShapeDeviceV1Shape::NeResize
+                            }
+                            wl::XdgToplevelResizeEdge::BottomRight => {
+                                wl::WpCursorShapeDeviceV1Shape::SeResize
+                            }
+                        },
+                    )
+                    .unwrap();
+            }
             PointerOnSurface::Main { serial } => {
                 self.app_event_bus.push(AppEvent::MainWindowPointerMove {
                     enter_serial: serial,
@@ -143,12 +174,15 @@ impl wl::PointerEventListener for WaylandShellEventHandler<'_, '_> {
     fn leave(&mut self, _pointer: &mut wl::Pointer, _serial: u32, surface: &mut wl::Surface) {
         match self.pointer_on_surface {
             PointerOnSurface::None => (),
+            PointerOnSurface::ResizeEdge { .. } => {
+                self.pointer_on_surface = PointerOnSurface::None;
+            }
             PointerOnSurface::Main { .. } => {
                 if core::ptr::addr_eq(surface, self.main_surface_proxy_ptr) {
                     self.pointer_on_surface = PointerOnSurface::None;
                 }
             }
-        };
+        }
     }
 
     fn motion(
@@ -160,6 +194,7 @@ impl wl::PointerEventListener for WaylandShellEventHandler<'_, '_> {
     ) {
         match self.pointer_on_surface {
             PointerOnSurface::None => (),
+            PointerOnSurface::ResizeEdge { .. } => (),
             PointerOnSurface::Main { serial } => {
                 self.app_event_bus.push(AppEvent::MainWindowPointerMove {
                     enter_serial: serial,
@@ -181,6 +216,13 @@ impl wl::PointerEventListener for WaylandShellEventHandler<'_, '_> {
     ) {
         match self.pointer_on_surface {
             PointerOnSurface::None => (),
+            PointerOnSurface::ResizeEdge { edge } => {
+                if button == BTN_LEFT && state == wl::PointerButtonState::Pressed {
+                    unsafe { &*self.xdg_toplevel_proxy_ptr }
+                        .resize(unsafe { &*self.primary_seat_ptr }, serial, edge)
+                        .unwrap();
+                }
+            }
             PointerOnSurface::Main {
                 serial: enter_serial,
             } => {
@@ -268,6 +310,7 @@ impl wl::GtkSurface1EventListener for WaylandShellEventHandler<'_, '_> {
 }
 
 struct ClientDecorationResources {
+    compositor: core::ptr::NonNull<wl::Compositor>,
     shm: core::ptr::NonNull<wl::Shm>,
     shadow_corner_buf: core::ptr::NonNull<wl::Buffer>,
     shadow_straight_buf: core::ptr::NonNull<wl::Buffer>,
@@ -291,9 +334,10 @@ struct ClientDecorationResources {
 }
 impl ClientDecorationResources {
     const SHADOW_SIZE: usize = 16;
+    const INPUT_SIZE: usize = 8;
 
     pub fn new(
-        compositor: &wl::Compositor,
+        compositor: &wl::Owned<wl::Compositor>,
         subcompositor: &wl::Subcompositor,
         shm: wl::Owned<wl::Shm>,
         viewporter: &wl::WpViewporter,
@@ -494,6 +538,7 @@ impl ClientDecorationResources {
         shadow_top_subsurface.leak();
 
         Self {
+            compositor: unsafe { compositor.copy_ptr() },
             shm: shm.unwrap(),
             shadow_corner_buf: shadow_corner_buf.unwrap(),
             shadow_straight_buf: shadow_straight_buf.unwrap(),
@@ -833,6 +878,86 @@ impl ClientDecorationResources {
             )
             .unwrap();
 
+        // input region
+        let r = unsafe { self.compositor.as_ref() }.create_region().unwrap();
+        r.add(
+            (Self::SHADOW_SIZE - Self::INPUT_SIZE) as _,
+            0,
+            Self::INPUT_SIZE as _,
+            height,
+        )
+        .unwrap();
+        unsafe { self.shadow_left_surface.as_ref() }
+            .set_input_region(Some(&r))
+            .unwrap();
+        let r = unsafe { self.compositor.as_ref() }.create_region().unwrap();
+        r.add(Self::SHADOW_SIZE as _, 0, Self::INPUT_SIZE as _, height)
+            .unwrap();
+        unsafe { self.shadow_right_surface.as_ref() }
+            .set_input_region(Some(&r))
+            .unwrap();
+        let r = unsafe { self.compositor.as_ref() }.create_region().unwrap();
+        r.add(
+            0,
+            (Self::SHADOW_SIZE - Self::INPUT_SIZE) as _,
+            width,
+            Self::INPUT_SIZE as _,
+        )
+        .unwrap();
+        unsafe { self.shadow_top_surface.as_ref() }
+            .set_input_region(Some(&r))
+            .unwrap();
+        let r = unsafe { self.compositor.as_ref() }.create_region().unwrap();
+        r.add(0, Self::SHADOW_SIZE as _, width, Self::INPUT_SIZE as _)
+            .unwrap();
+        unsafe { self.shadow_bottom_surface.as_ref() }
+            .set_input_region(Some(&r))
+            .unwrap();
+        let r = unsafe { self.compositor.as_ref() }.create_region().unwrap();
+        r.add(
+            (Self::SHADOW_SIZE - Self::INPUT_SIZE) as _,
+            (Self::SHADOW_SIZE - Self::INPUT_SIZE) as _,
+            (Self::INPUT_SIZE + Self::SHADOW_SIZE) as _,
+            (Self::INPUT_SIZE + Self::SHADOW_SIZE) as _,
+        )
+        .unwrap();
+        unsafe { self.shadow_lt_surface.as_ref() }
+            .set_input_region(Some(&r))
+            .unwrap();
+        let r = unsafe { self.compositor.as_ref() }.create_region().unwrap();
+        r.add(
+            (Self::SHADOW_SIZE - Self::INPUT_SIZE) as _,
+            0,
+            (Self::INPUT_SIZE + Self::SHADOW_SIZE) as _,
+            (Self::INPUT_SIZE + Self::SHADOW_SIZE) as _,
+        )
+        .unwrap();
+        unsafe { self.shadow_lb_surface.as_ref() }
+            .set_input_region(Some(&r))
+            .unwrap();
+        let r = unsafe { self.compositor.as_ref() }.create_region().unwrap();
+        r.add(
+            0,
+            (Self::SHADOW_SIZE - Self::INPUT_SIZE) as _,
+            (Self::INPUT_SIZE + Self::SHADOW_SIZE) as _,
+            (Self::INPUT_SIZE + Self::SHADOW_SIZE) as _,
+        )
+        .unwrap();
+        unsafe { self.shadow_rt_surface.as_ref() }
+            .set_input_region(Some(&r))
+            .unwrap();
+        let r = unsafe { self.compositor.as_ref() }.create_region().unwrap();
+        r.add(
+            0,
+            0,
+            (Self::INPUT_SIZE + Self::SHADOW_SIZE) as _,
+            (Self::INPUT_SIZE + Self::SHADOW_SIZE) as _,
+        )
+        .unwrap();
+        unsafe { self.shadow_rb_surface.as_ref() }
+            .set_input_region(Some(&r))
+            .unwrap();
+
         // commit
         unsafe { self.shadow_lb_surface.as_ref() }.commit().unwrap();
         unsafe { self.shadow_rt_surface.as_ref() }.commit().unwrap();
@@ -849,6 +974,35 @@ impl ClientDecorationResources {
         unsafe { self.shadow_bottom_surface.as_ref() }
             .commit()
             .unwrap();
+    }
+
+    pub fn resize_edge(&self, enter_surface: &wl::Surface) -> Option<wl::XdgToplevelResizeEdge> {
+        if core::ptr::addr_eq(enter_surface, self.shadow_left_surface.as_ptr()) {
+            return Some(wl::XdgToplevelResizeEdge::Left);
+        }
+        if core::ptr::addr_eq(enter_surface, self.shadow_right_surface.as_ptr()) {
+            return Some(wl::XdgToplevelResizeEdge::Right);
+        }
+        if core::ptr::addr_eq(enter_surface, self.shadow_top_surface.as_ptr()) {
+            return Some(wl::XdgToplevelResizeEdge::Top);
+        }
+        if core::ptr::addr_eq(enter_surface, self.shadow_bottom_surface.as_ptr()) {
+            return Some(wl::XdgToplevelResizeEdge::Bottom);
+        }
+        if core::ptr::addr_eq(enter_surface, self.shadow_lt_surface.as_ptr()) {
+            return Some(wl::XdgToplevelResizeEdge::TopLeft);
+        }
+        if core::ptr::addr_eq(enter_surface, self.shadow_lb_surface.as_ptr()) {
+            return Some(wl::XdgToplevelResizeEdge::BottomLeft);
+        }
+        if core::ptr::addr_eq(enter_surface, self.shadow_rt_surface.as_ptr()) {
+            return Some(wl::XdgToplevelResizeEdge::TopRight);
+        }
+        if core::ptr::addr_eq(enter_surface, self.shadow_rb_surface.as_ptr()) {
+            return Some(wl::XdgToplevelResizeEdge::BottomRight);
+        }
+
+        None
     }
 }
 
@@ -1153,6 +1307,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             client_decoration: client_decoration_resources,
             pointer_input_manager,
             base_system_ptr: base_sys,
+            cursor_shape_device: cursor_shape_device.as_raw() as _,
         }));
 
         if let Err(e) = pointer.add_listener(shell_event_handler.get_mut()) {

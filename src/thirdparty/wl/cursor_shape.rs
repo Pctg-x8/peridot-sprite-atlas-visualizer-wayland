@@ -73,7 +73,12 @@ impl WpCursorShapeManagerV1 {
 pub enum WpCursorShapeDeviceV1Shape {
     Default = 1,
     // ContextMenu = 2,
+    NeResize = 20,
+    NwResize = 21,
+    SeResize = 23,
+    SwResize = 24,
     EwResize = 26,
+    NsResize = 27,
 }
 
 #[repr(transparent)]
@@ -106,6 +111,10 @@ impl WpCursorShapeDeviceV1 {
         ],
         &[],
     );
+
+    pub const fn as_raw(&self) -> *mut ffi::Proxy {
+        self.0.0.get() as *mut _ as _
+    }
 
     #[inline]
     pub fn set_shape(

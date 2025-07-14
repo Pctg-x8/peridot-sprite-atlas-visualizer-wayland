@@ -40,6 +40,7 @@ struct WaylandShellEventHandler<'a, 'subsystem> {
     pointer_last_surface_pos: (wl::Fixed, wl::Fixed),
     tiled: bool,
     title_bar_last_click: Option<std::time::Instant>,
+    use_fractional_scale: bool,
 }
 impl wl::XdgWmBaseEventListener for WaylandShellEventHandler<'_, '_> {
     fn ping(&mut self, wm_base: &mut wl::XdgWmBase, serial: u32) {
@@ -133,12 +134,15 @@ impl wl::SurfaceEventListener for WaylandShellEventHandler<'_, '_> {
         assert!(factor > 0, "negative or zero scale factor?");
 
         tracing::trace!(factor, "preferred buffer scale");
-        self.ui_scale_factor = factor as _;
         self.buffer_scale = factor as _;
         // 同じ値を適用することでdpi-awareになるらしい
         surface.set_buffer_scale(factor).unwrap();
         surface.commit().unwrap();
         self.client_decoration.set_buffer_scale(factor);
+
+        if !self.use_fractional_scale {
+            self.ui_scale_factor = factor as _;
+        }
     }
 
     fn preferred_buffer_transform(&mut self, _surface: &mut wl::Surface, transform: u32) {
@@ -194,8 +198,8 @@ impl wl::PointerEventListener for WaylandShellEventHandler<'_, '_> {
             PointerOnSurface::Main { serial } => {
                 self.app_event_bus.push(AppEvent::MainWindowPointerMove {
                     enter_serial: serial,
-                    surface_x: surface_x.to_f32(),
-                    surface_y: surface_y.to_f32(),
+                    surface_x: surface_x.to_f32() * self.buffer_scale as f32 / self.ui_scale_factor,
+                    surface_y: surface_y.to_f32() * self.buffer_scale as f32 / self.ui_scale_factor,
                 })
             }
         }
@@ -232,8 +236,8 @@ impl wl::PointerEventListener for WaylandShellEventHandler<'_, '_> {
 
                 self.app_event_bus.push(AppEvent::MainWindowPointerMove {
                     enter_serial: serial,
-                    surface_x: surface_x.to_f32(),
-                    surface_y: surface_y.to_f32(),
+                    surface_x: surface_x.to_f32() * self.buffer_scale as f32 / self.ui_scale_factor,
+                    surface_y: surface_y.to_f32() * self.buffer_scale as f32 / self.ui_scale_factor,
                 })
             }
         }
@@ -352,20 +356,22 @@ impl wl::CallbackEventListener for WaylandShellEventHandler<'_, '_> {
 impl wl::WpFractionalScaleV1EventListener for WaylandShellEventHandler<'_, '_> {
     #[tracing::instrument(name = "<WaylandShellEventHandler as WpFractionalScaleV1EventListener>::preferred_scale", skip(self, _object), fields(scale_f = scale as f32 / 120.0))]
     fn preferred_scale(&mut self, _object: &mut wl::WpFractionalScaleV1, scale: u32) {
-        tracing::trace!("TODO: fractional scale")
+        if self.use_fractional_scale {
+            self.ui_scale_factor = scale as f32 / 120.0;
+        }
     }
 }
 impl wl::GtkShell1EventListener for WaylandShellEventHandler<'_, '_> {
-    fn capabilities(&mut self, sender: &mut wl::GtkShell1, capabilities: u32) {
+    fn capabilities(&mut self, _sender: &mut wl::GtkShell1, capabilities: u32) {
         tracing::trace!(capabilities, "gtk_shell capabilities");
     }
 }
 impl wl::GtkSurface1EventListener for WaylandShellEventHandler<'_, '_> {
-    fn configure(&mut self, sender: &mut wl::GtkSurface1, states: &[u32]) {
+    fn configure(&mut self, _sender: &mut wl::GtkSurface1, states: &[u32]) {
         tracing::trace!(?states, "gtk_surface configure");
     }
 
-    fn configure_edges(&mut self, sender: &mut wl::GtkSurface1, constraints: &[u32]) {
+    fn configure_edges(&mut self, _sender: &mut wl::GtkSurface1, constraints: &[u32]) {
         tracing::trace!(?constraints, "gtk_surface configure edges");
     }
 }
@@ -1352,6 +1358,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             ),
             tiled: false,
             title_bar_last_click: None,
+            use_fractional_scale: fractional_scale_manager_v1.is_some(),
         }));
 
         if let Err(e) = pointer.add_listener(shell_event_handler.get_mut()) {
@@ -1449,7 +1456,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
     }
 
     pub const fn server_side_decoration_provided(&self) -> bool {
-        // Ubuntu(Mutter/GNOME) has not server side decoration(no zxdg_decoration_manager_v1 provided)
+        // Ubuntu(Mutter/GNOME) has no server side decoration(no zxdg_decoration_manager_v1 provided)
         // TODO: detect this
         false
     }

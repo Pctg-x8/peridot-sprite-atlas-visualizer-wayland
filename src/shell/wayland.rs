@@ -25,7 +25,8 @@ enum PointerOnSurface {
 }
 struct WaylandShellEventHandler<'a, 'subsystem> {
     app_event_bus: &'a AppEventBus,
-    cached_client_size: (u32, u32),
+    cached_client_size_px: (u32, u32),
+    buffer_scale: u32,
     ui_scale_factor: f32,
     pointer_on_surface: PointerOnSurface,
     main_surface_proxy_ptr: *mut wl::Surface,
@@ -70,21 +71,27 @@ impl wl::XdgToplevelEventListener for WaylandShellEventHandler<'_, '_> {
         mut height: i32,
         states: &[i32],
     ) {
+        assert!(width >= 0, "negative width?");
+        assert!(height >= 0, "negative height?");
+
         tracing::trace!("configure");
         let activated = states.contains(&4);
         self.tiled = states.iter().any(|&x| x == 5 || x == 6 || x == 7 || x == 8);
 
         if width == 0 {
-            width = self.cached_client_size.0 as i32;
+            width = self.cached_client_size_px.0 as i32;
         }
         if height == 0 {
-            height = self.cached_client_size.1 as i32;
+            height = self.cached_client_size_px.1 as i32;
         }
 
-        self.cached_client_size = (width as _, height as _);
+        let width_px = width as u32 * self.buffer_scale;
+        let height_px = height as u32 * self.buffer_scale;
+
+        self.cached_client_size_px = (width_px, height_px);
         self.app_event_bus.push(AppEvent::ToplevelWindowNewSize {
-            width: width as _,
-            height: height as _,
+            width_px,
+            height_px,
         });
 
         // TODO: determine using client side decoration
@@ -123,8 +130,11 @@ impl wl::SurfaceEventListener for WaylandShellEventHandler<'_, '_> {
     }
 
     fn preferred_buffer_scale(&mut self, surface: &mut wl::Surface, factor: i32) {
+        assert!(factor > 0, "negative or zero scale factor?");
+
         tracing::trace!(factor, "preferred buffer scale");
         self.ui_scale_factor = factor as _;
+        self.buffer_scale = factor as _;
         // 同じ値を適用することでdpi-awareになるらしい
         surface.set_buffer_scale(factor).unwrap();
         surface.commit().unwrap();
@@ -1324,7 +1334,8 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
         let mut shell_event_handler = Box::new(UnsafeCell::new(WaylandShellEventHandler {
             app_event_bus: events,
             // 現時点ではわからないので適当な値を設定
-            cached_client_size: (640, 480),
+            cached_client_size_px: (640, 480),
+            buffer_scale: 1,
             ui_scale_factor: 1.0,
             pointer_on_surface: PointerOnSurface::None,
             main_surface_proxy_ptr: main_surface.as_raw() as _,
@@ -1458,9 +1469,15 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
 
     pub fn client_size(&self) -> (f32, f32) {
         let ui_scale_factor = unsafe { (*self.shell_event_handler.get()).ui_scale_factor };
-        let (w, h) = unsafe { (*self.shell_event_handler.get()).cached_client_size };
+        let (w, h) = unsafe { (*self.shell_event_handler.get()).cached_client_size_px };
 
         (w as f32 / ui_scale_factor, h as f32 / ui_scale_factor)
+    }
+
+    pub fn client_size_pixels(&self) -> (u32, u32) {
+        let (w, h) = unsafe { (*self.shell_event_handler.get()).cached_client_size_px };
+
+        (w, h)
     }
 
     #[tracing::instrument(skip(self))]
@@ -1566,7 +1583,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
         }
     }
 
-    pub fn maximize(&self) {
+    pub fn toggle_maximize_restore(&self) {
         // do nothing currently(maybe requires on floating-window system)
         if self.is_tiled() {
             if let Err(e) = unsafe { self.xdg_toplevel.as_ref() }.unset_maximized() {

@@ -38,7 +38,8 @@ impl CommonButtonView {
         let text_image_pixels =
             text_layout.build_stg_image_pixel_buffer(init.staging_scratch_buffer);
 
-        let render_size_px = ((Self::CORNER_RADIUS * 2.0 + 1.0) * init.ui_scale_factor) as u32;
+        let render_size_px =
+            ((Self::CORNER_RADIUS * 2.0 + 1.0) * init.ui_scale_factor.ceil()) as u32;
         let frame_image_atlas_rect = init
             .base_system
             .alloc_mask_atlas_rect(render_size_px, render_size_px);
@@ -215,7 +216,7 @@ impl CommonButtonView {
             ],
             has_bitmap: true,
             texatlas_rect: frame_image_atlas_rect,
-            slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
+            slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor.ceil(); 4],
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 0.0])),
             ..Default::default()
         });
@@ -223,7 +224,7 @@ impl CommonButtonView {
             relative_size_adjustment: [1.0, 1.0],
             has_bitmap: true,
             texatlas_rect: frame_border_image_atlas_rect,
-            slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
+            slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor.ceil(); 4],
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 0.25])),
             ..Default::default()
         });

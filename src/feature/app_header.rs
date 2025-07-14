@@ -8,7 +8,7 @@ use crate::{
     AppEvent, AppUpdateContext, BLEND_STATE_SINGLE_NONE, FillcolorRConstants, IA_STATE_TRILIST,
     MS_STATE_EMPTY, PresenterInitContext, RASTER_STATE_DEFAULT_FILL_NOCULL, VI_STATE_FLOAT2_ONLY,
     ViewInitContext,
-    base_system::AppBaseSystem,
+    base_system::{AppBaseSystem, FontType},
     composite::{
         AnimatableColor, AnimatableFloat, AnimationCurve, AtlasRect, CompositeMode, CompositeRect,
         CompositeTree, CompositeTreeRef,
@@ -16,7 +16,6 @@ use crate::{
     hittest::{HitTestTreeActionHandler, HitTestTreeData, HitTestTreeRef, PointerActionArgs, Role},
     input::EventContinueControl,
     subsystem::StagingScratchBufferMapMode,
-    text::TextLayout,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -719,16 +718,15 @@ impl BaseView {
     #[tracing::instrument(name = "BaseView::new", skip(ctx))]
     pub fn new(ctx: &mut ViewInitContext) -> Self {
         let title = "Peridot SpriteAtlas Visualizer/Editor";
-        let text_layout = TextLayout::build_simple(title, &mut ctx.base_system.fonts.ui_default);
         let text_atlas_rect = ctx
             .base_system
-            .alloc_mask_atlas_rect(text_layout.width_px(), text_layout.height_px());
+            .text_mask(ctx.staging_scratch_buffer, FontType::UI, title)
+            .unwrap();
         let bg_atlas_rect = ctx.base_system.alloc_mask_atlas_rect(1, 2);
 
-        let height = text_layout.height() / ctx.ui_scale_factor + Self::TITLE_SPACING * 2.0;
+        let height =
+            text_atlas_rect.height() as f32 / ctx.ui_scale_factor + Self::TITLE_SPACING * 2.0;
 
-        let text_stg_image_pixels =
-            text_layout.build_stg_image_pixel_buffer(ctx.staging_scratch_buffer);
         let bg_stg_image_pixels = ctx.staging_scratch_buffer.reserve(2);
         let ptr = ctx
             .staging_scratch_buffer
@@ -751,28 +749,9 @@ impl BaseView {
                         .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
                 ))
                 .inject(|r| {
-                    let (tb, to) = ctx.staging_scratch_buffer.of(&text_stg_image_pixels);
                     let (b, o) = ctx.staging_scratch_buffer.of(&bg_stg_image_pixels);
 
-                    // TODO: ここ使うリソースいっしょだったらバッチするようにしたい
                     r.copy_buffer_to_image(
-                        tb,
-                        &ctx.base_system.mask_atlas_image_transparent_ref(),
-                        br::ImageLayout::TransferDestOpt,
-                        &[br::vk::VkBufferImageCopy {
-                            bufferOffset: to,
-                            bufferRowLength: text_layout.width_px(),
-                            bufferImageHeight: text_layout.height_px(),
-                            imageSubresource: br::ImageSubresourceLayers::new(
-                                br::AspectMask::COLOR,
-                                0,
-                                0..1,
-                            ),
-                            imageOffset: text_atlas_rect.lt_offset().with_z(0),
-                            imageExtent: text_atlas_rect.extent().with_depth(1),
-                        }],
-                    )
-                    .copy_buffer_to_image(
                         b,
                         &ctx.base_system.mask_atlas_image_transparent_ref(),
                         br::ImageLayout::TransferDestOpt,
@@ -824,8 +803,8 @@ impl BaseView {
         });
         let ct_title = ctx.base_system.register_composite_rect(CompositeRect {
             size: [
-                AnimatableFloat::Value(text_layout.width()),
-                AnimatableFloat::Value(text_layout.height()),
+                AnimatableFloat::Value(text_atlas_rect.width() as _),
+                AnimatableFloat::Value(text_atlas_rect.height() as _),
             ],
             offset: [
                 AnimatableFloat::Value(Self::TITLE_LEFT_OFFSET * ctx.ui_scale_factor),

@@ -965,8 +965,7 @@ impl UnsafeStagingScratchBufferManagerRaw {
         self.chain_free_block(f, s, 0);
     }
 
-    // #[tracing::instrument(ret(level = tracing::Level::DEBUG))]
-    fn level_indices(size: br::DeviceSize) -> (u8, u8) {
+    const fn level_indices(size: br::DeviceSize) -> (u8, u8) {
         const fn const_min_u32(a: u32, b: u32) -> u32 {
             if a < b { a } else { b }
         }

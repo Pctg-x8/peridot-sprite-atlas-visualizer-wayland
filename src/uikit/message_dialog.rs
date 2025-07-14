@@ -1,17 +1,14 @@
 use std::rc::Rc;
 
-use bedrock as br;
-
 use crate::{
     AppEvent, AppUpdateContext, PresenterInitContext, ViewInitContext,
-    base_system::AppBaseSystem,
+    base_system::{AppBaseSystem, FontType},
     composite::{
         AnimatableColor, AnimatableFloat, CompositeMode, CompositeRect, CompositeTree,
         CompositeTreeRef,
     },
     hittest::{HitTestTreeActionHandler, HitTestTreeRef, PointerActionArgs},
     input::EventContinueControl,
-    text::TextLayout,
 };
 
 use super::{common_controls::CommonButtonView, popup};
@@ -27,72 +24,23 @@ impl ContentView {
 
     #[tracing::instrument(name = "ContentView::new", skip(init))]
     pub fn new(init: &mut ViewInitContext, content: &str) -> Self {
-        let text_layout = TextLayout::build_simple(content, &mut init.base_system.fonts.ui_default);
         let text_atlas_rect = init
             .base_system
-            .alloc_mask_atlas_rect(text_layout.width_px(), text_layout.height_px());
-        let text_image_pixels =
-            text_layout.build_stg_image_pixel_buffer(init.staging_scratch_buffer);
-
-        init.base_system
-            .sync_execute_graphics_commands(|rec| {
-                rec.pipeline_barrier_2(&br::DependencyInfo::new(
-                    &[],
-                    &[],
-                    &[init
-                        .base_system
-                        .barrier_for_mask_atlas_resource()
-                        .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
-                ))
-                .inject(|r| {
-                    let (b, o) = init.staging_scratch_buffer.of(&text_image_pixels);
-
-                    r.copy_buffer_to_image(
-                        b,
-                        &init.base_system.mask_atlas_image_transparent_ref(),
-                        br::ImageLayout::TransferDestOpt,
-                        &[br::vk::VkBufferImageCopy {
-                            bufferOffset: o,
-                            bufferRowLength: text_layout.width_px(),
-                            bufferImageHeight: text_layout.height_px(),
-                            imageSubresource: br::ImageSubresourceLayers::new(
-                                br::AspectMask::COLOR,
-                                0,
-                                0..1,
-                            ),
-                            imageOffset: text_atlas_rect.lt_offset().with_z(0),
-                            imageExtent: text_atlas_rect.extent().with_depth(1),
-                        }],
-                    )
-                })
-                .pipeline_barrier_2(&br::DependencyInfo::new(
-                    &[],
-                    &[],
-                    &[init
-                        .base_system
-                        .barrier_for_mask_atlas_resource()
-                        .transit_from(
-                            br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt),
-                        )
-                        .from(
-                            br::PipelineStageFlags2::COPY,
-                            br::AccessFlags2::TRANSFER.write,
-                        )
-                        .to(
-                            br::PipelineStageFlags2::FRAGMENT_SHADER,
-                            br::AccessFlags2::SHADER.read,
-                        )],
-                ))
-            })
+            .text_mask(init.staging_scratch_buffer, FontType::UI, content)
             .unwrap();
+
+        let preferred_width =
+            Self::FRAME_PADDING_H * 2.0 + text_atlas_rect.width() as f32 / init.ui_scale_factor;
+        let preferred_height =
+            Self::FRAME_PADDING_V * 2.0 + text_atlas_rect.height() as f32 / init.ui_scale_factor;
 
         let ct_root = init.base_system.register_composite_rect(CompositeRect {
             size: [
-                AnimatableFloat::Value(text_layout.width()),
-                AnimatableFloat::Value(text_layout.height()),
+                AnimatableFloat::Value(text_atlas_rect.width() as _),
+                AnimatableFloat::Value(text_atlas_rect.height() as _),
             ],
             offset: [
-                AnimatableFloat::Value(-text_layout.width() * 0.5),
+                AnimatableFloat::Value(-(text_atlas_rect.width() as f32) * 0.5),
                 AnimatableFloat::Value(Self::FRAME_PADDING_V * init.ui_scale_factor),
             ],
             relative_offset_adjustment: [0.5, 0.0],
@@ -104,10 +52,8 @@ impl ContentView {
 
         Self {
             ct_root,
-            preferred_width: Self::FRAME_PADDING_H * 2.0
-                + text_layout.width() / init.ui_scale_factor,
-            preferred_height: Self::FRAME_PADDING_V * 2.0
-                + text_layout.height() / init.ui_scale_factor,
+            preferred_width,
+            preferred_height,
         }
     }
 

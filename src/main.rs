@@ -32,7 +32,7 @@ use std::{
 
 use crate::{composite::FloatParameter, quadtree::QuadTree};
 use app_state::{AppState, SpriteInfo};
-use base_system::AppBaseSystem;
+use base_system::{AppBaseSystem, FontType, RenderPassOptions};
 use bedrock::{
     self as br, CommandBufferMut, CommandPoolMut, DescriptorPoolMut, Device, DeviceMemoryMut,
     Fence, FenceMut, ImageChild, InstanceChild, MemoryBound, PhysicalDevice, RenderPass,
@@ -322,92 +322,10 @@ impl CurrentSelectedSpriteMarkerView {
     const COLOR: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
 
     pub fn new(init: &mut ViewInitContext) -> Self {
-        let render_size_px = ((Self::CORNER_RADIUS * 2.0 + 1.0) * init.ui_scale_factor) as u32;
-        let border_image_atlas_rect = init.base_system.atlas.alloc(render_size_px, render_size_px);
-
-        let render_pass = br::RenderPassObject::new(
-            init.base_system.subsystem,
-            &br::RenderPassCreateInfo2::new(
-                &[attachment_description_2_full_pixel_render_to_ro_texture(
-                    init.base_system.atlas.format(),
-                )],
-                &[const_subpass_description_2_single_color_write_only::<0>()],
-                &[br::SubpassDependency2::new(
-                    br::SubpassIndex::Internal(0),
-                    br::SubpassIndex::External,
-                )
-                .of_memory(
-                    br::AccessFlags::COLOR_ATTACHMENT.write,
-                    br::AccessFlags::SHADER.read,
-                )
-                .of_execution(
-                    br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                    br::PipelineStageFlags::FRAGMENT_SHADER,
-                )],
-            ),
-        )
-        .unwrap();
-        let framebuffer = br::FramebufferObject::new(
-            init.base_system.subsystem,
-            &br::FramebufferCreateInfo::new(
-                &render_pass,
-                &[init
-                    .base_system
-                    .mask_atlas_resource_transparent_ref()
-                    .as_transparent_ref()],
-                init.base_system.atlas.size(),
-                init.base_system.atlas.size(),
-            ),
-        )
-        .unwrap();
-
-        let [pipeline] = init
+        let border_image_atlas_rect = init
             .base_system
-            .create_graphics_pipelines_array(&[br::GraphicsPipelineCreateInfo::new(
-                init.base_system.require_empty_pipeline_layout(),
-                render_pass.subpass(0),
-                &[
-                    init.base_system
-                        .require_shader("resources/filltri.vert")
-                        .on_stage(br::ShaderStage::Vertex, c"main"),
-                    init.base_system
-                        .require_shader("resources/rounded_rect_border.frag")
-                        .on_stage(br::ShaderStage::Fragment, c"main")
-                        .with_specialization_info(&br::SpecializationInfo::new(
-                            &RoundedRectConstants {
-                                corner_radius: Self::CORNER_RADIUS,
-                            },
-                        )),
-                ],
-                VI_STATE_EMPTY,
-                IA_STATE_TRILIST,
-                &br::PipelineViewportStateCreateInfo::new(
-                    &[border_image_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
-                    &[border_image_atlas_rect.vk_rect()],
-                ),
-                RASTER_STATE_DEFAULT_FILL_NOCULL,
-                BLEND_STATE_SINGLE_NONE,
-            )
-            .set_multisample_state(MS_STATE_EMPTY)])
+            .rounded_rect_mask(init.ui_scale_factor, Self::CORNER_RADIUS)
             .unwrap();
-
-        init.base_system
-            .sync_execute_graphics_commands(|rec| {
-                rec.begin_render_pass2(
-                    &br::RenderPassBeginInfo::new(
-                        &render_pass,
-                        &framebuffer,
-                        border_image_atlas_rect.vk_rect(),
-                        &[br::ClearValue::color_f32([0.0; 4])],
-                    ),
-                    &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-                )
-                .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline)
-                .draw(3, 1, 0, 0)
-                .end_render_pass2(&br::SubpassEndInfo::new())
-            })
-            .unwrap();
-        drop((pipeline, framebuffer, render_pass));
 
         let global_x_param = init
             .base_system
@@ -1115,146 +1033,14 @@ impl SpriteListCellView {
         init_top: f32,
         init_sprite_index: usize,
     ) -> Self {
-        let label_layout =
-            TextLayout::build_simple(init_label, &mut init.base_system.fonts.ui_default);
         let label_atlas_rect = init
             .base_system
-            .alloc_mask_atlas_rect(label_layout.width_px(), label_layout.height_px());
-        let label_stg_image_pixels =
-            label_layout.build_stg_image_pixel_buffer(init.staging_scratch_buffer);
-        let bg_atlas_rect = init.base_system.alloc_mask_atlas_rect(
-            ((Self::CORNER_RADIUS * 2.0 + 1.0) * init.ui_scale_factor) as _,
-            ((Self::CORNER_RADIUS * 2.0 + 1.0) * init.ui_scale_factor) as _,
-        );
-
-        let render_pass = br::RenderPassObject::new(
-            init.base_system.subsystem,
-            &br::RenderPassCreateInfo2::new(
-                &[
-                    br::AttachmentDescription2::new(init.base_system.mask_atlas_format())
-                        .with_layout_to(br::ImageLayout::ShaderReadOnlyOpt.from_undefined())
-                        .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store),
-                ],
-                &[br::SubpassDescription2::new()
-                    .colors(&[br::AttachmentReference2::color_attachment_opt(0)])],
-                &[br::SubpassDependency2::new(
-                    br::SubpassIndex::Internal(0),
-                    br::SubpassIndex::External,
-                )
-                .of_memory(
-                    br::AccessFlags::COLOR_ATTACHMENT.write,
-                    br::AccessFlags::SHADER.read,
-                )
-                .of_execution(
-                    br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                    br::PipelineStageFlags::FRAGMENT_SHADER,
-                )],
-            ),
-        )
-        .unwrap();
-        let framebuffer = br::FramebufferObject::new(
-            init.base_system.subsystem,
-            &br::FramebufferCreateInfo::new(
-                &render_pass,
-                &[init
-                    .base_system
-                    .mask_atlas_resource_transparent_ref()
-                    .as_transparent_ref()],
-                init.base_system.mask_atlas_size(),
-                init.base_system.mask_atlas_size(),
-            ),
-        )
-        .unwrap();
-
-        let [pipeline] = init
+            .text_mask(init.staging_scratch_buffer, FontType::UI, init_label)
+            .unwrap();
+        let bg_atlas_rect = init
             .base_system
-            .create_graphics_pipelines_array(&[br::GraphicsPipelineCreateInfo::new(
-                init.base_system.require_empty_pipeline_layout(),
-                render_pass.subpass(0),
-                &[
-                    init.base_system
-                        .require_shader("resources/filltri.vert")
-                        .on_stage(br::ShaderStage::Vertex, c"main"),
-                    init.base_system
-                        .require_shader("resources/rounded_rect.frag")
-                        .on_stage(br::ShaderStage::Fragment, c"main"),
-                ],
-                VI_STATE_EMPTY,
-                IA_STATE_TRILIST,
-                &br::PipelineViewportStateCreateInfo::new(
-                    &[bg_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
-                    &[bg_atlas_rect.vk_rect()],
-                ),
-                RASTER_STATE_DEFAULT_FILL_NOCULL,
-                BLEND_STATE_SINGLE_NONE,
-            )
-            .set_multisample_state(MS_STATE_EMPTY)])
+            .rounded_fill_rect_mask(init.ui_scale_factor, Self::CORNER_RADIUS)
             .unwrap();
-
-        init.base_system
-            .sync_execute_graphics_commands(|rec| {
-                rec.pipeline_barrier_2(&br::DependencyInfo::new(
-                    &[],
-                    &[],
-                    &[init
-                        .base_system
-                        .barrier_for_mask_atlas_resource()
-                        .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
-                ))
-                .inject(|r| {
-                    let (b, o) = init.staging_scratch_buffer.of(&label_stg_image_pixels);
-
-                    r.copy_buffer_to_image(
-                        b,
-                        init.base_system.mask_atlas_image_transparent_ref(),
-                        br::ImageLayout::TransferDestOpt,
-                        &[br::vk::VkBufferImageCopy {
-                            bufferOffset: o,
-                            bufferRowLength: label_layout.width_px(),
-                            bufferImageHeight: label_layout.height_px(),
-                            imageSubresource: br::ImageSubresourceLayers::new(
-                                br::AspectMask::COLOR,
-                                0,
-                                0..1,
-                            ),
-                            imageOffset: label_atlas_rect.lt_offset().with_z(0),
-                            imageExtent: label_atlas_rect.extent().with_depth(1),
-                        }],
-                    )
-                })
-                .pipeline_barrier_2(&br::DependencyInfo::new(
-                    &[],
-                    &[],
-                    &[init
-                        .base_system
-                        .barrier_for_mask_atlas_resource()
-                        .from(
-                            br::PipelineStageFlags2::COPY,
-                            br::AccessFlags2::TRANSFER.write,
-                        )
-                        .to(
-                            br::PipelineStageFlags2::FRAGMENT_SHADER,
-                            br::AccessFlags2::SHADER_SAMPLED_READ,
-                        )
-                        .transit_from(
-                            br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt),
-                        )],
-                ))
-                .begin_render_pass2(
-                    &br::RenderPassBeginInfo::new(
-                        &render_pass,
-                        &framebuffer,
-                        bg_atlas_rect.vk_rect(),
-                        &[br::ClearValue::color_f32([0.0; 4])],
-                    ),
-                    &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-                )
-                .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline)
-                .draw(3, 1, 0, 0)
-                .end_render_pass2(&br::SubpassEndInfo::new())
-            })
-            .unwrap();
-        drop((pipeline, framebuffer, render_pass));
 
         let ct_root = init.base_system.register_composite_rect(CompositeRect {
             offset: [
@@ -1271,12 +1057,12 @@ impl SpriteListCellView {
         let ct_label = init.base_system.register_composite_rect(CompositeRect {
             offset: [
                 AnimatableFloat::Value(Self::LABEL_MARGIN_LEFT * init.ui_scale_factor),
-                AnimatableFloat::Value(-label_layout.height() * 0.5),
+                AnimatableFloat::Value(-(label_atlas_rect.height() as f32) * 0.5),
             ],
             relative_offset_adjustment: [0.0, 0.5],
             size: [
-                AnimatableFloat::Value(label_layout.width()),
-                AnimatableFloat::Value(label_layout.height()),
+                AnimatableFloat::Value(label_atlas_rect.width() as f32),
+                AnimatableFloat::Value(label_atlas_rect.height() as f32),
             ],
             has_bitmap: true,
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
@@ -1425,10 +1211,10 @@ impl SpriteListPaneView {
 
     #[tracing::instrument(name = "SpriteListPaneView::new", skip(init))]
     pub fn new(init: &mut ViewInitContext, header_height: f32) -> Self {
-        let render_size_px = ((Self::CORNER_RADIUS * 2.0 + 1.0) * init.ui_scale_factor) as u32;
         let frame_image_atlas_rect = init
             .base_system
-            .alloc_mask_atlas_rect(render_size_px, render_size_px);
+            .rounded_fill_rect_mask(init.ui_scale_factor, Self::CORNER_RADIUS)
+            .unwrap();
 
         let title_blur_pixels =
             (Self::BLUR_AMOUNT_ONEDIR as f32 * init.ui_scale_factor).ceil() as _;
@@ -1467,31 +1253,10 @@ impl SpriteListPaneView {
         .create()
         .unwrap();
 
-        let render_pass = br::RenderPassObject::new(
-            init.base_system.subsystem,
-            &br::RenderPassCreateInfo2::new(
-                &[
-                    br::AttachmentDescription2::new(init.base_system.mask_atlas_format())
-                        .with_layout_to(br::ImageLayout::ShaderReadOnlyOpt.from_undefined())
-                        .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store),
-                ],
-                &[br::SubpassDescription2::new()
-                    .colors(&[br::AttachmentReference2::color_attachment_opt(0)])],
-                &[br::SubpassDependency2::new(
-                    br::SubpassIndex::Internal(0),
-                    br::SubpassIndex::External,
-                )
-                .of_memory(
-                    br::AccessFlags::COLOR_ATTACHMENT.write,
-                    br::AccessFlags::SHADER.read,
-                )
-                .of_execution(
-                    br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                    br::PipelineStageFlags::FRAGMENT_SHADER,
-                )],
-            ),
-        )
-        .unwrap();
+        let render_pass = init
+            .base_system
+            .render_to_mask_atlas_pass(RenderPassOptions::FULL_PIXEL_RENDER)
+            .unwrap();
         let framebuffer = br::FramebufferObject::new(
             init.base_system.subsystem,
             &br::FramebufferCreateInfo::new(
@@ -1593,30 +1358,9 @@ impl SpriteListPaneView {
             ),
         )
         .unwrap();
-        let [pipeline, pipeline_blur1, pipeline_blur] = init
+        let [pipeline_blur1, pipeline_blur] = init
             .base_system
             .create_graphics_pipelines_array(&[
-                br::GraphicsPipelineCreateInfo::new(
-                    init.base_system.require_empty_pipeline_layout(),
-                    render_pass.subpass(0),
-                    &[
-                        init.base_system
-                            .require_shader("resources/filltri.vert")
-                            .on_stage(br::ShaderStage::Vertex, c"main"),
-                        init.base_system
-                            .require_shader("resources/rounded_rect.frag")
-                            .on_stage(br::ShaderStage::Fragment, c"main"),
-                    ],
-                    VI_STATE_EMPTY,
-                    IA_STATE_TRILIST,
-                    &br::PipelineViewportStateCreateInfo::new(
-                        &[frame_image_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
-                        &[frame_image_atlas_rect.vk_rect()],
-                    ),
-                    RASTER_STATE_DEFAULT_FILL_NOCULL,
-                    BLEND_STATE_SINGLE_NONE,
-                )
-                .set_multisample_state(MS_STATE_EMPTY),
                 br::GraphicsPipelineCreateInfo::new(
                     &blur_pipeline_layout,
                     render_pass.subpass(0),
@@ -1765,18 +1509,6 @@ impl SpriteListPaneView {
                 .begin_render_pass2(
                     &br::RenderPassBeginInfo::new(
                         &render_pass,
-                        &framebuffer,
-                        frame_image_atlas_rect.vk_rect(),
-                        &[br::ClearValue::color_f32([0.0; 4])],
-                    ),
-                    &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-                )
-                .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline)
-                .draw(3, 1, 0, 0)
-                .end_render_pass2(&br::SubpassEndInfo::new())
-                .begin_render_pass2(
-                    &br::RenderPassBeginInfo::new(
-                        &render_pass,
                         &title_blurred_work_framebuffer,
                         title_blurred_atlas_rect
                             .extent()
@@ -1854,7 +1586,6 @@ impl SpriteListPaneView {
             })
             .unwrap();
         drop((
-            pipeline,
             pipeline_blur1,
             pipeline_blur,
             blur_pipeline_layout,

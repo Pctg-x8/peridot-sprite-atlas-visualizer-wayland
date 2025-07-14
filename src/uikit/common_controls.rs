@@ -8,7 +8,7 @@ use crate::{
     RoundedRectConstants, VI_STATE_EMPTY, ViewInitContext,
     base_system::AppBaseSystem,
     composite::{
-        AnimatableColor, AnimatableFloat, AnimationData, CompositeMode, CompositeRect,
+        AnimatableColor, AnimatableFloat, AnimationCurve, CompositeMode, CompositeRect,
         CompositeTree, CompositeTreeRef,
     },
     hittest::{HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef},
@@ -327,17 +327,17 @@ impl CommonButtonView {
             _ => unreachable!(),
         };
         ct.get_mut(self.ct_root).composite_mode =
-            CompositeMode::ColorTint(AnimatableColor::Animated(
-                current,
-                AnimationData {
-                    to_value: [1.0, 1.0, 1.0, opacity],
-                    start_sec: current_sec,
-                    end_sec: current_sec + 0.1,
-                    curve_p1: (0.5, 0.0),
-                    curve_p2: (0.5, 1.0),
-                    event_on_complete: None,
+            CompositeMode::ColorTint(AnimatableColor::Animated {
+                from_value: current,
+                to_value: [1.0, 1.0, 1.0, opacity],
+                start_sec: current_sec,
+                end_sec: current_sec + 0.1,
+                curve: AnimationCurve::CubicBezier {
+                    p1: (0.5, 0.0),
+                    p2: (0.5, 1.0),
                 },
-            ));
+                event_on_complete: None,
+            });
         ct.mark_dirty(self.ct_root);
     }
 

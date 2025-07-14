@@ -40,7 +40,6 @@ struct WaylandShellEventHandler<'a, 'subsystem> {
     pointer_last_surface_pos: (wl::Fixed, wl::Fixed),
     tiled: bool,
     title_bar_last_click: Option<std::time::Instant>,
-    use_fractional_scale: bool,
 }
 impl wl::XdgWmBaseEventListener for WaylandShellEventHandler<'_, '_> {
     fn ping(&mut self, wm_base: &mut wl::XdgWmBase, serial: u32) {
@@ -62,7 +61,7 @@ impl wl::XdgSurfaceEventListener for WaylandShellEventHandler<'_, '_> {
 }
 impl wl::XdgToplevelEventListener for WaylandShellEventHandler<'_, '_> {
     #[tracing::instrument(
-        name = "<WaylandShellEventHandler as wl::XdgToplevelEventListener>::configure",
+        name = "<WaylandShellEventHandler as XdgToplevelEventListener>::configure",
         skip(self, _toplevel)
     )]
     fn configure(
@@ -95,7 +94,6 @@ impl wl::XdgToplevelEventListener for WaylandShellEventHandler<'_, '_> {
             height_px,
         });
 
-        // TODO: determine using client side decoration
         unsafe { &*self.xdg_surface_proxy_ptr }
             .set_window_geometry(0, 0, width, height)
             .unwrap();
@@ -114,12 +112,20 @@ impl wl::XdgToplevelEventListener for WaylandShellEventHandler<'_, '_> {
         self.app_event_bus.push(AppEvent::ToplevelWindowClose);
     }
 
+    #[tracing::instrument(
+        name = "<WaylandShellEventHandler as XdgToplevelEventListener>::configure_bounds",
+        skip(self, _toplevel)
+    )]
     fn configure_bounds(&mut self, _toplevel: &mut wl::XdgToplevel, width: i32, height: i32) {
-        tracing::trace!(width, height, "configure bounds");
+        tracing::trace!("configure bounds");
     }
 
+    #[tracing::instrument(
+        name = "<WaylandShellEventHandler as XdgToplevelEventListener>::wm_capabilities",
+        skip(self, _toplevel)
+    )]
     fn wm_capabilities(&mut self, _toplevel: &mut wl::XdgToplevel, capabilities: &[i32]) {
-        tracing::trace!(?capabilities, "wm capabilities");
+        tracing::trace!("wm capabilities");
     }
 }
 impl wl::SurfaceEventListener for WaylandShellEventHandler<'_, '_> {
@@ -1334,7 +1340,6 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
         let app_decorator;
         if zxdg_decoration_manager_v1.is_none() {
             // client decoration: backdrop shadow
-            // TODO: detect whether need this(if xdg_decoration is not provided, then needs client decoration)
             let deco = AppShellDecorator::new(
                 &compositor,
                 &subcompositor,
@@ -1395,7 +1400,6 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             ),
             tiled: false,
             title_bar_last_click: None,
-            use_fractional_scale: fractional_scale_manager_v1.is_some(),
         }));
 
         if let Err(e) = pointer.add_listener(shell_event_handler.get_mut()) {

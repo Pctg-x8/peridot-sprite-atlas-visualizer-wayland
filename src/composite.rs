@@ -71,15 +71,31 @@ const fn lerp4(x: f32, [a, c, e, g]: [f32; 4], [b, d, f, h]: [f32; 4]) -> [f32; 
 
 pub enum FloatParameter {
     Value(f32),
-    Animated(f32, AnimationData<f32>),
+    Animated {
+        start_sec: f32,
+        end_sec: f32,
+        from_value: f32,
+        to_value: f32,
+        curve: AnimationCurve,
+        event_on_complete: Option<AppEvent>,
+    },
 }
 impl FloatParameter {
     pub fn evaluate(&self, current_sec: f32) -> f32 {
         match self {
             &Self::Value(x) => x,
-            &Self::Animated(from_value, ref a) => {
-                lerp(a.interpolate(current_sec), from_value, a.to_value)
-            }
+            &Self::Animated {
+                from_value,
+                to_value,
+                start_sec,
+                end_sec,
+                ref curve,
+                ..
+            } => lerp(
+                curve.interpolate((current_sec - start_sec) / (end_sec - start_sec)),
+                from_value,
+                to_value,
+            ),
         }
     }
 }
@@ -87,27 +103,46 @@ impl FloatParameter {
 pub enum AnimatableFloat {
     Value(f32),
     Expression(Box<dyn Fn(&CompositeTreeParameterStore) -> f32>),
-    Animated(f32, AnimationData<f32>),
+    Animated {
+        start_sec: f32,
+        end_sec: f32,
+        from_value: f32,
+        to_value: f32,
+        curve: AnimationCurve,
+        event_on_complete: Option<AppEvent>,
+    },
 }
 impl AnimatableFloat {
     pub fn evaluate(&self, current_sec: f32, parameter_store: &CompositeTreeParameterStore) -> f32 {
         match self {
             &Self::Value(x) => x,
             &Self::Expression(ref x) => x(parameter_store),
-            &Self::Animated(from_value, ref a) => {
-                lerp(a.interpolate(current_sec), from_value, a.to_value)
-            }
+            &Self::Animated {
+                from_value,
+                to_value,
+                start_sec,
+                end_sec,
+                ref curve,
+                ..
+            } => lerp(
+                curve.interpolate((current_sec - start_sec) / (end_sec - start_sec)),
+                from_value,
+                to_value,
+            ),
         }
     }
 
     fn process_on_complete(&mut self, current_sec: f32, q: &AppEventBus) {
-        match self {
-            &mut Self::Animated(_, ref mut a) if a.end_sec <= current_sec => {
-                if let Some(e) = a.event_on_complete.take() {
-                    q.push(e);
-                }
+        if let &mut Self::Animated {
+            end_sec,
+            ref mut event_on_complete,
+            ..
+        } = self
+            && end_sec <= current_sec
+        {
+            if let Some(e) = event_on_complete.take() {
+                q.push(e);
             }
-            _ => (),
         }
     }
 }
@@ -115,7 +150,14 @@ impl AnimatableFloat {
 pub enum AnimatableColor {
     Value([f32; 4]),
     Expression(Box<dyn Fn(&CompositeTreeParameterStore) -> [f32; 4]>),
-    Animated([f32; 4], AnimationData<[f32; 4]>),
+    Animated {
+        start_sec: f32,
+        end_sec: f32,
+        from_value: [f32; 4],
+        to_value: [f32; 4],
+        curve: AnimationCurve,
+        event_on_complete: Option<AppEvent>,
+    },
 }
 impl AnimatableColor {
     pub fn evaluate(
@@ -126,124 +168,169 @@ impl AnimatableColor {
         match self {
             &Self::Value(x) => x,
             &Self::Expression(ref f) => f(parameter_store),
-            &Self::Animated(from_value, ref a) => {
-                lerp4(a.interpolate(current_sec), from_value, a.to_value)
-            }
+            &Self::Animated {
+                from_value,
+                to_value,
+                start_sec,
+                end_sec,
+                ref curve,
+                ..
+            } => lerp4(
+                curve.interpolate((current_sec - start_sec) / (end_sec - start_sec)),
+                from_value,
+                to_value,
+            ),
         }
     }
 
     fn process_on_complete(&mut self, current_sec: f32, q: &AppEventBus) {
-        match self {
-            &mut Self::Animated(_, ref mut a) if a.end_sec <= current_sec => {
-                if let Some(e) = a.event_on_complete.take() {
-                    q.push(e);
-                }
+        if let &mut Self::Animated {
+            end_sec,
+            ref mut event_on_complete,
+            ..
+        } = self
+            && end_sec <= current_sec
+        {
+            if let Some(e) = event_on_complete.take() {
+                q.push(e);
             }
-            _ => (),
         }
     }
 }
 
-pub struct AnimationData<T> {
-    pub start_sec: f32,
-    pub end_sec: f32,
-    pub to_value: T,
-    pub curve_p1: (f32, f32),
-    pub curve_p2: (f32, f32),
-    pub event_on_complete: Option<AppEvent>,
+#[derive(Clone)]
+pub enum AnimationCurve {
+    Linear,
+    CubicBezier { p1: (f32, f32), p2: (f32, f32) },
 }
-impl<T> AnimationData<T> {
-    fn interpolate(&self, current_sec: f32) -> f32 {
-        // out of limits
-        if current_sec < self.start_sec {
+impl AnimationCurve {
+    #[inline]
+    fn interpolate(&self, t: f32) -> f32 {
+        match self {
+            &AnimationCurve::Linear => t.clamp(0.0, 1.0),
+            &AnimationCurve::CubicBezier { p1, p2 } => interpolate_cubic_bezier(t, p1, p2),
+        }
+    }
+}
+
+fn interpolate_cubic_bezier(t: f32, p1: (f32, f32), p2: (f32, f32)) -> f32 {
+    // out of range
+    if t <= 0.0 {
+        return 0.0;
+    }
+    if t >= 1.0 {
+        return 1.0;
+    }
+
+    // p01 = mix(vec2(0.0), p1, t) = p1 * t
+    // p12 = mix(p1, p2, t) = p1 * (1.0 - t) + p2 * t
+    // p23 = mix(p2, vec2(1.0), t) = p2 * (1.0 - t) + vec2(t)
+    // p012 = mix(p01, p12, t) = p01 * (1.0 - t) + p12 * t = p1 * t * (1.0 - t) + (p1 * (1.0 -t ) + p2 * t) * t =
+    // p1 * t * (1.0 - t) + p1 * t * (1.0 - t) + p2 * t * t = p1 * 2.0 * t * (1.0 - t) + p2 * t * t =
+    // p1 * (2.0 * t - 2.0 * t * t) + p2 * t * t
+    // p123 = mix(p12, p23, t) = p12 * (1.0 - t) + p23 * t = (p1 * (1.0 - t) + p2 * t) * (1.0 - t) + (p2 * (1.0 - t) + vec2(t)) * t =
+    // p1 * (1.0 - t) * (1.0 - t) + p2 * t * (1.0 - t) + p2 * (1.0 - t) * t  + vec2(t * t) =
+    // p1 * (1.0 - t) * (1.0 - t) + p2 * 2.0 * t * (1.0 - t) + vec2(t * t) =
+    // p1 * (1.0 - t) * (1.0 - t) + p2 * (2.0 * t - 2.0 * t * t) + vec2(t * t)
+    // p = mix(p012, p123, t) = p012 * (1.0 - t) + p123 * t =
+    // (p1 * (2.0 * t - 2.0 * t * t) + p2 * t * t) * (1.0 - t) + (p1 * (1.0 - t) * (1.0 - t) + p2 * (2.0 * t - 2.0 * t * t) + vec2(t * t)) * t =
+    // p1 * (2.0 * t - 2.0 * t * t) * (1.0 - t) + p2 * t * t * (1.0 - t) + p1 * t * (1.0 - t) * (1.0 - t) + p2 * t * (2.0 * t - 2.0 * t * t) + vec2(t * t * t) =
+    // p1 * 2.0 * t * (1.0 - t) * (1.0 - t) + p2 * t * t * (1.0 - t) + p1 * t * (1.0 - t) * (1.0 - t) + p2 * 2.0 * t * t * (1.0 - t) + vec2(t * t * t) =
+    // p1 * 3.0 * t * (1.0 - t) * (1.0 - t) + p2 * 3.0 * t * t * (1.0 - t) + vec2(t * t * t)
+    //
+    // (1.0 - t)^2 = 1.0^2 - 2.0 * t + t^2
+    //
+    // x = (p1.x * 3.0 * t * (1.0 - t) * (1.0 - t) + p2.x * 3.0 * t * t * (1.0 - t) + t * t * t), t = ?
+    // x = p1.x * (3.0 * t - 6.0 * t^2 + 3.0 * t^3) + p2.x * (3.0 * t^2 - 3.0 * t^3) + t^3
+    // x = (p1.x * 3.0 - p2.x * 3.0 + 1.0) * t^3 + (-p1.x * 6.0 + p2.x * 3.0) * t^2 + p1.x * 3.0 * t
+    // 0 = (p1.x * 3.0 - p2.x * 3.0 + 1.0) * t^3 + (-p1.x * 6.0 + p2.x * 3.0) * t^2 + p1.x * 3.0 * t - x
+
+    // x = (p1.x * 3.0 - p2.x * 3.0 + 1.0) * t^3 + (p2.x * 3.0 - p1.x * 6.0) * t^2 + p1.x * 3.0 * t
+    // t = ?
+    let a = p1.0 * 3.0 - p2.0 * 3.0 + 1.0;
+    let b = p2.0 * 3.0 - p1.0 * 6.0;
+    let c = p1.0 * 3.0;
+    let d = -t;
+
+    let t0 = if a == 0.0 {
+        // solve quadratic: (p2.x * 3.0 - p1.x * 6.0) * t^2 + p1.x * 3.0 * t - x = 0
+        let dq = c * c - 4.0 * b * d;
+
+        if dq < 0.0 {
+            // no value
             return 0.0;
-        }
-        if current_sec > self.end_sec {
-            return 1.0;
-        }
+        } else if dq == 0.0 {
+            // exactly one
+            -c / (2.0 * b)
+        } else {
+            // select correct value
+            let t1 = -c + dq.sqrt() / (2.0 * b);
+            let t2 = -c - dq.sqrt() / (2.0 * b);
 
-        let x = (current_sec - self.start_sec) / (self.end_sec - self.start_sec);
-
-        // p01 = mix(vec2(0.0), p1, t) = p1 * t
-        // p12 = mix(p1, p2, t) = p1 * (1.0 - t) + p2 * t
-        // p23 = mix(p2, vec2(1.0), t) = p2 * (1.0 - t) + vec2(t)
-        // p012 = mix(p01, p12, t) = p01 * (1.0 - t) + p12 * t = p1 * t * (1.0 - t) + (p1 * (1.0 -t ) + p2 * t) * t =
-        // p1 * t * (1.0 - t) + p1 * t * (1.0 - t) + p2 * t * t = p1 * 2.0 * t * (1.0 - t) + p2 * t * t =
-        // p1 * (2.0 * t - 2.0 * t * t) + p2 * t * t
-        // p123 = mix(p12, p23, t) = p12 * (1.0 - t) + p23 * t = (p1 * (1.0 - t) + p2 * t) * (1.0 - t) + (p2 * (1.0 - t) + vec2(t)) * t =
-        // p1 * (1.0 - t) * (1.0 - t) + p2 * t * (1.0 - t) + p2 * (1.0 - t) * t  + vec2(t * t) =
-        // p1 * (1.0 - t) * (1.0 - t) + p2 * 2.0 * t * (1.0 - t) + vec2(t * t) =
-        // p1 * (1.0 - t) * (1.0 - t) + p2 * (2.0 * t - 2.0 * t * t) + vec2(t * t)
-        // p = mix(p012, p123, t) = p012 * (1.0 - t) + p123 * t =
-        // (p1 * (2.0 * t - 2.0 * t * t) + p2 * t * t) * (1.0 - t) + (p1 * (1.0 - t) * (1.0 - t) + p2 * (2.0 * t - 2.0 * t * t) + vec2(t * t)) * t =
-        // p1 * (2.0 * t - 2.0 * t * t) * (1.0 - t) + p2 * t * t * (1.0 - t) + p1 * t * (1.0 - t) * (1.0 - t) + p2 * t * (2.0 * t - 2.0 * t * t) + vec2(t * t * t) =
-        // p1 * 2.0 * t * (1.0 - t) * (1.0 - t) + p2 * t * t * (1.0 - t) + p1 * t * (1.0 - t) * (1.0 - t) + p2 * 2.0 * t * t * (1.0 - t) + vec2(t * t * t) =
-        // p1 * 3.0 * t * (1.0 - t) * (1.0 - t) + p2 * 3.0 * t * t * (1.0 - t) + vec2(t * t * t)
-        //
-        // (1.0 - t)^2 = 1.0^2 - 2.0 * t + t^2
-        //
-        // x = (p1.x * 3.0 * t * (1.0 - t) * (1.0 - t) + p2.x * 3.0 * t * t * (1.0 - t) + t * t * t), t = ?
-        // x = p1.x * (3.0 * t - 6.0 * t^2 + 3.0 * t^3) + p2.x * (3.0 * t^2 - 3.0 * t^3) + t^3
-        // x = (p1.x * 3.0 - p2.x * 3.0 + 1.0) * t^3 + (-p1.x * 6.0 + p2.x * 3.0) * t^2 + p1.x * 3.0 * t
-        // 0 = (p1.x * 3.0 - p2.x * 3.0 + 1.0) * t^3 + (-p1.x * 6.0 + p2.x * 3.0) * t^2 + p1.x * 3.0 * t - x
-
-        // x = (p1.x * 3.0 - p2.x * 3.0 + 1.0) * t^3 + (p2.x * 3.0 - p1.x * 6.0) * t^2 + p1.x * 3.0 * t
-        // t = ?
-        let a = self.curve_p1.0 * 3.0 - self.curve_p2.0 * 3.0 + 1.0;
-        let b = self.curve_p2.0 * 3.0 - self.curve_p1.0 * 6.0;
-        let c = self.curve_p1.0 * 3.0;
-        let d = -x;
-
-        let t = if a == 0.0 {
-            // solve quadratic: (p2.x * 3.0 - p1.x * 6.0) * t^2 + p1.x * 3.0 * t - x = 0
-            let dq = c * c - 4.0 * b * d;
-
-            if dq < 0.0 {
-                // no value
-                return 0.0;
-            } else if dq == 0.0 {
-                // exactly one
-                -c / (2.0 * b)
+            if 0.0 <= t2 && t2 <= 1.0 {
+                t2
             } else {
-                // select correct value
-                let t1 = -c + dq.sqrt() / (2.0 * b);
-                let t2 = -c - dq.sqrt() / (2.0 * b);
+                t1.clamp(0.0, 1.0)
+            }
+        }
+    } else {
+        // solve cubic: https://peter-shepherd.com/personal_development/mathematics/polynomials/cubicAlgebra.htm
+        let a1 = b / a;
+        let b1 = c / a;
+        let c1 = d / a;
+        let p = (3.0 * b1 - a1 * a1) / 3.0;
+        let q = (2.0 * a1 * a1 * a1 - 9.0 * a1 * b1 + 27.0 * c1) / 27.0;
 
-                if 0.0 <= t2 && t2 <= 1.0 {
+        if p == 0.0 {
+            if q == 0.0 {
+                0.0
+            } else {
+                let t1 = (-q).cbrt() - a1 / 3.0;
+                let t2 = (-q).cbrt() * (-0.5 * 3.0f32.sqrt() / 2.0) - a1 / 3.0;
+                let t3 = (-q).cbrt() * (-0.5 - 3.0f32.sqrt() / 2.0) - a1 / 3.0;
+
+                if 0.0 <= t3 && t3 <= 1.0 {
+                    t3
+                } else if 0.0 <= t2 && t2 <= 1.0 {
                     t2
                 } else {
                     t1.clamp(0.0, 1.0)
                 }
             }
         } else {
-            // solve cubic: https://peter-shepherd.com/personal_development/mathematics/polynomials/cubicAlgebra.htm
-            let a1 = b / a;
-            let b1 = c / a;
-            let c1 = d / a;
-            let p = (3.0 * b1 - a1 * a1) / 3.0;
-            let q = (2.0 * a1 * a1 * a1 - 9.0 * a1 * b1 + 27.0 * c1) / 27.0;
+            if q == 0.0 {
+                let t1 = -a1 / 3.0;
+                let t2 = (-p).sqrt() - a1 / 3.0;
+                let t3 = -(-p).sqrt() - a1 / 3.0;
 
-            if p == 0.0 {
-                if q == 0.0 {
-                    0.0
+                if 0.0 <= t3 && t3 <= 1.0 {
+                    t3
+                } else if 0.0 <= t2 && t2 <= 1.0 {
+                    t2
                 } else {
-                    let t1 = (-q).cbrt() - a1 / 3.0;
-                    let t2 = (-q).cbrt() * (-0.5 * 3.0f32.sqrt() / 2.0) - a1 / 3.0;
-                    let t3 = (-q).cbrt() * (-0.5 - 3.0f32.sqrt() / 2.0) - a1 / 3.0;
-
-                    if 0.0 <= t3 && t3 <= 1.0 {
-                        t3
-                    } else if 0.0 <= t2 && t2 <= 1.0 {
-                        t2
-                    } else {
-                        t1.clamp(0.0, 1.0)
-                    }
+                    t1.clamp(0.0, 1.0)
                 }
             } else {
-                if q == 0.0 {
-                    let t1 = -a1 / 3.0;
-                    let t2 = (-p).sqrt() - a1 / 3.0;
-                    let t3 = -(-p).sqrt() - a1 / 3.0;
+                let dc = (q * q) / 4.0 + (p * p * p) / 27.0;
+
+                if dc == 0.0 {
+                    // two reals
+                    let t1 = 2.0 * (-q / 2.0).cbrt() - a1 / 3.0;
+                    let t2 = (q / 2.0).cbrt() - a1 / 3.0;
+
+                    if 0.0 <= t2 && t2 <= 1.0 {
+                        t2
+                    } else {
+                        t1.clamp(0.0, 1.0)
+                    }
+                } else if dc > 0.0 {
+                    // one real and two img
+                    let u1 = (-(q / 2.0) + dc.sqrt()).cbrt();
+                    let v1 = (q / 2.0 + dc.sqrt()).cbrt();
+
+                    let t1 = u1 - v1 - a1 / 3.0;
+                    let t2 = -0.5 * (u1 - v1) + (u1 + v1) * 3.0f32.sqrt() / 2.0 - a1 / 3.0;
+                    let t3 = -0.5 * (u1 - v1) - (u1 + v1) * 3.0f32.sqrt() / 2.0 - a1 / 3.0;
 
                     if 0.0 <= t3 && t3 <= 1.0 {
                         t3
@@ -253,63 +340,32 @@ impl<T> AnimationData<T> {
                         t1.clamp(0.0, 1.0)
                     }
                 } else {
-                    let dc = (q * q) / 4.0 + (p * p * p) / 27.0;
+                    // irreducible case
+                    let r = (-p / 3.0).powi(3).sqrt();
+                    let phi = (-q / (2.0 * r)).acos();
 
-                    if dc == 0.0 {
-                        // two reals
-                        let t1 = 2.0 * (-q / 2.0).cbrt() - a1 / 3.0;
-                        let t2 = (q / 2.0).cbrt() - a1 / 3.0;
+                    let t1 = 2.0 * r.cbrt() * (phi / 3.0).cos() - a1 / 3.0;
+                    let t2 =
+                        2.0 * r.cbrt() * ((phi + core::f32::consts::TAU) / 3.0).cos() - a1 / 3.0;
+                    let t3 = 3.0 * r.cbrt() * ((phi + core::f32::consts::TAU * 2.0) / 3.0).cos()
+                        - a1 / 3.0;
 
-                        if 0.0 <= t2 && t2 <= 1.0 {
-                            t2
-                        } else {
-                            t1.clamp(0.0, 1.0)
-                        }
-                    } else if dc > 0.0 {
-                        // one real and two img
-                        let u1 = (-(q / 2.0) + dc.sqrt()).cbrt();
-                        let v1 = (q / 2.0 + dc.sqrt()).cbrt();
-
-                        let t1 = u1 - v1 - a1 / 3.0;
-                        let t2 = -0.5 * (u1 - v1) + (u1 + v1) * 3.0f32.sqrt() / 2.0 - a1 / 3.0;
-                        let t3 = -0.5 * (u1 - v1) - (u1 + v1) * 3.0f32.sqrt() / 2.0 - a1 / 3.0;
-
-                        if 0.0 <= t3 && t3 <= 1.0 {
-                            t3
-                        } else if 0.0 <= t2 && t2 <= 1.0 {
-                            t2
-                        } else {
-                            t1.clamp(0.0, 1.0)
-                        }
+                    if 0.0 <= t3 && t3 <= 1.0 {
+                        t3
+                    } else if 0.0 <= t2 && t2 <= 1.0 {
+                        t2
                     } else {
-                        // irreducible case
-                        let r = (-p / 3.0).powi(3).sqrt();
-                        let phi = (-q / (2.0 * r)).acos();
-
-                        let t1 = 2.0 * r.cbrt() * (phi / 3.0).cos() - a1 / 3.0;
-                        let t2 = 2.0 * r.cbrt() * ((phi + core::f32::consts::TAU) / 3.0).cos()
-                            - a1 / 3.0;
-                        let t3 =
-                            3.0 * r.cbrt() * ((phi + core::f32::consts::TAU * 2.0) / 3.0).cos()
-                                - a1 / 3.0;
-
-                        if 0.0 <= t3 && t3 <= 1.0 {
-                            t3
-                        } else if 0.0 <= t2 && t2 <= 1.0 {
-                            t2
-                        } else {
-                            t1.clamp(0.0, 1.0)
-                        }
+                        t1.clamp(0.0, 1.0)
                     }
                 }
             }
-        };
+        }
+    };
 
-        // y = (p1.y * 3.0 - p2.y * 3.0 + 1.0) * t^3 + (p2.y * 3.0 - p1.y * 6.0) * t^2 + p1.y * 3.0 * t
-        (self.curve_p1.1 * 3.0 - self.curve_p2.1 * 3.0 + 1.0) * t.powi(3)
-            + (self.curve_p2.1 * 3.0 - self.curve_p1.1 * 6.0) * t.powi(2)
-            + self.curve_p1.1 * 3.0 * t
-    }
+    // y = (p1.y * 3.0 - p2.y * 3.0 + 1.0) * t^3 + (p2.y * 3.0 - p1.y * 6.0) * t^2 + p1.y * 3.0 * t
+    (p1.1 * 3.0 - p2.1 * 3.0 + 1.0) * t0.powi(3)
+        + (p2.1 * 3.0 - p1.1 * 6.0) * t0.powi(2)
+        + p1.1 * 3.0 * t0
 }
 
 pub struct CompositeRect {
@@ -790,7 +846,7 @@ impl CompositeRenderingInstructionBuilder {
         }
     }
 
-    fn into_data(mut self) -> CompositeRenderingData {
+    fn build(mut self) -> CompositeRenderingData {
         // process for last backdrop layer
         self.max_backdrop_buffer_count = self
             .max_backdrop_buffer_count
@@ -1203,7 +1259,7 @@ impl CompositeTree {
         // let update_time = update_timer.elapsed();
         // println!("instbuild({update_time:?}): {:?}", inst_builder.insts);
 
-        inst_builder.into_data()
+        inst_builder.build()
     }
 }
 

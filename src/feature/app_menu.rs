@@ -6,7 +6,7 @@ use crate::{
     RoundedRectConstants, VI_STATE_EMPTY, VI_STATE_FLOAT2_ONLY, ViewInitContext,
     base_system::AppBaseSystem,
     composite::{
-        AnimatableColor, AnimatableFloat, AnimationData, CompositeMode, CompositeRect,
+        AnimatableColor, AnimatableFloat, AnimationCurve, CompositeMode, CompositeRect,
         CompositeTreeFloatParameterRef, CompositeTreeRef, FloatParameter,
     },
     hittest::{self, HitTestTreeActionHandler, HitTestTreeData, HitTestTreeRef},
@@ -1075,59 +1075,50 @@ impl CommandButtonView {
             if shown {
                 app_system.composite_tree.parameter_store_mut().set_float(
                     self.ct_bg_alpha_rate_shown,
-                    FloatParameter::Animated(
-                        0.0,
-                        AnimationData {
-                            to_value: 1.0,
-                            start_sec: current_sec + self.show_delay_sec,
-                            end_sec: current_sec + self.show_delay_sec + 0.25,
-                            curve_p1: (0.5, 0.5),
-                            curve_p2: (0.5, 0.5),
-                            event_on_complete: None,
-                        },
-                    ),
+                    FloatParameter::Animated {
+                        from_value: 0.0,
+                        to_value: 1.0,
+                        start_sec: current_sec + self.show_delay_sec,
+                        end_sec: current_sec + self.show_delay_sec + 0.25,
+                        curve: AnimationCurve::Linear,
+                        event_on_complete: None,
+                    },
                 );
                 app_system
                     .composite_tree
                     .get_mut(self.ct_icon)
-                    .composite_mode = CompositeMode::ColorTint(AnimatableColor::Animated(
-                    Self::CONTENT_COLOR_HIDDEN,
-                    AnimationData {
-                        start_sec: current_sec + self.show_delay_sec,
-                        end_sec: current_sec + self.show_delay_sec + 0.25,
-                        to_value: Self::CONTENT_COLOR_SHOWN,
-                        curve_p1: (0.5, 0.5),
-                        curve_p2: (0.5, 0.5),
-                        event_on_complete: None,
-                    },
-                ));
+                    .composite_mode = CompositeMode::ColorTint(AnimatableColor::Animated {
+                    start_sec: current_sec + self.show_delay_sec,
+                    end_sec: current_sec + self.show_delay_sec + 0.25,
+                    from_value: Self::CONTENT_COLOR_HIDDEN,
+                    to_value: Self::CONTENT_COLOR_SHOWN,
+                    curve: AnimationCurve::Linear,
+                    event_on_complete: None,
+                });
                 app_system
                     .composite_tree
                     .get_mut(self.ct_label)
-                    .composite_mode = CompositeMode::ColorTint(AnimatableColor::Animated(
-                    Self::CONTENT_COLOR_HIDDEN,
-                    AnimationData {
-                        start_sec: current_sec + self.show_delay_sec,
-                        end_sec: current_sec + self.show_delay_sec + 0.25,
-                        to_value: Self::CONTENT_COLOR_SHOWN,
-                        curve_p1: (0.5, 0.5),
-                        curve_p2: (0.5, 0.5),
-                        event_on_complete: None,
-                    },
-                ));
+                    .composite_mode = CompositeMode::ColorTint(AnimatableColor::Animated {
+                    start_sec: current_sec + self.show_delay_sec,
+                    end_sec: current_sec + self.show_delay_sec + 0.25,
+                    from_value: Self::CONTENT_COLOR_HIDDEN,
+                    to_value: Self::CONTENT_COLOR_SHOWN,
+                    curve: AnimationCurve::Linear,
+                    event_on_complete: None,
+                });
                 // TODO: ここでui_scale_factor適用するとui_scale_factorがかわったときにアニメーションが破綻するので別のところにおいたほうがよさそう(CompositeTreeで位置計算するときに適用する)
                 app_system.composite_tree.get_mut(self.ct_root).offset[0] =
-                    AnimatableFloat::Animated(
-                        (self.left + 8.0) * self.ui_scale_factor,
-                        AnimationData {
-                            start_sec: current_sec + self.show_delay_sec,
-                            end_sec: current_sec + self.show_delay_sec + 0.25,
-                            to_value: self.left * self.ui_scale_factor,
-                            curve_p1: (0.5, 0.5),
-                            curve_p2: (0.5, 1.0),
-                            event_on_complete: None,
+                    AnimatableFloat::Animated {
+                        start_sec: current_sec + self.show_delay_sec,
+                        end_sec: current_sec + self.show_delay_sec + 0.25,
+                        from_value: (self.left + 8.0) * self.ui_scale_factor,
+                        to_value: self.left * self.ui_scale_factor,
+                        curve: AnimationCurve::CubicBezier {
+                            p1: (0.5, 0.5),
+                            p2: (0.5, 1.0),
                         },
-                    );
+                        event_on_complete: None,
+                    };
 
                 app_system.composite_tree.mark_dirty(self.ct_root);
                 app_system.composite_tree.mark_dirty(self.ct_icon);
@@ -1135,46 +1126,37 @@ impl CommandButtonView {
             } else {
                 app_system.composite_tree.parameter_store_mut().set_float(
                     self.ct_bg_alpha_rate_shown,
-                    FloatParameter::Animated(
-                        1.0,
-                        AnimationData {
-                            to_value: 0.0,
-                            start_sec: current_sec,
-                            end_sec: current_sec + 0.25,
-                            curve_p1: (0.5, 0.5),
-                            curve_p2: (0.5, 0.5),
-                            event_on_complete: None,
-                        },
-                    ),
+                    FloatParameter::Animated {
+                        from_value: 1.0,
+                        to_value: 0.0,
+                        start_sec: current_sec,
+                        end_sec: current_sec + 0.25,
+                        curve: AnimationCurve::Linear,
+                        event_on_complete: None,
+                    },
                 );
                 app_system
                     .composite_tree
                     .get_mut(self.ct_icon)
-                    .composite_mode = CompositeMode::ColorTint(AnimatableColor::Animated(
-                    Self::CONTENT_COLOR_SHOWN,
-                    AnimationData {
-                        start_sec: current_sec,
-                        end_sec: current_sec + 0.25,
-                        to_value: Self::CONTENT_COLOR_HIDDEN,
-                        curve_p1: (0.5, 0.5),
-                        curve_p2: (0.5, 0.5),
-                        event_on_complete: None,
-                    },
-                ));
+                    .composite_mode = CompositeMode::ColorTint(AnimatableColor::Animated {
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.25,
+                    from_value: Self::CONTENT_COLOR_SHOWN,
+                    to_value: Self::CONTENT_COLOR_HIDDEN,
+                    curve: AnimationCurve::Linear,
+                    event_on_complete: None,
+                });
                 app_system
                     .composite_tree
                     .get_mut(self.ct_label)
-                    .composite_mode = CompositeMode::ColorTint(AnimatableColor::Animated(
-                    Self::CONTENT_COLOR_SHOWN,
-                    AnimationData {
-                        start_sec: current_sec,
-                        end_sec: current_sec + 0.25,
-                        to_value: Self::CONTENT_COLOR_HIDDEN,
-                        curve_p1: (0.5, 0.5),
-                        curve_p2: (0.5, 0.5),
-                        event_on_complete: None,
-                    },
-                ));
+                    .composite_mode = CompositeMode::ColorTint(AnimatableColor::Animated {
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.25,
+                    from_value: Self::CONTENT_COLOR_SHOWN,
+                    to_value: Self::CONTENT_COLOR_HIDDEN,
+                    curve: AnimationCurve::Linear,
+                    event_on_complete: None,
+                });
 
                 app_system.composite_tree.mark_dirty(self.ct_icon);
                 app_system.composite_tree.mark_dirty(self.ct_label);
@@ -1194,17 +1176,14 @@ impl CommandButtonView {
 
             app_system.composite_tree.parameter_store_mut().set_float(
                 self.ct_bg_alpha_rate_pointer,
-                FloatParameter::Animated(
-                    current,
-                    AnimationData {
-                        to_value: target,
-                        start_sec: current_sec,
-                        end_sec: current_sec + 0.1,
-                        curve_p1: (0.5, 0.5),
-                        curve_p2: (0.5, 0.5),
-                        event_on_complete: None,
-                    },
-                ),
+                FloatParameter::Animated {
+                    from_value: current,
+                    to_value: target,
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.1,
+                    curve: AnimationCurve::Linear,
+                    event_on_complete: None,
+                },
             );
         }
     }
@@ -1284,28 +1263,22 @@ impl BaseView {
                     .composite_tree
                     .get_mut(self.ct_root)
                     .composite_mode = CompositeMode::FillColorBackdropBlur(
-                    AnimatableColor::Animated(
-                        [0.0, 0.0, 0.0, 0.0],
-                        AnimationData {
-                            start_sec: current_sec,
-                            end_sec: current_sec + 0.25,
-                            to_value: [0.0, 0.0, 0.0, 0.25],
-                            curve_p1: (0.5, 0.5),
-                            curve_p2: (0.5, 0.5),
-                            event_on_complete: None,
-                        },
-                    ),
-                    AnimatableFloat::Animated(
-                        0.0,
-                        AnimationData {
-                            to_value: 3.0,
-                            start_sec: current_sec,
-                            end_sec: current_sec + 0.25,
-                            curve_p1: (0.5, 0.5),
-                            curve_p2: (0.5, 0.5),
-                            event_on_complete: None,
-                        },
-                    ),
+                    AnimatableColor::Animated {
+                        start_sec: current_sec,
+                        end_sec: current_sec + 0.25,
+                        from_value: [0.0, 0.0, 0.0, 0.0],
+                        to_value: [0.0, 0.0, 0.0, 0.25],
+                        curve: AnimationCurve::Linear,
+                        event_on_complete: None,
+                    },
+                    AnimatableFloat::Animated {
+                        from_value: 0.0,
+                        to_value: 3.0,
+                        start_sec: current_sec,
+                        end_sec: current_sec + 0.25,
+                        curve: AnimationCurve::Linear,
+                        event_on_complete: None,
+                    },
                 );
                 app_system.composite_tree.mark_dirty(self.ct_root);
             } else {
@@ -1313,28 +1286,22 @@ impl BaseView {
                     .composite_tree
                     .get_mut(self.ct_root)
                     .composite_mode = CompositeMode::FillColorBackdropBlur(
-                    AnimatableColor::Animated(
-                        [0.0, 0.0, 0.0, 0.25],
-                        AnimationData {
-                            start_sec: current_sec,
-                            end_sec: current_sec + 0.25,
-                            to_value: [0.0, 0.0, 0.0, 0.0],
-                            curve_p1: (0.5, 0.5),
-                            curve_p2: (0.5, 0.5),
-                            event_on_complete: None,
-                        },
-                    ),
-                    AnimatableFloat::Animated(
-                        3.0,
-                        AnimationData {
-                            to_value: 0.0,
-                            start_sec: current_sec,
-                            end_sec: current_sec + 0.25,
-                            curve_p1: (0.5, 0.5),
-                            curve_p2: (0.5, 0.5),
-                            event_on_complete: None,
-                        },
-                    ),
+                    AnimatableColor::Animated {
+                        start_sec: current_sec,
+                        end_sec: current_sec + 0.25,
+                        from_value: [0.0, 0.0, 0.0, 0.25],
+                        to_value: [0.0, 0.0, 0.0, 0.0],
+                        curve: AnimationCurve::Linear,
+                        event_on_complete: None,
+                    },
+                    AnimatableFloat::Animated {
+                        from_value: 3.0,
+                        to_value: 0.0,
+                        start_sec: current_sec,
+                        end_sec: current_sec + 0.25,
+                        curve: AnimationCurve::Linear,
+                        event_on_complete: None,
+                    },
                 );
                 app_system.composite_tree.mark_dirty(self.ct_root);
             }

@@ -10,7 +10,7 @@ use crate::{
     ViewInitContext,
     base_system::AppBaseSystem,
     composite::{
-        AnimatableColor, AnimatableFloat, AnimationData, AtlasRect, CompositeMode, CompositeRect,
+        AnimatableColor, AnimatableFloat, AnimationCurve, AtlasRect, CompositeMode, CompositeRect,
         CompositeTree, CompositeTreeRef,
     },
     hittest::{HitTestTreeActionHandler, HitTestTreeData, HitTestTreeRef, PointerActionArgs, Role},
@@ -383,29 +383,23 @@ impl SystemCommandButtonView {
     fn update(&self, ct: &mut CompositeTree, current_sec: f32) {
         if self.is_dirty.replace(false) {
             ct.get_mut(self.ct_hover).opacity = if self.hovering.get() {
-                AnimatableFloat::Animated(
-                    0.0,
-                    AnimationData {
-                        to_value: 1.0,
-                        start_sec: current_sec,
-                        end_sec: current_sec + 0.1,
-                        curve_p1: (0.5, 0.5),
-                        curve_p2: (0.5, 0.5),
-                        event_on_complete: None,
-                    },
-                )
+                AnimatableFloat::Animated {
+                    from_value: 0.0,
+                    to_value: 1.0,
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.1,
+                    curve: AnimationCurve::Linear,
+                    event_on_complete: None,
+                }
             } else {
-                AnimatableFloat::Animated(
-                    1.0,
-                    AnimationData {
-                        to_value: 0.0,
-                        start_sec: current_sec,
-                        end_sec: current_sec + 0.1,
-                        curve_p1: (0.5, 0.5),
-                        curve_p2: (0.5, 0.5),
-                        event_on_complete: None,
-                    },
-                )
+                AnimatableFloat::Animated {
+                    from_value: 1.0,
+                    to_value: 0.0,
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.1,
+                    curve: AnimationCurve::Linear,
+                    event_on_complete: None,
+                }
             };
 
             ct.mark_dirty(self.ct_hover);
@@ -675,17 +669,17 @@ impl MenuButtonView {
             _ => unreachable!(),
         };
         composite_tree.get_mut(self.ct_bg).composite_mode =
-            CompositeMode::FillColor(AnimatableColor::Animated(
-                current,
-                AnimationData {
-                    to_value: [1.0, 1.0, 1.0, opacity],
-                    start_sec: current_sec,
-                    end_sec: current_sec + 0.1,
-                    curve_p1: (0.5, 0.0),
-                    curve_p2: (0.5, 1.0),
-                    event_on_complete: None,
+            CompositeMode::FillColor(AnimatableColor::Animated {
+                from_value: current,
+                to_value: [1.0, 1.0, 1.0, opacity],
+                start_sec: current_sec,
+                end_sec: current_sec + 0.1,
+                curve: AnimationCurve::CubicBezier {
+                    p1: (0.5, 0.0),
+                    p2: (0.5, 1.0),
                 },
-            ));
+                event_on_complete: None,
+            });
         composite_tree.mark_dirty(self.ct_bg);
     }
 

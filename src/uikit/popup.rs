@@ -7,7 +7,7 @@ use crate::{
     RASTER_STATE_DEFAULT_FILL_NOCULL, RoundedRectConstants, VI_STATE_EMPTY, ViewInitContext,
     base_system::AppBaseSystem,
     composite::{
-        AnimatableColor, AnimatableFloat, AnimationData, CompositeMode, CompositeRect,
+        AnimatableColor, AnimatableFloat, AnimationCurve, CompositeMode, CompositeRect,
         CompositeTree, CompositeTreeRef,
     },
     hittest::{HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef},
@@ -81,28 +81,25 @@ impl MaskView {
 
     pub fn show(&self, ct: &mut CompositeTree, current_sec: f32) {
         ct.get_mut(self.ct_root).composite_mode = CompositeMode::FillColorBackdropBlur(
-            AnimatableColor::Animated(
-                [0.0, 0.0, 0.0, 0.0],
-                AnimationData {
-                    to_value: [0.0, 0.0, 0.0, POPUP_MASK_OPACITY],
-                    start_sec: current_sec,
-                    end_sec: current_sec + POPUP_ANIMATION_DURATION,
-                    curve_p1: (0.5, 0.5),
-                    curve_p2: (0.5, 0.5),
-                    event_on_complete: None,
+            AnimatableColor::Animated {
+                from_value: [0.0, 0.0, 0.0, 0.0],
+                to_value: [0.0, 0.0, 0.0, POPUP_MASK_OPACITY],
+                start_sec: current_sec,
+                end_sec: current_sec + POPUP_ANIMATION_DURATION,
+                curve: AnimationCurve::Linear,
+                event_on_complete: None,
+            },
+            AnimatableFloat::Animated {
+                from_value: 0.0,
+                to_value: POPUP_MASK_BLUR_POWER,
+                start_sec: current_sec,
+                end_sec: current_sec + POPUP_ANIMATION_DURATION,
+                curve: AnimationCurve::CubicBezier {
+                    p1: (0.25, 0.5),
+                    p2: (0.5, 1.0),
                 },
-            ),
-            AnimatableFloat::Animated(
-                0.0,
-                AnimationData {
-                    to_value: POPUP_MASK_BLUR_POWER,
-                    start_sec: current_sec,
-                    end_sec: current_sec + POPUP_ANIMATION_DURATION,
-                    curve_p1: (0.25, 0.5),
-                    curve_p2: (0.5, 1.0),
-                    event_on_complete: None,
-                },
-            ),
+                event_on_complete: None,
+            },
         );
 
         ct.mark_dirty(self.ct_root);
@@ -110,28 +107,22 @@ impl MaskView {
 
     pub fn hide(&self, ct: &mut CompositeTree, current_sec: f32, event_on_complete: AppEvent) {
         ct.get_mut(self.ct_root).composite_mode = CompositeMode::FillColorBackdropBlur(
-            AnimatableColor::Animated(
-                [0.0, 0.0, 0.0, POPUP_MASK_OPACITY],
-                AnimationData {
-                    to_value: [0.0, 0.0, 0.0, 0.0],
-                    start_sec: current_sec,
-                    end_sec: current_sec + POPUP_ANIMATION_DURATION,
-                    curve_p1: (0.5, 0.5),
-                    curve_p2: (0.5, 0.5),
-                    event_on_complete: Some(event_on_complete),
-                },
-            ),
-            AnimatableFloat::Animated(
-                POPUP_MASK_BLUR_POWER,
-                AnimationData {
-                    to_value: 0.0,
-                    start_sec: current_sec,
-                    end_sec: current_sec + POPUP_ANIMATION_DURATION,
-                    curve_p1: (0.5, 0.5),
-                    curve_p2: (0.5, 0.5),
-                    event_on_complete: None,
-                },
-            ),
+            AnimatableColor::Animated {
+                from_value: [0.0, 0.0, 0.0, POPUP_MASK_OPACITY],
+                to_value: [0.0, 0.0, 0.0, 0.0],
+                start_sec: current_sec,
+                end_sec: current_sec + POPUP_ANIMATION_DURATION,
+                curve: AnimationCurve::Linear,
+                event_on_complete: Some(event_on_complete),
+            },
+            AnimatableFloat::Animated {
+                from_value: POPUP_MASK_BLUR_POWER,
+                to_value: 0.0,
+                start_sec: current_sec,
+                end_sec: current_sec + POPUP_ANIMATION_DURATION,
+                curve: AnimationCurve::Linear,
+                event_on_complete: None,
+            },
         );
 
         ct.mark_dirty(self.ct_root);
@@ -376,99 +367,93 @@ impl CommonFrameView {
     }
 
     pub fn show(&self, ct: &mut CompositeTree, current_sec: f32) {
-        ct.get_mut(self.ct_root).opacity = AnimatableFloat::Animated(
-            0.0,
-            AnimationData {
-                to_value: 1.0,
-                start_sec: current_sec,
-                end_sec: current_sec + POPUP_ANIMATION_DURATION,
-                curve_p1: (0.5, 0.5),
-                curve_p2: (0.5, 0.5),
-                event_on_complete: None,
+        ct.get_mut(self.ct_root).opacity = AnimatableFloat::Animated {
+            from_value: 0.0,
+            to_value: 1.0,
+            start_sec: current_sec,
+            end_sec: current_sec + POPUP_ANIMATION_DURATION,
+            curve: AnimationCurve::Linear,
+            event_on_complete: None,
+        };
+        ct.get_mut(self.ct_root).offset[1] = AnimatableFloat::Animated {
+            from_value: (-0.5 * self.height + 8.0) * self.ui_scale_factor,
+            to_value: (-0.5 * self.height) * self.ui_scale_factor,
+            start_sec: current_sec,
+            end_sec: current_sec + POPUP_ANIMATION_DURATION,
+            curve: AnimationCurve::CubicBezier {
+                p1: (0.25, 0.5),
+                p2: (0.5, 0.9),
             },
-        );
-        ct.get_mut(self.ct_root).offset[1] = AnimatableFloat::Animated(
-            (-0.5 * self.height + 8.0) * self.ui_scale_factor,
-            AnimationData {
-                to_value: (-0.5 * self.height) * self.ui_scale_factor,
-                start_sec: current_sec,
-                end_sec: current_sec + POPUP_ANIMATION_DURATION,
-                curve_p1: (0.25, 0.5),
-                curve_p2: (0.5, 0.9),
-                event_on_complete: None,
+            event_on_complete: None,
+        };
+        ct.get_mut(self.ct_root).scale_x = AnimatableFloat::Animated {
+            from_value: 0.9,
+            to_value: 1.0,
+            start_sec: current_sec,
+            end_sec: current_sec + POPUP_ANIMATION_DURATION,
+            curve: AnimationCurve::CubicBezier {
+                p1: (0.25, 0.5),
+                p2: (0.5, 0.9),
             },
-        );
-        ct.get_mut(self.ct_root).scale_x = AnimatableFloat::Animated(
-            0.9,
-            AnimationData {
-                to_value: 1.0,
-                start_sec: current_sec,
-                end_sec: current_sec + POPUP_ANIMATION_DURATION,
-                curve_p1: (0.25, 0.5),
-                curve_p2: (0.5, 0.9),
-                event_on_complete: None,
+            event_on_complete: None,
+        };
+        ct.get_mut(self.ct_root).scale_y = AnimatableFloat::Animated {
+            from_value: 0.9,
+            to_value: 1.0,
+            start_sec: current_sec,
+            end_sec: current_sec + POPUP_ANIMATION_DURATION,
+            curve: AnimationCurve::CubicBezier {
+                p1: (0.25, 0.5),
+                p2: (0.5, 0.9),
             },
-        );
-        ct.get_mut(self.ct_root).scale_y = AnimatableFloat::Animated(
-            0.9,
-            AnimationData {
-                to_value: 1.0,
-                start_sec: current_sec,
-                end_sec: current_sec + POPUP_ANIMATION_DURATION,
-                curve_p1: (0.25, 0.5),
-                curve_p2: (0.5, 0.9),
-                event_on_complete: None,
-            },
-        );
+            event_on_complete: None,
+        };
 
         ct.mark_dirty(self.ct_root);
     }
 
     pub fn hide(&self, ct: &mut CompositeTree, current_sec: f32) {
-        ct.get_mut(self.ct_root).opacity = AnimatableFloat::Animated(
-            1.0,
-            AnimationData {
-                to_value: 0.0,
-                start_sec: current_sec,
-                end_sec: current_sec + POPUP_ANIMATION_DURATION,
-                curve_p1: (0.5, 0.5),
-                curve_p2: (0.5, 0.5),
-                event_on_complete: None,
+        ct.get_mut(self.ct_root).opacity = AnimatableFloat::Animated {
+            from_value: 1.0,
+            to_value: 0.0,
+            start_sec: current_sec,
+            end_sec: current_sec + POPUP_ANIMATION_DURATION,
+            curve: AnimationCurve::Linear,
+            event_on_complete: None,
+        };
+        ct.get_mut(self.ct_root).offset[1] = AnimatableFloat::Animated {
+            from_value: (-0.5 * self.height) * self.ui_scale_factor,
+            to_value: (-0.5 * self.height + 8.0) * self.ui_scale_factor,
+            start_sec: current_sec,
+            end_sec: current_sec + POPUP_ANIMATION_DURATION,
+            curve: AnimationCurve::CubicBezier {
+                p1: (0.25, 0.5),
+                p2: (0.5, 0.9),
             },
-        );
-        ct.get_mut(self.ct_root).offset[1] = AnimatableFloat::Animated(
-            (-0.5 * self.height) * self.ui_scale_factor,
-            AnimationData {
-                to_value: (-0.5 * self.height + 8.0) * self.ui_scale_factor,
-                start_sec: current_sec,
-                end_sec: current_sec + POPUP_ANIMATION_DURATION,
-                curve_p1: (0.25, 0.5),
-                curve_p2: (0.5, 0.9),
-                event_on_complete: None,
+            event_on_complete: None,
+        };
+        ct.get_mut(self.ct_root).scale_x = AnimatableFloat::Animated {
+            from_value: 1.0,
+            to_value: 0.9,
+            start_sec: current_sec,
+            end_sec: current_sec + POPUP_ANIMATION_DURATION,
+            curve: AnimationCurve::CubicBezier {
+                p1: (0.25, 0.5),
+                p2: (0.5, 0.9),
             },
-        );
-        ct.get_mut(self.ct_root).scale_x = AnimatableFloat::Animated(
-            1.0,
-            AnimationData {
-                to_value: 0.9,
-                start_sec: current_sec,
-                end_sec: current_sec + POPUP_ANIMATION_DURATION,
-                curve_p1: (0.25, 0.5),
-                curve_p2: (0.5, 0.9),
-                event_on_complete: None,
+            event_on_complete: None,
+        };
+        ct.get_mut(self.ct_root).scale_y = AnimatableFloat::Animated {
+            from_value: 1.0,
+            to_value: 0.9,
+            start_sec: current_sec,
+            end_sec: current_sec + POPUP_ANIMATION_DURATION,
+            curve: AnimationCurve::CubicBezier {
+                p1: (0.25, 0.5),
+                p2: (0.5, 0.9),
             },
-        );
-        ct.get_mut(self.ct_root).scale_y = AnimatableFloat::Animated(
-            1.0,
-            AnimationData {
-                to_value: 0.9,
-                start_sec: current_sec,
-                end_sec: current_sec + POPUP_ANIMATION_DURATION,
-                curve_p1: (0.25, 0.5),
-                curve_p2: (0.5, 0.9),
-                event_on_complete: None,
-            },
-        );
+            event_on_complete: None,
+        };
 
         ct.mark_dirty(self.ct_root);
     }

@@ -38,7 +38,7 @@ use bedrock::{
 };
 use bg_worker::{BackgroundWorker, BackgroundWorkerViewFeedback};
 use composite::{
-    AnimatableColor, AnimatableFloat, AnimationData, AtlasRect, CompositeInstanceData,
+    AnimatableColor, AnimatableFloat, AnimationCurve, AtlasRect, CompositeInstanceData,
     CompositeMode, CompositeRect, CompositeRenderingData, CompositeRenderingInstruction,
     CompositeStreamingData, CompositeTree, CompositeTreeFloatParameterRef, CompositeTreeRef,
     RenderPassAfterOperation, RenderPassRequirements,
@@ -479,52 +479,47 @@ impl CurrentSelectedSpriteMarkerView {
                     AnimatableFloat::Value(height_pixels),
                 ];
 
-                ct.get_mut(self.ct_root).scale_x = AnimatableFloat::Animated(
-                    1.3,
-                    AnimationData {
-                        to_value: 1.0,
-                        start_sec: current_sec,
-                        end_sec: current_sec + 0.15,
-                        curve_p1: (0.0, 0.0),
-                        curve_p2: (0.0, 1.0),
-                        event_on_complete: None,
+                ct.get_mut(self.ct_root).scale_x = AnimatableFloat::Animated {
+                    from_value: 1.3,
+                    to_value: 1.0,
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.15,
+                    curve: AnimationCurve::CubicBezier {
+                        p1: (0.0, 0.0),
+                        p2: (0.0, 1.0),
                     },
-                );
-                ct.get_mut(self.ct_root).scale_y = AnimatableFloat::Animated(
-                    1.3,
-                    AnimationData {
-                        to_value: 1.0,
-                        start_sec: current_sec,
-                        end_sec: current_sec + 0.15,
-                        curve_p1: (0.0, 0.0),
-                        curve_p2: (0.0, 1.0),
-                        event_on_complete: None,
+                    event_on_complete: None,
+                };
+                ct.get_mut(self.ct_root).scale_y = AnimatableFloat::Animated {
+                    from_value: 1.3,
+                    to_value: 1.0,
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.15,
+                    curve: AnimationCurve::CubicBezier {
+                        p1: (0.0, 0.0),
+                        p2: (0.0, 1.0),
                     },
-                );
-                ct.get_mut(self.ct_root).opacity = AnimatableFloat::Animated(
-                    0.0,
-                    AnimationData {
-                        to_value: 1.0,
-                        start_sec: current_sec,
-                        end_sec: current_sec + 0.15,
-                        curve_p1: (0.5, 0.5),
-                        curve_p2: (0.5, 0.5),
-                        event_on_complete: None,
-                    },
-                );
+                    event_on_complete: None,
+                };
+
+                ct.get_mut(self.ct_root).opacity = AnimatableFloat::Animated {
+                    from_value: 0.0,
+                    to_value: 1.0,
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.15,
+                    curve: AnimationCurve::Linear,
+                    event_on_complete: None,
+                };
             }
             Some(CurrentSelectedSpriteTrigger::Hide) => {
-                ct.get_mut(self.ct_root).opacity = AnimatableFloat::Animated(
-                    1.0,
-                    AnimationData {
-                        to_value: 0.0,
-                        start_sec: current_sec,
-                        end_sec: current_sec + 0.15,
-                        curve_p1: (0.5, 0.5),
-                        curve_p2: (0.5, 0.5),
-                        event_on_complete: None,
-                    },
-                );
+                ct.get_mut(self.ct_root).opacity = AnimatableFloat::Animated {
+                    from_value: 1.0,
+                    to_value: 0.0,
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.15,
+                    curve: AnimationCurve::Linear,
+                    event_on_complete: None,
+                };
             }
         }
 
@@ -986,32 +981,32 @@ impl SpriteListToggleButtonView {
         if let Some(place_inner) = self.place_inner.get_if_triggered() {
             if place_inner {
                 app_system.composite_tree.get_mut(self.ct_root).offset[0] =
-                    AnimatableFloat::Animated(
-                        8.0 * ui_scale_factor,
-                        AnimationData {
-                            to_value: (-Self::SIZE - 8.0) * ui_scale_factor,
-                            start_sec: current_sec,
-                            end_sec: current_sec + 0.25,
-                            curve_p1: (0.25, 0.8),
-                            curve_p2: (0.5, 1.0),
-                            event_on_complete: None,
+                    AnimatableFloat::Animated {
+                        from_value: 8.0 * ui_scale_factor,
+                        to_value: (-Self::SIZE - 8.0) * ui_scale_factor,
+                        start_sec: current_sec,
+                        end_sec: current_sec + 0.25,
+                        curve: AnimationCurve::CubicBezier {
+                            p1: (0.25, 0.8),
+                            p2: (0.5, 1.0),
                         },
-                    );
+                        event_on_complete: None,
+                    };
                 app_system.composite_tree.mark_dirty(self.ct_root);
                 app_system.hit_tree.get_data_mut(self.ht_root).left = -Self::SIZE - 8.0;
             } else {
                 app_system.composite_tree.get_mut(self.ct_root).offset[0] =
-                    AnimatableFloat::Animated(
-                        (-Self::SIZE - 8.0) * ui_scale_factor,
-                        AnimationData {
-                            to_value: 8.0 * ui_scale_factor,
-                            start_sec: current_sec,
-                            end_sec: current_sec + 0.25,
-                            curve_p1: (0.25, 0.8),
-                            curve_p2: (0.5, 1.0),
-                            event_on_complete: None,
+                    AnimatableFloat::Animated {
+                        from_value: (-Self::SIZE - 8.0) * ui_scale_factor,
+                        to_value: 8.0 * ui_scale_factor,
+                        start_sec: current_sec,
+                        end_sec: current_sec + 0.25,
+                        curve: AnimationCurve::CubicBezier {
+                            p1: (0.25, 0.8),
+                            p2: (0.5, 1.0),
                         },
-                    );
+                        event_on_complete: None,
+                    };
                 app_system.composite_tree.mark_dirty(self.ct_root);
                 app_system.hit_tree.get_data_mut(self.ht_root).left = 8.0;
             }
@@ -1049,17 +1044,17 @@ impl SpriteListToggleButtonView {
         app_system
             .composite_tree
             .get_mut(self.ct_root)
-            .composite_mode = CompositeMode::ColorTint(AnimatableColor::Animated(
-            current,
-            AnimationData {
-                to_value: [1.0, 1.0, 1.0, opacity],
-                start_sec: current_sec,
-                end_sec: current_sec + 0.1,
-                curve_p1: (0.5, 0.0),
-                curve_p2: (0.5, 1.0),
-                event_on_complete: None,
+            .composite_mode = CompositeMode::ColorTint(AnimatableColor::Animated {
+            from_value: current,
+            to_value: [1.0, 1.0, 1.0, opacity],
+            start_sec: current_sec,
+            end_sec: current_sec + 0.1,
+            curve: AnimationCurve::CubicBezier {
+                p1: (0.5, 0.0),
+                p2: (0.5, 1.0),
             },
-        ));
+            event_on_complete: None,
+        });
         app_system.composite_tree.mark_dirty(self.ct_root);
     }
 
@@ -1347,29 +1342,23 @@ impl SpriteListCellView {
     pub fn update(&self, base_system: &mut AppBaseSystem, current_sec: f32) {
         if let Some(hovering) = self.hovering.get_if_triggered() {
             base_system.composite_tree.get_mut(self.ct_bg).opacity = if hovering {
-                AnimatableFloat::Animated(
-                    0.0,
-                    AnimationData {
-                        to_value: 1.0,
-                        start_sec: current_sec,
-                        end_sec: current_sec + 0.1,
-                        curve_p1: (0.5, 0.5),
-                        curve_p2: (0.5, 0.5),
-                        event_on_complete: None,
-                    },
-                )
+                AnimatableFloat::Animated {
+                    from_value: 0.0,
+                    to_value: 1.0,
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.1,
+                    curve: AnimationCurve::Linear,
+                    event_on_complete: None,
+                }
             } else {
-                AnimatableFloat::Animated(
-                    1.0,
-                    AnimationData {
-                        to_value: 0.0,
-                        start_sec: current_sec,
-                        end_sec: current_sec + 0.1,
-                        curve_p1: (0.5, 0.5),
-                        curve_p2: (0.5, 0.5),
-                        event_on_complete: None,
-                    },
-                )
+                AnimatableFloat::Animated {
+                    from_value: 1.0,
+                    to_value: 0.0,
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.1,
+                    curve: AnimationCurve::Linear,
+                    event_on_complete: None,
+                }
             };
         }
     }
@@ -1986,32 +1975,32 @@ impl SpriteListPaneView {
         if let Some(shown) = self.shown.get_if_triggered() {
             if shown {
                 app_system.composite_tree.get_mut(self.ct_root).offset[0] =
-                    AnimatableFloat::Animated(
-                        -self.width.get() * self.ui_scale_factor.get(),
-                        AnimationData {
-                            to_value: Self::FLOATING_MARGIN * self.ui_scale_factor.get(),
-                            start_sec: current_sec,
-                            end_sec: current_sec + 0.25,
-                            curve_p1: (0.4, 1.25),
-                            curve_p2: (0.5, 1.0),
-                            event_on_complete: None,
+                    AnimatableFloat::Animated {
+                        from_value: -self.width.get() * self.ui_scale_factor.get(),
+                        to_value: Self::FLOATING_MARGIN * self.ui_scale_factor.get(),
+                        start_sec: current_sec,
+                        end_sec: current_sec + 0.25,
+                        curve: AnimationCurve::CubicBezier {
+                            p1: (0.4, 1.25),
+                            p2: (0.5, 1.0),
                         },
-                    );
+                        event_on_complete: None,
+                    };
                 app_system.composite_tree.mark_dirty(self.ct_root);
                 app_system.hit_tree.get_data_mut(self.ht_frame).left = Self::FLOATING_MARGIN;
             } else {
                 app_system.composite_tree.get_mut(self.ct_root).offset[0] =
-                    AnimatableFloat::Animated(
-                        Self::FLOATING_MARGIN * self.ui_scale_factor.get(),
-                        AnimationData {
-                            to_value: -self.width.get() * self.ui_scale_factor.get(),
-                            start_sec: current_sec,
-                            end_sec: current_sec + 0.25,
-                            curve_p1: (0.4, 1.25),
-                            curve_p2: (0.5, 1.0),
-                            event_on_complete: None,
+                    AnimatableFloat::Animated {
+                        from_value: Self::FLOATING_MARGIN * self.ui_scale_factor.get(),
+                        to_value: -self.width.get() * self.ui_scale_factor.get(),
+                        start_sec: current_sec,
+                        end_sec: current_sec + 0.25,
+                        curve: AnimationCurve::CubicBezier {
+                            p1: (0.4, 1.25),
+                            p2: (0.5, 1.0),
                         },
-                    );
+                        event_on_complete: None,
+                    };
                 app_system.composite_tree.mark_dirty(self.ct_root);
                 app_system.hit_tree.get_data_mut(self.ht_frame).left = -self.width.get();
             }

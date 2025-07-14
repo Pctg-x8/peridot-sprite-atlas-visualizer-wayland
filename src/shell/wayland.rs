@@ -33,7 +33,7 @@ struct WaylandShellEventHandler<'a, 'subsystem> {
     xdg_surface_proxy_ptr: *mut wl::XdgSurface,
     xdg_toplevel_proxy_ptr: *mut wl::XdgToplevel,
     primary_seat_ptr: *mut wl::Seat,
-    client_decoration: ClientDecorationResources,
+    client_decoration: Option<AppShellDecorator>,
     pointer_input_manager: Pin<Box<UnsafeCell<PointerInputManager>>>,
     base_system_ptr: *mut AppBaseSystem<'subsystem>,
     cursor_shape_device: *mut wl::WpCursorShapeDeviceV1,
@@ -99,12 +99,13 @@ impl wl::XdgToplevelEventListener for WaylandShellEventHandler<'_, '_> {
         unsafe { &*self.xdg_surface_proxy_ptr }
             .set_window_geometry(0, 0, width, height)
             .unwrap();
-        self.client_decoration
-            .adjust_for_main_surface_size(width, height);
-        if activated {
-            self.client_decoration.active();
-        } else {
-            self.client_decoration.inactive();
+        if let Some(ref deco) = self.client_decoration {
+            deco.adjust_for_main_surface_size(width, height);
+            if activated {
+                deco.active();
+            } else {
+                deco.inactive();
+            }
         }
         unsafe { &*self.main_surface_proxy_ptr }.commit().unwrap();
     }
@@ -138,11 +139,12 @@ impl wl::SurfaceEventListener for WaylandShellEventHandler<'_, '_> {
         // 同じ値を適用することでdpi-awareになるらしい
         surface.set_buffer_scale(factor).unwrap();
         surface.commit().unwrap();
-        self.client_decoration.set_buffer_scale(factor);
-
-        if !self.use_fractional_scale {
-            self.ui_scale_factor = factor as _;
+        if let Some(ref mut deco) = self.client_decoration {
+            deco.set_buffer_scale(factor);
         }
+
+        self.ui_scale_factor = factor as _;
+        // TODO: notify ui scale changes
     }
 
     fn preferred_buffer_transform(&mut self, _surface: &mut wl::Surface, transform: u32) {
@@ -160,7 +162,9 @@ impl wl::PointerEventListener for WaylandShellEventHandler<'_, '_> {
     ) {
         self.pointer_on_surface = if core::ptr::addr_eq(surface, self.main_surface_proxy_ptr) {
             PointerOnSurface::Main { serial }
-        } else if let Some(e) = self.client_decoration.resize_edge(surface) {
+        } else if let Some(ref deco) = self.client_decoration
+            && let Some(e) = deco.resize_edge(surface)
+        {
             PointerOnSurface::ResizeEdge { edge: e }
         } else {
             PointerOnSurface::None
@@ -354,11 +358,9 @@ impl wl::CallbackEventListener for WaylandShellEventHandler<'_, '_> {
     }
 }
 impl wl::WpFractionalScaleV1EventListener for WaylandShellEventHandler<'_, '_> {
-    #[tracing::instrument(name = "<WaylandShellEventHandler as WpFractionalScaleV1EventListener>::preferred_scale", skip(self, _object), fields(scale_f = scale as f32 / 120.0))]
     fn preferred_scale(&mut self, _object: &mut wl::WpFractionalScaleV1, scale: u32) {
-        if self.use_fractional_scale {
-            self.ui_scale_factor = scale as f32 / 120.0;
-        }
+        self.ui_scale_factor = scale as f32 / 120.0;
+        // TODO: notify ui scale changes
     }
 }
 impl wl::GtkShell1EventListener for WaylandShellEventHandler<'_, '_> {
@@ -373,6 +375,27 @@ impl wl::GtkSurface1EventListener for WaylandShellEventHandler<'_, '_> {
 
     fn configure_edges(&mut self, _sender: &mut wl::GtkSurface1, constraints: &[u32]) {
         tracing::trace!(?constraints, "gtk_surface configure edges");
+    }
+}
+impl wl::ZxdgToplevelDecorationV1EventListener for WaylandShellEventHandler<'_, '_> {
+    #[tracing::instrument(
+        name = "<WaylandShellEventHandler as ZxdgToplevelDecorationV1EventListener>::configure",
+        skip(self, sender),
+        fields(mode = mode as u32)
+    )]
+    fn configure(
+        &mut self,
+        sender: &mut wl::ZxdgToplevelDecorationV1,
+        mode: wl::ZxdgToplevelDecorationMode,
+    ) {
+        if mode == wl::ZxdgToplevelDecorationMode::ServerSide {
+            sender
+                .set_mode(wl::ZxdgToplevelDecorationMode::ServerSide)
+                .unwrap();
+            return;
+        }
+
+        todo!("non server side decoration support");
     }
 }
 
@@ -418,7 +441,7 @@ fn try_create_shm_random_suffix(
     Ok(None)
 }
 
-struct ClientDecorationResources {
+struct AppShellDecorator {
     compositor: core::ptr::NonNull<wl::Compositor>,
     shm: core::ptr::NonNull<wl::Shm>,
     deco_shm: TemporalSharedMemory,
@@ -445,7 +468,7 @@ struct ClientDecorationResources {
     shadow_bottom_subsurface: core::ptr::NonNull<wl::Subsurface>,
     shadow_bottom_viewport: core::ptr::NonNull<wl::WpViewport>,
 }
-impl ClientDecorationResources {
+impl AppShellDecorator {
     const SHADOW_SIZE: usize = 16;
     const INPUT_SIZE: usize = 8;
 
@@ -1056,6 +1079,7 @@ pub struct AppShell<'a, 'subsystem> {
     cursor_shape_device: core::ptr::NonNull<wl::WpCursorShapeDeviceV1>,
     frame_callback: Cell<core::ptr::NonNull<wl::Callback>>,
     _gtk_surface: Option<core::ptr::NonNull<wl::GtkSurface1>>,
+    has_server_side_decoration: bool,
 }
 impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
     #[tracing::instrument(skip(events, base_sys))]
@@ -1073,6 +1097,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             gtk_shell1: Option<wl::Owned<wl::GtkShell1>>,
             shm: Option<wl::Owned<wl::Shm>>,
             viewporter: Option<wl::Owned<wl::WpViewporter>>,
+            zxdg_decoration_manager_v1: Option<wl::Owned<wl::ZxdgDecorationManagerV1>>,
         }
         impl wl::RegistryListener for RegistryListener {
             #[tracing::instrument(name = "RegistryListener::global", skip(self, registry))]
@@ -1120,6 +1145,8 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
                     self.shm = try_bind(registry, name, version);
                 } else if interface == c"wp_viewporter" {
                     self.viewporter = try_bind(registry, name, version);
+                } else if interface == c"zxdg_decoration_manager_v1" {
+                    self.zxdg_decoration_manager_v1 = try_bind(registry, name, version);
                 }
             }
 
@@ -1138,6 +1165,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             gtk_shell1: None,
             shm: None,
             viewporter: None,
+            zxdg_decoration_manager_v1: None,
         };
         if let Err(e) = registry.add_listener(&mut rl) {
             tracing::warn!(target = "registry", reason = ?e, "Failed to set listener");
@@ -1158,6 +1186,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             mut gtk_shell1,
             shm,
             viewporter,
+            zxdg_decoration_manager_v1,
         );
         match rl {
             RegistryListener {
@@ -1171,6 +1200,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
                 gtk_shell1: gtk_shell11,
                 shm: Some(shm1),
                 viewporter: Some(viewporter1),
+                zxdg_decoration_manager_v1: zxdg_decoration_manager_v11,
             } => {
                 compositor = compositor1;
                 subcompositor = subcompositor1;
@@ -1182,6 +1212,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
                 gtk_shell1 = gtk_shell11;
                 shm = shm1;
                 viewporter = viewporter1;
+                zxdg_decoration_manager_v1 = zxdg_decoration_manager_v11;
             }
             rl => {
                 if rl.compositor.is_none() {
@@ -1300,16 +1331,22 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
         }
         xdg_toplevel.set_min_size(160, 120).unwrap();
 
-        // client decoration: backdrop shadow
-        // TODO: detect whether need this(if xdg_decoration is not provided, then needs client decoration)
-        let client_decoration_resources = ClientDecorationResources::new(
-            &compositor,
-            &subcompositor,
-            shm,
-            &viewporter,
-            &main_surface,
-        );
-        client_decoration_resources.active();
+        let app_decorator;
+        if zxdg_decoration_manager_v1.is_none() {
+            // client decoration: backdrop shadow
+            // TODO: detect whether need this(if xdg_decoration is not provided, then needs client decoration)
+            let deco = AppShellDecorator::new(
+                &compositor,
+                &subcompositor,
+                shm,
+                &viewporter,
+                &main_surface,
+            );
+            deco.active();
+            app_decorator = Some(deco);
+        } else {
+            app_decorator = None;
+        }
 
         let mut frame = match main_surface.frame() {
             Ok(x) => x,
@@ -1348,7 +1385,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             xdg_surface_proxy_ptr: xdg_surface.as_raw() as _,
             xdg_toplevel_proxy_ptr: xdg_toplevel.as_raw() as _,
             primary_seat_ptr: seat.as_raw() as _,
-            client_decoration: client_decoration_resources,
+            client_decoration: app_decorator,
             pointer_input_manager,
             base_system_ptr: base_sys,
             cursor_shape_device: cursor_shape_device.as_raw() as _,
@@ -1409,6 +1446,24 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             tracing::warn!(target = "gtk_surface1", reason = ?e, "Failed to set listener");
         }
 
+        'optin_decoration: {
+            let Some(ref m) = zxdg_decoration_manager_v1 else {
+                // no zxdg_decoration_manager_v1
+                break 'optin_decoration;
+            };
+
+            let Ok(mut x) = m.get_toplevel_decoration(&xdg_toplevel) else {
+                // errored(logged via tracing::instrument)
+                break 'optin_decoration;
+            };
+
+            if let Err(e) = x.add_listener(shell_event_handler.get_mut()) {
+                tracing::warn!(target = "zxdg_toplevel_decoration", reason = ?e, "Failed to set listener");
+            }
+
+            x.leak();
+        }
+
         if let Err(e) = main_surface.commit() {
             tracing::warn!(reason = ?e, "Failed to commit wl_surface");
         }
@@ -1430,6 +1485,10 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
         if let Some(x) = gtk_shell1 {
             x.leak();
         }
+        let has_server_side_decoration = zxdg_decoration_manager_v1.is_some();
+        if let Some(zxdg_decoration_manager_v1) = zxdg_decoration_manager_v1 {
+            zxdg_decoration_manager_v1.leak();
+        }
 
         Self {
             shell_event_handler,
@@ -1441,6 +1500,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             frame_callback: Cell::new(frame.unwrap()),
             zxdg_exporter_v2: zxdg_exporter_v2.map(|x| x.unwrap()),
             _gtk_surface: gtk_surface.map(|x| x.unwrap()),
+            has_server_side_decoration,
         }
     }
 
@@ -1456,9 +1516,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
     }
 
     pub const fn server_side_decoration_provided(&self) -> bool {
-        // Ubuntu(Mutter/GNOME) has no server side decoration(no zxdg_decoration_manager_v1 provided)
-        // TODO: detect this
-        false
+        self.has_server_side_decoration
     }
 
     pub unsafe fn create_vulkan_surface(
@@ -1560,17 +1618,6 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
         self.frame_callback.set(next_callback.unwrap());
     }
 
-    #[tracing::instrument(name = "AppShell::post_configure", skip(self))]
-    pub fn post_configure(&self, serial: u32) {
-        if let Err(e) = unsafe { self.xdg_surface.as_ref() }.ack_configure(serial) {
-            tracing::warn!(reason = ?e, "Failed to ack configure");
-        }
-
-        if let Err(e) = unsafe { self.content_surface.as_ref() }.commit() {
-            tracing::warn!(reason = ?e, "Failed to commit content surface");
-        }
-    }
-
     pub fn capture_pointer(&self) {
         /* do nothing currently(maybe requires on floating-window system) */
     }
@@ -1584,14 +1631,12 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
     }
 
     pub fn minimize(&self) {
-        // do nothing currently(maybe requires on floating-window system)
         if let Err(e) = unsafe { self.xdg_toplevel.as_ref() }.set_minimized() {
             tracing::warn!(reason = ?e, "Failed to call set_minimized");
         }
     }
 
     pub fn toggle_maximize_restore(&self) {
-        // do nothing currently(maybe requires on floating-window system)
         if self.is_tiled() {
             if let Err(e) = unsafe { self.xdg_toplevel.as_ref() }.unset_maximized() {
                 tracing::warn!(reason = ?e, "Failed to call unset_maximized");

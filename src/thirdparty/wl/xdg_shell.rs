@@ -261,7 +261,7 @@ pub trait XdgSurfaceEventListener {
     fn configure(&mut self, surface: &mut XdgSurface, serial: u32);
 }
 
-static XDG_TOPLEVEL_INTERFACE: ffi::Interface = ffi::Interface {
+pub(super) static XDG_TOPLEVEL_INTERFACE: ffi::Interface = ffi::Interface {
     name: c"xdg_toplevel".as_ptr(),
     version: 6,
     method_count: 14,
@@ -350,7 +350,7 @@ pub enum XdgToplevelResizeEdge {
 }
 
 #[repr(transparent)]
-pub struct XdgToplevel(Proxy);
+pub struct XdgToplevel(pub(super) Proxy);
 unsafe impl Interface for XdgToplevel {
     fn def() -> &'static ffi::Interface {
         &XDG_TOPLEVEL_INTERFACE

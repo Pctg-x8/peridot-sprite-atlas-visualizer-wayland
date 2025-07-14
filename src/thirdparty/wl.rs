@@ -4,20 +4,23 @@ use core::{
 };
 use std::{cell::UnsafeCell, os::fd::AsRawFd};
 
+use ffi::wl_proxy_destroy;
+
 mod cursor_shape;
 mod ffi;
 mod fractional_scale;
 mod gtk_shell;
 mod viewporter;
+mod xdg_decoration;
 mod xdg_foreign;
 mod xdg_shell;
-use ffi::wl_proxy_destroy;
 
 pub use self::cursor_shape::*;
 pub use self::ffi::Fixed;
 pub use self::fractional_scale::*;
 pub use self::gtk_shell::*;
 pub use self::viewporter::*;
+pub use self::xdg_decoration::*;
 pub use self::xdg_foreign::*;
 pub use self::xdg_shell::*;
 
@@ -271,10 +274,16 @@ impl Display {
     }
 
     #[inline]
-    pub fn roundtrip(&self) -> Result<u32, ()> {
+    pub fn roundtrip(&self) -> Result<u32, std::io::Error> {
         let r = unsafe { ffi::wl_display_roundtrip(self.ffi.as_ptr()) };
 
-        if r < 0 { Err(()) } else { Ok(r as _) }
+        if r < 0 {
+            Err(std::io::Error::from_raw_os_error(unsafe {
+                ffi::wl_display_get_error(self.ffi.as_ptr())
+            }))
+        } else {
+            Ok(r as _)
+        }
     }
 
     #[inline]

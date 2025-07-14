@@ -9,6 +9,7 @@ use crate::{
         AnimatableColor, AnimatableFloat, AnimationCurve, CompositeMode, CompositeRect,
         CompositeTree, CompositeTreeRef,
     },
+    helper_types::SafeF32,
     hittest::{HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef},
 };
 
@@ -34,7 +35,10 @@ impl CommonButtonView {
             .unwrap();
         let frame_image_atlas_rect = init
             .base_system
-            .rounded_fill_rect_mask(init.ui_scale_factor, Self::CORNER_RADIUS)
+            .rounded_fill_rect_mask(
+                unsafe { SafeF32::new_unchecked(init.ui_scale_factor) },
+                unsafe { SafeF32::new_unchecked(Self::CORNER_RADIUS) },
+            )
             .unwrap();
         let frame_border_image_atlas_rect = init
             .base_system

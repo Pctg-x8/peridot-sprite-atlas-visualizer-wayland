@@ -4,6 +4,7 @@ mod bg_worker;
 mod composite;
 mod coordinate;
 mod feature;
+mod helper_types;
 mod hittest;
 mod input;
 mod mathext;
@@ -18,6 +19,7 @@ mod text;
 mod trigger_cell;
 mod uikit;
 
+use helper_types::SafeF32;
 #[cfg(unix)]
 use wayland as wl;
 
@@ -1039,7 +1041,10 @@ impl SpriteListCellView {
             .unwrap();
         let bg_atlas_rect = init
             .base_system
-            .rounded_fill_rect_mask(init.ui_scale_factor, Self::CORNER_RADIUS)
+            .rounded_fill_rect_mask(
+                unsafe { SafeF32::new_unchecked(init.ui_scale_factor) },
+                unsafe { SafeF32::new_unchecked(Self::CORNER_RADIUS) },
+            )
             .unwrap();
 
         let ct_root = init.base_system.register_composite_rect(CompositeRect {
@@ -1213,7 +1218,10 @@ impl SpriteListPaneView {
     pub fn new(init: &mut ViewInitContext, header_height: f32) -> Self {
         let frame_image_atlas_rect = init
             .base_system
-            .rounded_fill_rect_mask(init.ui_scale_factor, Self::CORNER_RADIUS)
+            .rounded_fill_rect_mask(
+                unsafe { SafeF32::new_unchecked(init.ui_scale_factor) },
+                unsafe { SafeF32::new_unchecked(Self::CORNER_RADIUS) },
+            )
             .unwrap();
 
         let title_blur_pixels =

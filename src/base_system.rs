@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use crate::{
     BLEND_STATE_SINGLE_NONE, FillcolorRConstants, IA_STATE_TRIFAN, IA_STATE_TRILIST,
@@ -9,6 +9,7 @@ use crate::{
         CompositionSurfaceAtlas, UnboundedCompositeInstanceManager,
         UnboundedCompositionSurfaceAtlas,
     },
+    helper_types::SafeF32,
     hittest::{HitTestTreeData, HitTestTreeManager, HitTestTreeRef},
     subsystem::{StagingScratchBufferManager, Subsystem, SubsystemShaderModuleRef},
     text::TextLayout,
@@ -43,6 +44,7 @@ pub struct AppBaseSystem<'subsystem> {
     pub composite_instance_manager: UnboundedCompositeInstanceManager,
     pub hit_tree: HitTestTreeManager<'subsystem>,
     pub fonts: FontSet,
+    rounded_fill_rect_cache: HashMap<(SafeF32, SafeF32), AtlasRect>,
 }
 impl Drop for AppBaseSystem<'_> {
     fn drop(&mut self) {
@@ -126,6 +128,7 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
                 ui_default: ft_face,
             },
             subsystem,
+            rounded_fill_rect_cache: HashMap::new(),
         }
     }
 
@@ -150,7 +153,7 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
     pub fn render_to_mask_atlas_pass(
         &self,
         options: RenderPassOptions,
-    ) -> br::Result<impl br::RenderPass> {
+    ) -> br::Result<impl br::RenderPass + use<'subsystem>> {
         br::RenderPassObject::new(
             self.subsystem,
             &br::RenderPassCreateInfo2::new(
@@ -347,10 +350,17 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
     )]
     pub fn rounded_fill_rect_mask(
         &mut self,
-        render_scale: f32,
-        radius: f32,
+        render_scale: SafeF32,
+        radius: SafeF32,
     ) -> br::Result<AtlasRect> {
-        let size_px = ((radius * 2.0 + 1.0) * render_scale).ceil() as u32;
+        if let Some(r) = self.rounded_fill_rect_cache.get(&(render_scale, radius)) {
+            // found in cache
+            tracing::trace!("hit cache");
+            return Ok(r.clone());
+        }
+
+        tracing::info!("creating fresh image");
+        let size_px = ((radius.value() * 2.0 + 1.0) * render_scale.value()).ceil() as u32;
         let atlas_rect = self.alloc_mask_atlas_rect(size_px, size_px);
 
         let render_pass = self.render_to_mask_atlas_pass(RenderPassOptions::FULL_PIXEL_RENDER)?;
@@ -403,6 +413,8 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
             .end_render_pass2(&br::SubpassEndInfo::new())
         })?;
 
+        self.rounded_fill_rect_cache
+            .insert((render_scale, radius), atlas_rect.clone());
         Ok(atlas_rect)
     }
 

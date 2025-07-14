@@ -7,6 +7,7 @@ use crate::{
         AnimatableColor, AnimatableFloat, AnimationCurve, CompositeMode, CompositeRect,
         CompositeTreeFloatParameterRef, CompositeTreeRef, FloatParameter,
     },
+    helper_types::SafeF32,
     hittest::{self, HitTestTreeActionHandler, HitTestTreeData, HitTestTreeRef},
     input::EventContinueControl,
     trigger_cell::TriggerCell,
@@ -56,7 +57,10 @@ impl CommandButtonView {
     ) -> Self {
         let bg_atlas_rect = init
             .base_system
-            .rounded_fill_rect_mask(init.ui_scale_factor, Self::BUTTON_HEIGHT / 2.0)
+            .rounded_fill_rect_mask(
+                unsafe { SafeF32::new_unchecked(init.ui_scale_factor) },
+                unsafe { SafeF32::new_unchecked(Self::BUTTON_HEIGHT / 2.0) },
+            )
             .unwrap();
         let icon_atlas_rect = init
             .base_system

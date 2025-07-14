@@ -15,14 +15,14 @@ mod xdg_decoration;
 mod xdg_foreign;
 mod xdg_shell;
 
-pub use self::cursor_shape::*;
-pub use self::ffi::Fixed;
-pub use self::fractional_scale::*;
-pub use self::gtk_shell::*;
-pub use self::viewporter::*;
-pub use self::xdg_decoration::*;
-pub use self::xdg_foreign::*;
-pub use self::xdg_shell::*;
+pub use cursor_shape::*;
+pub use ffi::Fixed;
+pub use fractional_scale::*;
+pub use gtk_shell::*;
+pub use viewporter::*;
+pub use xdg_decoration::*;
+pub use xdg_foreign::*;
+pub use xdg_shell::*;
 
 const NEWID_ARG: ffi::Argument = ffi::Argument { n: 0 };
 const NULLOBJ_ARG: ffi::Argument = ffi::Argument {
@@ -41,7 +41,7 @@ impl Deref for OwnedProxy {
 
     #[inline]
     fn deref(&self) -> &Self::Target {
-        unsafe { Proxy::from_raw_ref(self.0.as_ref()) }
+        unsafe { core::mem::transmute(self.0.as_ref()) }
     }
 }
 impl DerefMut for OwnedProxy {
@@ -56,11 +56,6 @@ pub struct Proxy(UnsafeCell<ffi::Proxy>);
 impl Proxy {
     pub const unsafe fn from_raw_ptr_unchecked<'a>(ptr: *mut ffi::Proxy) -> &'a mut Self {
         unsafe { Self::from_raw_ref_mut(&mut *ptr) }
-    }
-
-    pub const unsafe fn from_raw_ref<'a>(r: &'a ffi::Proxy) -> &'a Self {
-        unimplemented!()
-        // unsafe { core::mem::transmute(r) }
     }
 
     pub const unsafe fn from_raw_ref_mut<'a>(r: &'a mut ffi::Proxy) -> &'a mut Self {
@@ -291,6 +286,25 @@ impl Display {
         let r = unsafe { ffi::wl_display_get_error(self.ffi.as_ptr()) };
 
         if r == 0 { None } else { Some(r) }
+    }
+
+    #[inline]
+    pub fn protocol_error(&self) -> (*const ffi::Interface, u32, u32) {
+        let mut interface = core::mem::MaybeUninit::uninit();
+        let mut id = core::mem::MaybeUninit::uninit();
+        let code = unsafe {
+            ffi::wl_display_get_protocol_error(
+                self.ffi.as_ptr(),
+                interface.as_mut_ptr(),
+                id.as_mut_ptr(),
+            )
+        };
+
+        (
+            unsafe { interface.assume_init() },
+            unsafe { id.assume_init() },
+            code,
+        )
     }
 
     #[inline]

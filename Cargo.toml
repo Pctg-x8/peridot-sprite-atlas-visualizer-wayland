@@ -1,3 +1,12 @@
+[workspace]
+members = [
+    "thirdparty/dbus",
+    "thirdparty/fontconfig",
+    "thirdparty/freetype",
+    "thirdparty/harfbuzz",
+    "thirdparty/wayland",
+]
+
 [package]
 name = "peridot-sprite-atlas-visualizer-wayland"
 version = "0.1.0"
@@ -5,8 +14,15 @@ edition = "2024"
 build = "build.rs"
 
 [features]
-platform-linux-wayland = ["bedrock/VK_KHR_wayland_surface"]
+platform-linux-wayland = ["bedrock/VK_KHR_wayland_surface", "dep:wayland"]
 platform-windows = ["bedrock/VK_KHR_win32_surface"]
+
+[workspace.dependencies]
+tracing = "0.1.41"
+bitflags = "2.9.0"
+quick-xml = "0.37.5"
+thiserror = "2.0.12"
+freetype2 = { git = "https://github.com/Pctg-x8/ft2-rs" }
 
 [dependencies]
 bedrock = { git = "https://github.com/Pctg-x8/bedrock", branch = "peridot", features = [
@@ -15,16 +31,13 @@ bedrock = { git = "https://github.com/Pctg-x8/bedrock", branch = "peridot", feat
     "Allow1_4APIs",
     "VK_EXT_debug_utils",
 ] }
-freetype2 = { git = "https://github.com/Pctg-x8/ft2-rs" }
-fontconfig = { git = "https://github.com/Pctg-x8/fc-rs", features = [
-    "with-freetype",
-] }
-bitflags = "2.9.0"
+freetype2.workspace = true
+bitflags.workspace = true
 uuid = { version = "1.17.0", features = ["v4"] }
-thiserror = "2.0.12"
-quick-xml = "0.37.5"
+thiserror.workspace = true
+quick-xml.workspace = true
 lyon_geom = "1.0.6"
-tracing = "0.1.41"
+tracing.workspace = true
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
 libc = "0.2.172"
 smol = "2"
@@ -32,6 +45,13 @@ image = "0.25.6"
 crossbeam = "0.8.4"
 walkdir = "2.5.0"
 parking_lot = "0.12.4"
+freetype = { path = "./thirdparty/freetype" }
+harfbuzz = { path = "./thirdparty/harfbuzz" }
+
+[target.'cfg(unix)'.dependencies]
+wayland = { path = "./thirdparty/wayland", optional = true }
+dbus = { path = "./thirdparty/dbus" }
+fontconfig = { path = "./thirdparty/fontconfig" }
 
 [target.'cfg(windows)'.dependencies]
 windows-future = "0.2.1"

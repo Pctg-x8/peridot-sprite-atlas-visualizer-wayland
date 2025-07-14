@@ -1,10 +1,9 @@
-use crate::{
-    subsystem::{
-        StagingScratchBufferManager, StagingScratchBufferMapMode, StagingScratchBufferReservation,
-    },
-    thirdparty::{freetype as ft, harfbuzz as hb},
+use crate::subsystem::{
+    StagingScratchBufferManager, StagingScratchBufferMapMode, StagingScratchBufferReservation,
 };
+use freetype as ft;
 use freetype2::*;
+use harfbuzz as hb;
 
 struct GlyphBitmap {
     pub buf: Box<[u8]>,

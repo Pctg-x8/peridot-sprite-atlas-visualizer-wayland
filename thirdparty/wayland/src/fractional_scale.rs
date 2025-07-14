@@ -1,29 +1,10 @@
-use crate::thirdparty::wl::Interface;
+use super::{Interface, ffi, interface, message};
 
-use super::{ffi, interface, message};
-
-pub static WP_FRACTIONAL_SCALE_MANAGER_V1_INTERFACE: ffi::Interface = interface(
-    c"wp_fractional_scale_manager_v1",
-    1,
-    &[
-        message(c"destroy", c"", &[]),
-        message(
-            c"get_fractional_scale",
-            c"no",
-            &[&WP_FRACTIONAL_SCALE_V1_INTERFACE, unsafe {
-                &super::wl_surface_interface
-            }],
-        ),
-    ],
-    &[],
-);
-
-/// A global interface for requesting surfaces to use fractional scales.
 #[repr(transparent)]
 pub struct WpFractionalScaleManagerV1(super::Proxy);
 unsafe impl super::Interface for WpFractionalScaleManagerV1 {
     fn def() -> &'static ffi::Interface {
-        &WP_FRACTIONAL_SCALE_MANAGER_V1_INTERFACE
+        Self::INTERFACE
     }
 
     #[tracing::instrument(
@@ -44,10 +25,28 @@ unsafe impl super::Interface for WpFractionalScaleManagerV1 {
     }
 }
 impl WpFractionalScaleManagerV1 {
-    /// Create an add-on object for the wl_surface to let the compositor request fractional scales.
-    /// If the given wl_surface already has a wp_fractional_scale_v1 object associated,
-    /// the fractional_scale_exists protocol error is raised.
-    #[tracing::instrument(name = "WpFractionalScaleManagerV1::get_fractional_scale", skip(self, surface), err(level = tracing::Level::WARN))]
+    const INTERFACE: &'static ffi::Interface = &interface(
+        c"wp_fractional_scale_manager_v1",
+        1,
+        &[
+            message(c"destroy", c"", &[]),
+            message(
+                c"get_fractional_scale",
+                c"no",
+                &[
+                    const { WpFractionalScaleV1::INTERFACE },
+                    const { unsafe { &super::wl_surface_interface } },
+                ],
+            ),
+        ],
+        &[],
+    );
+
+    #[tracing::instrument(
+        name = "WpFractionalScaleManagerV1::get_fractional_scale",
+        skip(self, surface),
+        err(level = tracing::Level::WARN)
+    )]
     pub fn get_fractional_scale(
         &self,
         surface: &super::Surface,
@@ -69,19 +68,11 @@ impl WpFractionalScaleManagerV1 {
     }
 }
 
-pub static WP_FRACTIONAL_SCALE_V1_INTERFACE: ffi::Interface = interface(
-    c"wp_fractional_scale_v1",
-    1,
-    &[message(c"destroy", c"", &[])],
-    &[message(c"preferred_scale", c"u", &[])],
-);
-
-/// An additional interface to a wl_surface object which allows the compositor to inform the client of the preferred scale.
 #[repr(transparent)]
 pub struct WpFractionalScaleV1(super::Proxy);
 unsafe impl super::Interface for WpFractionalScaleV1 {
     fn def() -> &'static ffi::Interface {
-        &WP_FRACTIONAL_SCALE_V1_INTERFACE
+        Self::INTERFACE
     }
 
     #[tracing::instrument(name = "<WpFractionalScaleV1 as Interface>::destruct", skip(self))]
@@ -99,6 +90,13 @@ unsafe impl super::Interface for WpFractionalScaleV1 {
     }
 }
 impl WpFractionalScaleV1 {
+    const INTERFACE: &'static ffi::Interface = &interface(
+        c"wp_fractional_scale_v1",
+        1,
+        &[message(c"destroy", c"", &[])],
+        &[message(c"preferred_scale", c"u", &[])],
+    );
+
     pub fn add_listener<'l, L: WpFractionalScaleV1EventListener + 'l>(
         &'l mut self,
         listener: &'l mut L,

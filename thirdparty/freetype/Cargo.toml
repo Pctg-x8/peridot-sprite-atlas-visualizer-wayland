@@ -1,0 +1,7 @@
+[package]
+name = "freetype"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+freetype2.workspace = true

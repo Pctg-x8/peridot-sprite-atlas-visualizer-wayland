@@ -398,6 +398,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
+name = "dbus"
+version = "0.1.0"
+dependencies = [
+ "bitflags 2.9.1",
+ "quick-xml",
+ "thiserror 2.0.12",
+ "tracing",
+]
+
+[[package]]
 name = "derives"
 version = "0.1.0"
 source = "git+https://github.com/Pctg-x8/bedrock?branch=peridot#a4531b6f3e2f67de15ce38832a2fcc290c2db022"
@@ -521,11 +531,25 @@ dependencies = [
 
 [[package]]
 name = "fontconfig"
+version = "0.1.0"
+dependencies = [
+ "fontconfig 2.13.1",
+]
+
+[[package]]
+name = "fontconfig"
 version = "2.13.1"
 source = "git+https://github.com/Pctg-x8/fc-rs#767694a5d9cbd8b1172bf80168df68cdb9f53e3c"
 dependencies = [
  "freetype2",
  "libc",
+]
+
+[[package]]
+name = "freetype"
+version = "0.1.0"
+dependencies = [
+ "freetype2",
 ]
 
 [[package]]
@@ -599,6 +623,14 @@ checksum = "459196ed295495a68f7d7fe1d84f6c4b7ff0e21fe3017b2f283c6fac3ad803c9"
 dependencies = [
  "cfg-if",
  "crunchy",
+]
+
+[[package]]
+name = "harfbuzz"
+version = "0.1.0"
+dependencies = [
+ "freetype",
+ "freetype2",
 ]
 
 [[package]]
@@ -968,8 +1000,11 @@ dependencies = [
  "bedrock",
  "bitflags 2.9.1",
  "crossbeam",
- "fontconfig",
+ "dbus",
+ "fontconfig 0.1.0",
+ "freetype",
  "freetype2",
+ "harfbuzz",
  "image",
  "libc",
  "lyon_geom",
@@ -981,6 +1016,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "walkdir",
+ "wayland",
  "windows 0.61.3",
  "windows-core 0.61.2",
  "windows-future",
@@ -1709,6 +1745,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1a05d73b933a847d6cccdda8f838a22ff101ad9bf93e33684f39c1f5f0eece3d"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "wayland"
+version = "0.1.0"
+dependencies = [
+ "tracing",
 ]
 
 [[package]]

@@ -8,7 +8,6 @@ use crate::{
     },
     hittest::{HitTestTreeData, HitTestTreeManager, HitTestTreeRef},
     subsystem::{Subsystem, SubsystemShaderModuleRef},
-    thirdparty::freetype,
 };
 
 use bedrock::{self as br, CommandBufferMut};
@@ -38,22 +37,19 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
     pub fn new(subsystem: &'subsystem Subsystem) -> Self {
         // initialize font systems
         #[cfg(unix)]
-        crate::thirdparty::fontconfig::init();
+        fontconfig::init();
 
         let (primary_face_path, primary_face_index);
         #[cfg(unix)]
         {
-            let mut fc_pat = crate::thirdparty::fontconfig::Pattern::new();
+            let mut fc_pat = fontconfig::Pattern::new();
             fc_pat.add_family_name(c"system-ui");
             fc_pat.add_weight(80);
-            crate::thirdparty::fontconfig::Config::current()
+            fontconfig::Config::current()
                 .unwrap()
-                .substitute(
-                    &mut fc_pat,
-                    crate::thirdparty::fontconfig::MatchKind::Pattern,
-                );
+                .substitute(&mut fc_pat, fontconfig::MatchKind::Pattern);
             fc_pat.default_substitute();
-            let fc_set = crate::thirdparty::fontconfig::Config::current()
+            let fc_set = fontconfig::Config::current()
                 .unwrap()
                 .sort(&mut fc_pat, true)
                 .unwrap();

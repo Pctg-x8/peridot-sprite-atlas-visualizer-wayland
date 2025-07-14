@@ -5,6 +5,7 @@ use std::{
 };
 
 use bedrock::{self as br, SurfaceCreateInfo};
+use wayland::{self as wl, WpCursorShapeDeviceV1Shape, WpCursorShapeManagerV1};
 
 use crate::{
     AppEvent, AppEventBus,
@@ -15,7 +16,6 @@ use crate::{
         MemoryMapFlags, MemoryProtectionFlags, OpenFlags, TemporalSharedMemory,
         input_event_codes::{BTN_LEFT, BTN_RIGHT},
     },
-    thirdparty::wl::{self, WpCursorShapeDeviceV1Shape, WpCursorShapeManagerV1},
 };
 
 enum PointerOnSurface {

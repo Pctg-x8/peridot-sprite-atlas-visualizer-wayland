@@ -1,0 +1,9 @@
+[package]
+name = "fontconfig"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fontconfig = { git = "https://github.com/Pctg-x8/fc-rs", features = [
+    "with-freetype",
+] }

@@ -91,14 +91,6 @@ pub const MARSHAL_FLAG_DESTROY: u32 = 1 << 0;
 
 #[link(name = "wayland-client")]
 unsafe extern "C" {
-    pub fn wl_proxy_marshal_flags(
-        proxy: *mut Proxy,
-        opcode: u32,
-        interface: *const Interface,
-        version: u32,
-        flags: u32,
-        ...
-    ) -> *mut Proxy;
     pub fn wl_proxy_marshal_array_flags(
         proxy: *mut Proxy,
         opcode: u32,
@@ -125,7 +117,6 @@ unsafe extern "C" {
         id: *mut u32,
     ) -> u32;
     pub fn wl_display_flush(display: *mut Display) -> core::ffi::c_int;
-    pub fn wl_display_dispatch(display: *mut Display) -> core::ffi::c_int;
     pub fn wl_display_roundtrip(display: *mut Display) -> core::ffi::c_int;
     pub fn wl_display_get_fd(display: *const Display) -> core::ffi::c_int;
     pub fn wl_display_prepare_read(display: *mut Display) -> core::ffi::c_int;

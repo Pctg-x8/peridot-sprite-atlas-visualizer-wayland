@@ -8,9 +8,8 @@ use std::{
 use bedrock::{
     self as br, Device, Instance, MemoryBound, PhysicalDevice, ResolverInterface, VkHandle,
 };
+use freetype::FreeType;
 use parking_lot::RwLock;
-
-use crate::thirdparty::freetype::FreeType;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoadShaderError {

@@ -237,24 +237,23 @@ impl<'h> HitTestTreeManager<'h> {
         parent_effective_height: f32,
     ) -> Option<HitTestTreeRef> {
         let d = &self.data[root.0];
-        if !d
-            .action_handler
+        if d.action_handler
             .as_ref()
             .and_then(std::rc::Weak::upgrade)
-            .map_or(true, |x| x.hit_active(root))
+            .is_some_and(|x| !x.hit_active(root))
         {
             // hit disabled
             return None;
         }
 
-        let (global_left, global_top, effective_width, effective_height) = (
-            parent_global_left + parent_effective_width * d.left_adjustment_factor + d.left,
-            parent_global_top + parent_effective_height * d.top_adjustment_factor + d.top,
-            parent_effective_width * d.width_adjustment_factor + d.width,
-            parent_effective_height * d.height_adjustment_factor + d.height,
-        );
-        let (global_right, global_bottom) =
-            (global_left + effective_width, global_top + effective_height);
+        let effective_width = parent_effective_width * d.width_adjustment_factor + d.width;
+        let effective_height = parent_effective_height * d.height_adjustment_factor + d.height;
+        let global_left =
+            parent_global_left + parent_effective_width * d.left_adjustment_factor + d.left;
+        let global_top =
+            parent_global_top + parent_effective_height * d.top_adjustment_factor + d.top;
+        let global_right = global_left + effective_width;
+        let global_bottom = global_top + effective_height;
 
         // 後ろにあるほうが上なので優先して見る
         if let Some(t) = self.relations[root.0].children.iter().rev().find_map(|&c| {
@@ -278,7 +277,7 @@ impl<'h> HitTestTreeManager<'h> {
             && global_y <= global_bottom
             && d.action_handler.is_some()
         {
-            // 自分にヒット ただしaction handlerが設定されていない場合は透過とみなす(うしろにあるHitTestTreeにあたってほしいため)
+            // 自分にヒット ただしaction handlerが設定されていない場合は透過とみなす(うしろにあるHitTestTreeにあたってほしい)
             return Some(root);
         }
 

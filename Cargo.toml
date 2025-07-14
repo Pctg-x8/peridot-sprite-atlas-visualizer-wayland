@@ -31,7 +31,6 @@ bedrock = { git = "https://github.com/Pctg-x8/bedrock", branch = "peridot", feat
     "Allow1_4APIs",
     "VK_EXT_debug_utils",
 ] }
-freetype2.workspace = true
 bitflags.workspace = true
 uuid = { version = "1.17.0", features = ["v4"] }
 thiserror.workspace = true

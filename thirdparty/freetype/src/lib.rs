@@ -3,12 +3,15 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
+use bitflags::bitflags;
 use freetype2::{
-    FT_Done_Face, FT_Done_FreeType, FT_Error, FT_F26Dot6, FT_Face, FT_FaceRec, FT_GlyphSlotRec,
-    FT_Init_FreeType, FT_LibraryRec, FT_Load_Glyph, FT_Long, FT_Matrix, FT_New_Face,
-    FT_Reference_Face, FT_Render_Glyph, FT_Set_Char_Size, FT_Set_Transform, FT_UInt, FT_Vector,
     modapi::{FT_Property_Get, FT_Property_Set},
+    *,
 };
+
+pub use freetype2::FT_Bool as Bool;
+pub use freetype2::FT_GlyphSlotRec as GlyphSlotRec;
+pub use freetype2::FT_Vector as Vector;
 
 #[repr(transparent)]
 pub struct FreeType(core::ptr::NonNull<FT_LibraryRec>);
@@ -125,6 +128,23 @@ impl<T: FtObjectDroppable> DerefMut for Owned<T> {
     }
 }
 
+bitflags! {
+    #[derive(Debug, Clone, Copy)]
+    pub struct LoadFlags : i32 {
+        const DEFAULT = FT_LOAD_DEFAULT;
+    }
+}
+
+#[repr(i32)]
+#[derive(Debug, Clone, Copy)]
+pub enum RenderMode {
+    Normal = FT_RENDER_MODE_NORMAL,
+    Light = FT_RENDER_MODE_LIGHT,
+    Mono = FT_RENDER_MODE_MONO,
+    LCD = FT_RENDER_MODE_LCD,
+    LCDV = FT_RENDER_MODE_LCD_V,
+}
+
 #[repr(transparent)]
 pub struct Face(FT_FaceRec);
 impl FtObjectDroppable for Face {
@@ -197,18 +217,16 @@ impl Face {
     }
 
     #[inline]
-    pub fn load_glyph(&mut self, glyph: FT_UInt, load_flags: i32) -> Result<(), FT_Error> {
-        let r = unsafe { FT_Load_Glyph(self as *mut _ as _, glyph, load_flags) };
-        if r != 0 {
-            return Err(r);
+    pub fn load_glyph(&mut self, glyph: FT_UInt, load_flags: LoadFlags) -> Result<(), FT_Error> {
+        match unsafe { FT_Load_Glyph(self as *mut _ as _, glyph, load_flags.bits()) } {
+            0 => Ok(()),
+            r => Err(r),
         }
-
-        Ok(())
     }
 
     #[inline]
-    pub fn render_glyph(&mut self, render_mode: i32) -> Result<(), FT_Error> {
-        let r = unsafe { FT_Render_Glyph(self.0.glyph, render_mode) };
+    pub fn render_glyph(&mut self, render_mode: RenderMode) -> Result<(), FT_Error> {
+        let r = unsafe { FT_Render_Glyph(self.0.glyph, render_mode as _) };
         if r != 0 {
             return Err(r);
         }

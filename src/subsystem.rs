@@ -431,12 +431,12 @@ impl Subsystem {
         };
         let hinting = unsafe { ft.get_property::<u32>(c"cff", c"hinting-engine").unwrap() };
         let no_stem_darkening = unsafe {
-            ft.get_property::<freetype2::FT_Bool>(c"cff", c"no-stem-darkening")
+            ft.get_property::<freetype::Bool>(c"cff", c"no-stem-darkening")
                 .unwrap()
         };
         tracing::debug!(hinting, no_stem_darkening, "freetype cff properties");
         unsafe {
-            ft.set_property(c"cff", c"no-stem-darkening", &(true as freetype2::FT_Bool))
+            ft.set_property(c"cff", c"no-stem-darkening", &(true as freetype::Bool))
                 .unwrap();
         }
 

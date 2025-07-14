@@ -2,7 +2,6 @@ use crate::subsystem::{
     StagingScratchBufferManager, StagingScratchBufferMapMode, StagingScratchBufferReservation,
 };
 use freetype as ft;
-use freetype2::*;
 use harfbuzz as hb;
 
 struct GlyphBitmap {
@@ -14,7 +13,7 @@ struct GlyphBitmap {
     pub ascending_pixels: isize,
 }
 impl GlyphBitmap {
-    pub fn copy_from_ft_glyph_slot(slot: &FT_GlyphSlotRec) -> Self {
+    pub fn copy_from_ft_glyph_slot(slot: &ft::GlyphSlotRec) -> Self {
         assert!(
             slot.bitmap.pitch >= 0,
             "inverted flow is not supported at this point"
@@ -68,13 +67,14 @@ impl TextLayout {
         for (info, pos) in glyph_infos.iter().zip(glyph_positions.iter()) {
             face.set_transform(
                 None,
-                Some(&FT_Vector {
+                Some(&ft::Vector {
                     x: (left_pos * 64.0) as _,
                     y: (top_pos * 64.0) as _,
                 }),
             );
-            face.load_glyph(info.codepoint, FT_LOAD_DEFAULT).unwrap();
-            face.render_glyph(FT_RENDER_MODE_NORMAL).unwrap();
+            face.load_glyph(info.codepoint, ft::LoadFlags::DEFAULT)
+                .unwrap();
+            face.render_glyph(ft::RenderMode::Normal).unwrap();
             let slot = face.glyph_slot().unwrap();
 
             // println!(

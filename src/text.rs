@@ -42,7 +42,6 @@ impl GlyphBitmap {
 pub struct TextLayout {
     bitmaps: Vec<GlyphBitmap>,
     final_left_pos: f32,
-    final_top_pos: f32,
     max_ascender: i32,
     max_descender: i32,
 }
@@ -55,7 +54,7 @@ impl TextLayout {
         hb::shape(&mut hb_font, &mut hb_buffer, &[]);
         let (glyph_infos, glyph_positions) = hb_buffer.get_shape_results();
         let mut left_pos = 0.0;
-        let mut top_pos = 0.0;
+        let top_pos = 0.0;
         let mut max_ascender = 0;
         let mut max_descender = 0;
         // println!(
@@ -94,7 +93,6 @@ impl TextLayout {
             glyph_bitmaps.push(GlyphBitmap::copy_from_ft_glyph_slot(slot));
 
             left_pos += pos.x_advance as f32 / 64.0;
-            top_pos += pos.y_advance as f32 / 64.0;
             max_ascender = max_ascender.max(slot.bitmap_top);
             max_descender = max_descender.max(slot.bitmap.rows as i32 - slot.bitmap_top);
         }
@@ -103,7 +101,6 @@ impl TextLayout {
         Self {
             bitmaps: glyph_bitmaps,
             final_left_pos: left_pos,
-            final_top_pos: top_pos,
             max_ascender,
             max_descender,
         }

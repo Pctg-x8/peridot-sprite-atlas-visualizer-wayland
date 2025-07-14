@@ -3452,7 +3452,8 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         app_system.subsystem,
         &br::DescriptorSetLayoutCreateInfo::new(&[br::DescriptorType::CombinedImageSampler
             .make_binding(0, 1)
-            .only_for_fragment()]),
+            .only_for_fragment()
+            .with_immutable_samplers(&[composite_sampler.as_transparent_ref()])]),
     )
     .unwrap();
     let mut descriptor_pool = br::DescriptorPoolObject::new(
@@ -3507,24 +3508,18 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
             ]),
         ),
         blur_fixed_descriptors[0].binding_at(0).write(
-            br::DescriptorContents::CombinedImageSampler(vec![
-                br::DescriptorImageInfo::new(
-                    &composite_grab_buffer,
-                    br::ImageLayout::ShaderReadOnlyOpt,
-                )
-                .with_sampler(&composite_sampler),
-            ]),
+            br::DescriptorContents::CombinedImageSampler(vec![br::DescriptorImageInfo::new(
+                &composite_grab_buffer,
+                br::ImageLayout::ShaderReadOnlyOpt,
+            )]),
         ),
     ];
     descriptor_writes.extend((0..BLUR_SAMPLE_STEPS).map(|n| {
         blur_fixed_descriptors[n + 1].binding_at(0).write(
-            br::DescriptorContents::CombinedImageSampler(vec![
-                br::DescriptorImageInfo::new(
-                    &blur_temporal_buffers[n],
-                    br::ImageLayout::ShaderReadOnlyOpt,
-                )
-                .with_sampler(&composite_sampler),
-            ]),
+            br::DescriptorContents::CombinedImageSampler(vec![br::DescriptorImageInfo::new(
+                &blur_temporal_buffers[n],
+                br::ImageLayout::ShaderReadOnlyOpt,
+            )]),
         )
     }));
     app_system
@@ -4549,6 +4544,8 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
             if !shell_event_processed {
                 app_shell.cancel_read_events();
             }
+
+            dispatch_dbus(&dbus);
         }
         #[cfg(windows)]
         {
@@ -4604,69 +4601,8 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
             }
         }
 
-        #[cfg(target_os = "linux")]
-        while let Some(m) = dbus.underlying_mut().pop_message() {
-            println!("!! dbus msg recv: {}", m.r#type());
-            if m.r#type() == dbus::MESSAGE_TYPE_METHOD_RETURN {
-                // method return
-                println!(
-                    "!! method return data: {} {:?}",
-                    m.reply_serial(),
-                    m.signature()
-                );
-
-                if let Some(wakers) =
-                    unsafe { &mut *DBUS_WAIT_FOR_REPLY_WAKERS }.remove(&m.reply_serial())
-                {
-                    let wake_count = wakers.len();
-                    for ((sink, w), m) in
-                        wakers.into_iter().zip(core::iter::repeat_n(m, wake_count))
-                    {
-                        let Some(sink1) = sink.upgrade() else {
-                            // abandoned
-                            continue;
-                        };
-
-                        sink1.set(Some(m));
-                        drop(sink); // drop before wake(unchain weak ref)
-                        w.wake();
-                    }
-                }
-            } else if m.r#type() == dbus::MESSAGE_TYPE_SIGNAL {
-                // signal
-                println!(
-                    "!! signal data: {:?} {:?} {:?}",
-                    m.path(),
-                    m.interface(),
-                    m.member()
-                );
-
-                let path = m.path().unwrap();
-                let interface = m.interface().unwrap();
-                let member = m.member().unwrap();
-
-                if let Some(wakers) = unsafe { &mut *DBUS_WAIT_FOR_SIGNAL_WAKERS }.remove(&(
-                    path.into(),
-                    interface.into(),
-                    member.into(),
-                )) {
-                    let wake_count = wakers.len();
-                    for ((sink, w), m) in
-                        wakers.into_iter().zip(core::iter::repeat_n(m, wake_count))
-                    {
-                        let Some(sink1) = sink.upgrade() else {
-                            // abandoned
-                            continue;
-                        };
-
-                        sink1.set(Some(m));
-                        drop(sink); // drop before wake(unchain weak ref)
-                        w.wake();
-                    }
-                }
-            }
-        }
         task_worker.try_tick();
+
         while let Some(e) = app_update_context.event_queue.pop() {
             match e {
                 AppEvent::ToplevelWindowClose => {
@@ -4869,30 +4805,24 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                 }),
                         );
 
-                        let mut descriptor_writes =
-                            vec![blur_fixed_descriptors[0].binding_at(0).write(
-                                br::DescriptorContents::CombinedImageSampler(vec![
-                                    br::DescriptorImageInfo::new(
-                                        &composite_grab_buffer,
-                                        br::ImageLayout::ShaderReadOnlyOpt,
-                                    )
-                                    .with_sampler(&composite_sampler),
-                                ]),
-                            )];
-                        descriptor_writes.extend((0..BLUR_SAMPLE_STEPS).map(|n| {
-                            blur_fixed_descriptors[n + 1].binding_at(0).write(
-                                br::DescriptorContents::CombinedImageSampler(vec![
-                                    br::DescriptorImageInfo::new(
+                        app_system.subsystem.update_descriptor_sets(
+                            &std::iter::once(blur_fixed_descriptors[0].binding_at(0).write(
+                                br::DescriptorContents::combined_image_sampler(
+                                    &composite_grab_buffer,
+                                    br::ImageLayout::ShaderReadOnlyOpt,
+                                ),
+                            ))
+                            .chain((0..BLUR_SAMPLE_STEPS).map(|n| {
+                                blur_fixed_descriptors[n + 1].binding_at(0).write(
+                                    br::DescriptorContents::combined_image_sampler(
                                         &blur_temporal_buffers[n],
                                         br::ImageLayout::ShaderReadOnlyOpt,
-                                    )
-                                    .with_sampler(&composite_sampler),
-                                ]),
-                            )
-                        }));
-                        app_system
-                            .subsystem
-                            .update_descriptor_sets(&descriptor_writes, &[]);
+                                    ),
+                                )
+                            }))
+                            .collect::<Vec<_>>(),
+                            &[],
+                        );
 
                         let screen_viewport = [sc
                             .size
@@ -5847,7 +5777,10 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                             newsize_request = Some(app_shell.client_size_pixels());
                             continue;
                         }
-                        Err(e) => Err(e).unwrap(),
+                        Err(e) => {
+                            tracing::error!(reason = ?e, "vkAcquireNextImageKHR failed");
+                            std::process::abort();
+                        }
                     };
                     app_system
                         .subsystem
@@ -5879,7 +5812,10 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                             newsize_request = Some(app_shell.client_size_pixels());
                             continue;
                         }
-                        Err(e) => Err(e).unwrap(),
+                        Err(e) => {
+                            tracing::error!(reason = ?e, "vkQueuePresentKHR failed");
+                            std::process::abort();
+                        }
                     }
 
                     app_shell.request_next_frame();
@@ -6456,6 +6392,31 @@ async fn app_menu_on_add_sprite<'subsystem>(
 }
 
 #[cfg(target_os = "linux")]
+fn dispatch_dbus(dbus: &DBusLink) {
+    while let Some(m) = dbus.underlying_mut().pop_message() {
+        let span =
+            tracing::info_span!(target: "dbus_loop", "dbus message recv", r#type = m.r#type());
+        let _enter = span.enter();
+        if m.r#type() == dbus::MESSAGE_TYPE_METHOD_RETURN {
+            // method return
+            tracing::trace!(target: "dbus_loop", reply_serial = m.reply_serial(), signature = ?m.signature(), "method return data");
+            wake_for_reply(m);
+        } else if m.r#type() == dbus::MESSAGE_TYPE_SIGNAL {
+            // signal
+            tracing::trace!(target: "dbus_loop", path = ?m.path(), interface = ?m.interface(), member = ?m.member(), "signal data");
+            wake_for_signal(
+                m.path().unwrap().into(),
+                m.interface().unwrap().into(),
+                m.member().unwrap().into(),
+                m,
+            );
+        } else {
+            tracing::trace!(target: "dbus_loop", "unknown dbus message");
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 static mut DBUS_WAIT_FOR_REPLY_WAKERS: *mut HashMap<
     u32,
     Vec<(
@@ -6463,6 +6424,27 @@ static mut DBUS_WAIT_FOR_REPLY_WAKERS: *mut HashMap<
         core::task::Waker,
     )>,
 > = core::ptr::null_mut();
+fn wake_for_reply(reply: dbus::Message) {
+    let Some(wakers) = unsafe { &mut *DBUS_WAIT_FOR_REPLY_WAKERS }.remove(&reply.reply_serial())
+    else {
+        return;
+    };
+
+    let wake_count = wakers.len();
+    for ((sink, w), m) in wakers
+        .into_iter()
+        .zip(core::iter::repeat_n(reply, wake_count))
+    {
+        let Some(sink1) = sink.upgrade() else {
+            // abandoned
+            continue;
+        };
+
+        sink1.set(Some(m));
+        drop(sink); // drop before wake(unchain weak ref)
+        w.wake();
+    }
+}
 
 #[cfg(target_os = "linux")]
 static mut DBUS_WAIT_FOR_SIGNAL_WAKERS: *mut HashMap<
@@ -6472,6 +6454,33 @@ static mut DBUS_WAIT_FOR_SIGNAL_WAKERS: *mut HashMap<
         core::task::Waker,
     )>,
 > = core::ptr::null_mut();
+fn wake_for_signal(
+    path: std::ffi::CString,
+    interface: std::ffi::CString,
+    member: std::ffi::CString,
+    message: dbus::Message,
+) {
+    let Some(wakers) =
+        unsafe { &mut *DBUS_WAIT_FOR_SIGNAL_WAKERS }.remove(&(path, interface, member))
+    else {
+        return;
+    };
+
+    let wake_count = wakers.len();
+    for ((sink, w), m) in wakers
+        .into_iter()
+        .zip(core::iter::repeat_n(message, wake_count))
+    {
+        let Some(sink1) = sink.upgrade() else {
+            // abandoned
+            continue;
+        };
+
+        sink1.set(Some(m));
+        drop(sink); // drop before wake(unchain weak ref)
+        w.wake();
+    }
+}
 
 #[cfg(target_os = "linux")]
 pub struct DBusWaitForReplyFuture {

@@ -1138,6 +1138,42 @@ impl<'s> PrimaryRenderTarget<'s> {
     }
 }
 
+const CORNER_CUTOUT_RENDER_PIPELINE_VI_STATE: &'static br::PipelineVertexInputStateCreateInfo<
+    'static,
+> = &br::PipelineVertexInputStateCreateInfo::new(
+    &[const { br::VertexInputBindingDescription::per_instance_typed::<[[f32; 2]; 2]>(0) }],
+    &[
+        br::VertexInputAttributeDescription {
+            location: 0,
+            binding: 0,
+            format: br::vk::VK_FORMAT_R32G32_SFLOAT,
+            offset: 0,
+        },
+        br::VertexInputAttributeDescription {
+            location: 1,
+            binding: 0,
+            format: br::vk::VK_FORMAT_R32G32_SFLOAT,
+            offset: core::mem::size_of::<[f32; 2]>() as _,
+        },
+    ],
+);
+const CORNER_CUTOUT_RENDER_PIPELINE_BLEND_STATE: &'static br::PipelineColorBlendStateCreateInfo<
+    'static,
+> = &br::PipelineColorBlendStateCreateInfo::new(&[br::vk::VkPipelineColorBlendAttachmentState {
+    // simply overwrite alpha
+    blendEnable: true as _,
+    srcColorBlendFactor: br::vk::VK_BLEND_FACTOR_ZERO,
+    dstColorBlendFactor: br::vk::VK_BLEND_FACTOR_SRC_ALPHA,
+    colorBlendOp: br::vk::VK_BLEND_OP_ADD,
+    srcAlphaBlendFactor: br::vk::VK_BLEND_FACTOR_ONE,
+    dstAlphaBlendFactor: br::vk::VK_BLEND_FACTOR_ZERO,
+    alphaBlendOp: br::vk::VK_BLEND_OP_ADD,
+    colorWriteMask: br::vk::VK_COLOR_COMPONENT_A_BIT
+        | br::vk::VK_COLOR_COMPONENT_B_BIT
+        | br::vk::VK_COLOR_COMPONENT_G_BIT
+        | br::vk::VK_COLOR_COMPONENT_R_BIT,
+}]);
+
 fn main() {
     tracing_subscriber::fmt()
         .pretty()
@@ -1985,70 +2021,34 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                 .with_specialization_info(&vsh_spec),
             fsh.on_stage(br::ShaderStage::Fragment, c"main"),
         ];
-        let vi_state: br::PipelineVertexInputStateCreateInfo<'static> =
-            br::PipelineVertexInputStateCreateInfo::new(
-                &[
-                    const { br::VertexInputBindingDescription::per_instance_typed::<[[f32; 2]; 2]>(0) },
-                ],
-                &[
-                    br::VertexInputAttributeDescription {
-                        location: 0,
-                        binding: 0,
-                        format: br::vk::VK_FORMAT_R32G32_SFLOAT,
-                        offset: 0,
-                    },
-                    br::VertexInputAttributeDescription {
-                        location: 1,
-                        binding: 0,
-                        format: br::vk::VK_FORMAT_R32G32_SFLOAT,
-                        offset: core::mem::size_of::<[f32; 2]>() as _,
-                    },
-                ],
-            );
         let viewport = [sc
             .size
             .into_rect(br::Offset2D::ZERO)
             .make_viewport(0.0..1.0)];
         let scissor = [sc.size.into_rect(br::Offset2D::ZERO)];
         let viewport_state = br::PipelineViewportStateCreateInfo::new_array(&viewport, &scissor);
-        let blend_state = br::PipelineColorBlendStateCreateInfo::new(&[
-            br::vk::VkPipelineColorBlendAttachmentState {
-                // simply overwrite only alpha
-                blendEnable: true as _,
-                srcColorBlendFactor: br::vk::VK_BLEND_FACTOR_ONE,
-                dstColorBlendFactor: br::vk::VK_BLEND_FACTOR_ZERO,
-                colorBlendOp: br::vk::VK_BLEND_OP_ADD,
-                srcAlphaBlendFactor: br::vk::VK_BLEND_FACTOR_ONE,
-                dstAlphaBlendFactor: br::vk::VK_BLEND_FACTOR_ZERO,
-                alphaBlendOp: br::vk::VK_BLEND_OP_ADD,
-                colorWriteMask: br::vk::VK_COLOR_COMPONENT_A_BIT
-                    | br::vk::VK_COLOR_COMPONENT_B_BIT
-                    | br::vk::VK_COLOR_COMPONENT_G_BIT
-                    | br::vk::VK_COLOR_COMPONENT_R_BIT,
-            },
-        ]);
         let [render_pipeline, render_pipeline_cont] = app_system
             .create_graphics_pipelines_array(&[
                 br::GraphicsPipelineCreateInfo::new(
                     &pipeline_layout,
                     main_rp_final.subpass(0),
                     &shader_stages,
-                    &vi_state,
+                    CORNER_CUTOUT_RENDER_PIPELINE_VI_STATE,
                     IA_STATE_TRISTRIP,
                     &viewport_state,
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
-                    &blend_state,
+                    CORNER_CUTOUT_RENDER_PIPELINE_BLEND_STATE,
                 )
                 .set_multisample_state(MS_STATE_EMPTY),
                 br::GraphicsPipelineCreateInfo::new(
                     &pipeline_layout,
                     main_rp_continue_final.subpass(0),
                     &shader_stages,
-                    &vi_state,
+                    CORNER_CUTOUT_RENDER_PIPELINE_VI_STATE,
                     IA_STATE_TRISTRIP,
                     &viewport_state,
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
-                    &blend_state,
+                    CORNER_CUTOUT_RENDER_PIPELINE_BLEND_STATE,
                 )
                 .set_multisample_state(MS_STATE_EMPTY),
             ])
@@ -3147,28 +3147,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                     .with_specialization_info(&vsh_spec),
                                 fsh.on_stage(br::ShaderStage::Fragment, c"main"),
                             ];
-                            let vi_state: br::PipelineVertexInputStateCreateInfo<'static> =
-                                br::PipelineVertexInputStateCreateInfo::new(
-                                    &[const {
-                                        br::VertexInputBindingDescription::per_instance_typed::<
-                                            [[f32; 2]; 2],
-                                        >(0)
-                                    }],
-                                    &[
-                                        br::VertexInputAttributeDescription {
-                                            location: 0,
-                                            binding: 0,
-                                            format: br::vk::VK_FORMAT_R32G32_SFLOAT,
-                                            offset: 0,
-                                        },
-                                        br::VertexInputAttributeDescription {
-                                            location: 1,
-                                            binding: 0,
-                                            format: br::vk::VK_FORMAT_R32G32_SFLOAT,
-                                            offset: core::mem::size_of::<[f32; 2]>() as _,
-                                        },
-                                    ],
-                                );
                             let viewport = [sc
                                 .size
                                 .into_rect(br::Offset2D::ZERO)
@@ -3176,44 +3154,28 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                             let scissor = [sc.size.into_rect(br::Offset2D::ZERO)];
                             let viewport_state =
                                 br::PipelineViewportStateCreateInfo::new_array(&viewport, &scissor);
-                            let blend_state = br::PipelineColorBlendStateCreateInfo::new(&[
-                                br::vk::VkPipelineColorBlendAttachmentState {
-                                    // simply overwrite alpha
-                                    blendEnable: true as _,
-                                    srcColorBlendFactor: br::vk::VK_BLEND_FACTOR_ZERO,
-                                    dstColorBlendFactor: br::vk::VK_BLEND_FACTOR_SRC_ALPHA,
-                                    colorBlendOp: br::vk::VK_BLEND_OP_ADD,
-                                    srcAlphaBlendFactor: br::vk::VK_BLEND_FACTOR_ONE,
-                                    dstAlphaBlendFactor: br::vk::VK_BLEND_FACTOR_ZERO,
-                                    alphaBlendOp: br::vk::VK_BLEND_OP_ADD,
-                                    colorWriteMask: br::vk::VK_COLOR_COMPONENT_A_BIT
-                                        | br::vk::VK_COLOR_COMPONENT_B_BIT
-                                        | br::vk::VK_COLOR_COMPONENT_G_BIT
-                                        | br::vk::VK_COLOR_COMPONENT_R_BIT,
-                                },
-                            ]);
                             let [render_pipeline, render_pipeline_cont] = app_system
                                 .create_graphics_pipelines_array(&[
                                     br::GraphicsPipelineCreateInfo::new(
                                         corner_cutout_render_pipeline_layout.as_ref().unwrap(),
                                         main_rp_final.subpass(0),
                                         &shader_stages,
-                                        &vi_state,
+                                        CORNER_CUTOUT_RENDER_PIPELINE_VI_STATE,
                                         IA_STATE_TRISTRIP,
                                         &viewport_state,
                                         RASTER_STATE_DEFAULT_FILL_NOCULL,
-                                        &blend_state,
+                                        CORNER_CUTOUT_RENDER_PIPELINE_BLEND_STATE,
                                     )
                                     .set_multisample_state(MS_STATE_EMPTY),
                                     br::GraphicsPipelineCreateInfo::new(
                                         corner_cutout_render_pipeline_layout.as_ref().unwrap(),
                                         main_rp_continue_final.subpass(0),
                                         &shader_stages,
-                                        &vi_state,
+                                        CORNER_CUTOUT_RENDER_PIPELINE_VI_STATE,
                                         IA_STATE_TRISTRIP,
                                         &viewport_state,
                                         RASTER_STATE_DEFAULT_FILL_NOCULL,
-                                        &blend_state,
+                                        CORNER_CUTOUT_RENDER_PIPELINE_BLEND_STATE,
                                     )
                                     .set_multisample_state(MS_STATE_EMPTY),
                                 ])

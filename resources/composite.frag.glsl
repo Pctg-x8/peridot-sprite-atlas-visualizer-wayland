@@ -49,7 +49,14 @@ void main() {
         // no 9slices
         col_out = texture(tex, uv_compositeMode_opacity.xy);
     } else {
-        col_out = tex_9s(relativePixelCoord_renderSizePixels.xy, relativePixelCoord_renderSizePixels.zw, uvOffset_texSizePixels.xy, uvOffset_texSizePixels.zw, sliceBordersLTRB, texSlicedSizePixels.xy);
+        col_out = tex_9s(
+            relativePixelCoord_renderSizePixels.xy,
+            relativePixelCoord_renderSizePixels.zw,
+            uvOffset_texSizePixels.xy,
+            uvOffset_texSizePixels.zw,
+            sliceBordersLTRB,
+            texSlicedSizePixels.xy
+        );
     }
 
     if (uv_compositeMode_opacity.z == 1.0 || uv_compositeMode_opacity.z == 3.0) {

@@ -1,7 +1,7 @@
 
 #ifdef VERTEX_SHADER
-layout(push_constant, std140) uniform PushConstants {
-    vec2 screenSize;
+layout(push_constant) uniform PushConstants {
+    layout(offset = 0) vec2 screenSize;
 };
 
 struct CompositeInstanceData {
@@ -38,9 +38,26 @@ layout(set = 0, binding = 0, std140) readonly buffer InstanceDataArray {
 layout(set = 0, binding = 1, std140) uniform StreamingData {
     float current_sec;
 };
+
+#define VARYING_DIR out
 #endif
 
 #ifdef FRAGMENT_SHADER
 layout(set = 0, binding = 2) uniform sampler2D tex;
 layout(set = 1, binding = 0) uniform sampler2D backdrop_tex;
+
+layout(push_constant) uniform PushConstants {
+    layout(offset = 16) vec4 rectMaskInScreenUV;
+    layout(offset = 32) vec4 rectMaskSoftnessInScreenUV;
+};
+
+#define VARYING_DIR in
 #endif
+
+layout(location = 0) VARYING_DIR vec4 uv_compositeMode_opacity;
+layout(location = 1) VARYING_DIR vec4 uvOffset_texSizePixels;
+layout(location = 2) VARYING_DIR vec4 relativePixelCoord_renderSizePixels;
+layout(location = 3) VARYING_DIR vec4 sliceBordersLTRB;
+layout(location = 4) VARYING_DIR vec4 colorTint;
+layout(location = 5) VARYING_DIR vec4 texSlicedSizePixels;
+layout(location = 6) VARYING_DIR vec2 screenUV;

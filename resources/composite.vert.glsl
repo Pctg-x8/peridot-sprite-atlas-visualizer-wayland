@@ -3,14 +3,6 @@
 #define VERTEX_SHADER
 #include "composite.resources.glsl"
 
-layout(location = 0) out vec4 uv_compositeMode_opacity;
-layout(location = 1) out vec4 uvOffset_texSizePixels;
-layout(location = 2) out vec4 relativePixelCoord_renderSizePixels;
-layout(location = 3) out vec4 sliceBordersLTRB;
-layout(location = 4) out vec4 colorTintOut;
-layout(location = 5) out vec4 texSlicedSizePixels;
-layout(location = 6) out vec2 screenUV;
-
 float interpolate_curve(in vec2 p1, in vec2 p2, in float x) {
     // p01 = mix(vec2(0.0), p1, t) = p1 * t
     // p12 = mix(p1, p2, t) = p1 * (1.0 - t) + p2 * t
@@ -186,6 +178,6 @@ void main() {
         instanceDataArray[gl_InstanceIndex].tex_size_pixels_composite_mode_opacity.zw
     );
     sliceBordersLTRB = instanceDataArray[gl_InstanceIndex].slice_borders;
-    colorTintOut = instanceDataArray[gl_InstanceIndex].color_tint;
+    colorTint = instanceDataArray[gl_InstanceIndex].color_tint;
     texSlicedSizePixels = vec4(uvOffset_texSizePixels.zw * instanceDataArray[gl_InstanceIndex].uv_st.xy, 0.0f, 0.0f);
 }

@@ -13,8 +13,8 @@ use crate::{
         RenderTexture, RenderTextureFlags, RenderTextureOptions,
     },
     composite::{
-        AnimatableColor, AnimatableFloat, AnimationCurve, AtlasRect, CompositeMode, CompositeRect,
-        CompositeTree, CompositeTreeRef,
+        AnimatableColor, AnimatableFloat, AnimationCurve, AtlasRect, ClipConfig, CompositeMode,
+        CompositeRect, CompositeTree, CompositeTreeRef,
     },
     const_subpass_description_2_single_color_write_only,
     helper_types::SafeF32,
@@ -528,6 +528,7 @@ struct CellView {
     ct_root: CompositeTreeRef,
     ct_bg: CompositeTreeRef,
     ct_bg_selected: CompositeTreeRef,
+    ct_label_clip: CompositeTreeRef,
     ct_label: CompositeTreeRef,
     ht_root: HitTestTreeRef,
     label: RefCell<String>,
@@ -539,7 +540,8 @@ impl CellView {
     const CORNER_RADIUS: SafeF32 = unsafe { SafeF32::new_unchecked(8.0) };
     const MARGIN_H: f32 = 16.0;
     const HEIGHT: f32 = 24.0;
-    const LABEL_MARGIN_LEFT: f32 = 8.0;
+    const LABEL_MARGIN_H: f32 = 8.0;
+    const LABEL_OVERFLOW_SOFTCLIP: f32 = 16.0;
 
     #[tracing::instrument(name = "SpriteListCellView::new", skip(init))]
     fn new(
@@ -573,18 +575,36 @@ impl CellView {
             ],
             ..Default::default()
         });
-        let ct_label = init.base_system.register_composite_rect(CompositeRect {
+        let ct_label_clip = init.base_system.register_composite_rect(CompositeRect {
             base_scale_factor: init.ui_scale_factor,
             offset: [
-                AnimatableFloat::Value(Self::LABEL_MARGIN_LEFT),
+                AnimatableFloat::Value(Self::LABEL_MARGIN_H),
                 AnimatableFloat::Value(
                     -(label_atlas_rect.height() as f32 / init.ui_scale_factor) * 0.5,
                 ),
             ],
             relative_offset_adjustment: [0.0, 0.5],
             size: [
-                AnimatableFloat::Value(label_atlas_rect.width() as f32 / init.ui_scale_factor),
+                AnimatableFloat::Value(-Self::LABEL_MARGIN_H * 2.0),
                 AnimatableFloat::Value(label_atlas_rect.height() as f32 / init.ui_scale_factor),
+            ],
+            relative_size_adjustment: [1.0, 0.0],
+            clip_child: Some(ClipConfig {
+                left_softness: unsafe { SafeF32::new_unchecked(0.0) },
+                top_softness: unsafe { SafeF32::new_unchecked(0.0) },
+                right_softness: unsafe {
+                    SafeF32::new_unchecked(Self::LABEL_OVERFLOW_SOFTCLIP * init.ui_scale_factor)
+                },
+                bottom_softness: unsafe { SafeF32::new_unchecked(0.0) },
+            }),
+            ..Default::default()
+        });
+        let ct_label = init.base_system.register_composite_rect(CompositeRect {
+            base_scale_factor: init.ui_scale_factor,
+            relative_size_adjustment: [0.0, 1.0],
+            size: [
+                AnimatableFloat::Value(label_atlas_rect.width() as f32 / init.ui_scale_factor),
+                AnimatableFloat::Value(0.0),
             ],
             has_bitmap: true,
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
@@ -616,7 +636,9 @@ impl CellView {
             .set_composite_tree_parent(ct_bg_selected, ct_root);
         init.base_system.set_composite_tree_parent(ct_bg, ct_root);
         init.base_system
-            .set_composite_tree_parent(ct_label, ct_root);
+            .set_composite_tree_parent(ct_label, ct_label_clip);
+        init.base_system
+            .set_composite_tree_parent(ct_label_clip, ct_root);
 
         let ht_root = init.base_system.create_hit_tree(HitTestTreeData {
             left: Self::MARGIN_H,
@@ -629,6 +651,7 @@ impl CellView {
 
         Self {
             ct_root,
+            ct_label_clip,
             ct_label,
             ct_bg,
             ct_bg_selected,
@@ -679,6 +702,18 @@ impl CellView {
             .entity_mut_dirtified(&mut base_system.composite_tree);
         cr.texatlas_rect = label_atlas_rect;
         cr.base_scale_factor = ui_scale_factor.value();
+        let cr = self
+            .ct_label_clip
+            .entity_mut_dirtified(&mut base_system.composite_tree);
+        cr.base_scale_factor = ui_scale_factor.value();
+        cr.clip_child = Some(ClipConfig {
+            left_softness: unsafe { SafeF32::new_unchecked(0.0) },
+            top_softness: unsafe { SafeF32::new_unchecked(0.0) },
+            right_softness: unsafe {
+                SafeF32::new_unchecked(Self::LABEL_OVERFLOW_SOFTCLIP * ui_scale_factor.value())
+            },
+            bottom_softness: unsafe { SafeF32::new_unchecked(0.0) },
+        });
         let cr = self
             .ct_bg
             .entity_mut_dirtified(&mut base_system.composite_tree);

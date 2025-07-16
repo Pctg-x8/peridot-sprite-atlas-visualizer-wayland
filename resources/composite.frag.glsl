@@ -3,14 +3,6 @@
 #define FRAGMENT_SHADER
 #include "composite.resources.glsl"
 
-layout(location = 0) in vec4 uv_compositeMode_opacity;
-layout(location = 1) in vec4 uvOffset_texSizePixels;
-layout(location = 2) in vec4 relativePixelCoord_renderSizePixels;
-layout(location = 3) in vec4 sliceBordersLTRB;
-layout(location = 4) in vec4 colorTint;
-layout(location = 5) in vec4 texSlicedSizePixels;
-layout(location = 6) in vec2 screenUV;
-
 layout(location = 0) out vec4 col_out;
 
 float rel_uv_9s_axis(in float relativePixelCoord, in float renderSizePixels, in float texSizePixels, in float sliceBorderLT, in float sliceBorderRB, in float texSlicedSizePixels) {
@@ -37,14 +29,19 @@ float rel_uv_9s_axis(in float relativePixelCoord, in float renderSizePixels, in 
 
 vec4 tex_9s(in vec2 relativePixelCoord, in vec2 renderSizePixels, in vec2 uvOffset, in vec2 texSizePixels, in vec4 sliceBordersLTRB, in vec2 texSlicedSizePixels) {
     const vec2 uv = vec2(
-            rel_uv_9s_axis(relativePixelCoord.x, renderSizePixels.x, texSizePixels.x, sliceBordersLTRB.x, sliceBordersLTRB.z, texSlicedSizePixels.x),
-            rel_uv_9s_axis(relativePixelCoord.y, renderSizePixels.y, texSizePixels.y, sliceBordersLTRB.y, sliceBordersLTRB.w, texSlicedSizePixels.y)
-        );
+        rel_uv_9s_axis(relativePixelCoord.x, renderSizePixels.x, texSizePixels.x, sliceBordersLTRB.x, sliceBordersLTRB.z, texSlicedSizePixels.x),
+        rel_uv_9s_axis(relativePixelCoord.y, renderSizePixels.y, texSizePixels.y, sliceBordersLTRB.y, sliceBordersLTRB.w, texSlicedSizePixels.y)
+    );
 
     return texture(tex, uvOffset + uv);
 }
 
 void main() {
+    if (rectMaskInScreenUV.x > screenUV.x || screenUV.x > rectMaskInScreenUV.z || rectMaskInScreenUV.y > screenUV.y || screenUV.y > rectMaskInScreenUV.w) {
+        // out of mask
+        discard;
+    }
+
     if (uv_compositeMode_opacity.z == 2.0 || uv_compositeMode_opacity.z == 4.0) {
         // no texture mapping
         col_out = colorTint;
@@ -59,6 +56,18 @@ void main() {
         // input is r8 format
         col_out = colorTint * vec4(1.0, 1.0, 1.0, col_out.r);
     }
+
+    const float soft_alpharate = min(
+        min(
+            clamp(screenUV.x / rectMaskSoftnessInScreenUV.x, 0.0, 1.0),
+            clamp((rectMaskInScreenUV.z - screenUV.x) / rectMaskSoftnessInScreenUV.z, 0.0, 1.0)
+        ),
+        min(
+            clamp(screenUV.y / rectMaskSoftnessInScreenUV.y, 0.0, 1.0),
+            clamp((rectMaskInScreenUV.w - screenUV.y) / rectMaskSoftnessInScreenUV.w, 0.0, 1.0)
+        )
+    );
+    col_out.a *= soft_alpharate;
 
     // apply opacity and premultiply
     col_out.a *= uv_compositeMode_opacity.w;

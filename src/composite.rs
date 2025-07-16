@@ -35,6 +35,13 @@ pub struct CompositeInstanceData {
     pub pos_height_curve_control_points: [f32; 4],
 }
 
+pub const COMPOSITE_PUSH_CONSTANT_RANGES: &'static [br::PushConstantRange] = &[
+    // { screen_x_pixels: f32, screen_y_pixels: f32 }
+    br::PushConstantRange::new(br::vk::VK_SHADER_STAGE_VERTEX_BIT, 0..8),
+    // { rect_mask_left: f32, rect_mask_top: f32, rect_mask_right: f32, rect_mask_bottom: f32, rect_mask_left_softness: f32, rect_mask_top_softness: f32, rect_mask_right_softness: f32, rect_mask_bottom_softness: f32 }
+    br::PushConstantRange::new(br::vk::VK_SHADER_STAGE_FRAGMENT_BIT, 16..48),
+];
+
 #[repr(C)]
 pub struct CompositeStreamingData {
     pub current_sec: f32,
@@ -368,6 +375,14 @@ fn interpolate_cubic_bezier(t: f32, p1: (f32, f32), p2: (f32, f32)) -> f32 {
         + p1.1 * 3.0 * t0
 }
 
+#[derive(Clone, Copy)]
+pub struct ClipConfig {
+    pub left_softness: SafeF32,
+    pub top_softness: SafeF32,
+    pub right_softness: SafeF32,
+    pub bottom_softness: SafeF32,
+}
+
 pub struct CompositeRect {
     pub has_bitmap: bool,
     pub base_scale_factor: f32,
@@ -375,6 +390,7 @@ pub struct CompositeRect {
     pub size: [AnimatableFloat; 2],
     pub relative_offset_adjustment: [f32; 2],
     pub relative_size_adjustment: [f32; 2],
+    pub clip_child: Option<ClipConfig>,
     pub texatlas_rect: AtlasRect,
     pub slice_borders: [f32; 4],
     pub composite_mode: CompositeMode,
@@ -395,6 +411,7 @@ impl Default for CompositeRect {
             size: [const { AnimatableFloat::Value(0.0) }; 2],
             relative_offset_adjustment: [0.0, 0.0],
             relative_size_adjustment: [0.0, 0.0],
+            clip_child: None,
             texatlas_rect: AtlasRect {
                 left: 0,
                 top: 0,
@@ -789,6 +806,10 @@ pub enum CompositeRenderingInstruction {
         index_range: core::ops::Range<usize>,
         backdrop_buffer: usize,
     },
+    SetClip {
+        shader_parameters: [SafeF32; 8],
+    },
+    ClearClip,
     GrabBackdrop,
     GenerateBackdropBlur {
         stdev: SafeF32,
@@ -820,11 +841,13 @@ struct CompositeRenderingInstructionBuilder {
     backdrop_active: bool,
     max_backdrop_buffer_count: usize,
     screen_rect: br::Rect2D,
+    active_clip_parameters: Option<[SafeF32; 8]>,
+    clip_invalidated: bool,
 }
 impl CompositeRenderingInstructionBuilder {
     fn new(screen_size: br::Extent2D) -> Self {
         Self {
-            insts: Vec::new(),
+            insts: vec![CompositeRenderingInstruction::ClearClip],
             render_passes: Vec::new(),
             last_free_backdrop_buffer: 0,
             active_backdrop_blur_index_for_stdev: HashMap::new(),
@@ -832,6 +855,8 @@ impl CompositeRenderingInstructionBuilder {
             backdrop_active: false,
             max_backdrop_buffer_count: 0,
             screen_rect: screen_size.into_rect(br::Offset2D::ZERO),
+            active_clip_parameters: None,
+            clip_invalidated: true,
         }
     }
 
@@ -873,6 +898,81 @@ impl CompositeRenderingInstructionBuilder {
             });
     }
 
+    fn set_clip(&mut self, rect: &[SafeF32; 4], config: &ClipConfig) {
+        let clip_parameters = [
+            rect[0],
+            rect[1],
+            rect[2],
+            rect[3],
+            config.left_softness,
+            config.top_softness,
+            config.right_softness,
+            config.bottom_softness,
+        ];
+        if !self.clip_invalidated
+            && self
+                .active_clip_parameters
+                .as_ref()
+                .is_some_and(|x| x == &clip_parameters)
+        {
+            // same clip already active
+            return;
+        }
+
+        // needs to change clip state...
+        match self.insts.last_mut() {
+            Some(x @ &mut CompositeRenderingInstruction::ClearClip) => {
+                // replace clearclip
+                *x = CompositeRenderingInstruction::SetClip {
+                    shader_parameters: clip_parameters,
+                };
+            }
+            Some(&mut CompositeRenderingInstruction::SetClip {
+                ref shader_parameters,
+            }) if &clip_parameters == shader_parameters => {
+                // same clip, nop
+            }
+            Some(&mut CompositeRenderingInstruction::SetClip {
+                ref mut shader_parameters,
+            }) => {
+                // overtake contiguous setclip
+                *shader_parameters = clip_parameters;
+            }
+            _ => {
+                // insert new setclip instruction
+                self.insts.push(CompositeRenderingInstruction::SetClip {
+                    shader_parameters: clip_parameters,
+                });
+            }
+        }
+
+        self.clip_invalidated = false;
+        self.active_clip_parameters = Some(clip_parameters);
+    }
+
+    fn clear_clip(&mut self) {
+        if !self.clip_invalidated && self.active_clip_parameters.is_none() {
+            // nothing clip activated
+            return;
+        }
+
+        match self.insts.last_mut() {
+            Some(&mut CompositeRenderingInstruction::ClearClip) => {
+                // fuse, do nothing
+            }
+            Some(x @ &mut CompositeRenderingInstruction::SetClip { .. }) => {
+                // clip set but no rendering occured, overtake
+                *x = CompositeRenderingInstruction::ClearClip;
+            }
+            _ => {
+                self.insts.push(CompositeRenderingInstruction::ClearClip);
+            }
+        }
+
+        self.clip_invalidated = true;
+        self.active_clip_parameters = None;
+    }
+
     /// return: backdrop buffer index
     fn request_backdrop_blur(&mut self, stdev: SafeF32, rect: br::Rect2D) -> usize {
         if !rect_overlaps(&rect, &self.screen_rect) {
@@ -896,6 +996,7 @@ impl CompositeRenderingInstructionBuilder {
                 continued: !self.render_passes.is_empty(),
             };
             self.render_passes.push(rpr);
+            self.clip_invalidated = true;
             self.max_backdrop_buffer_count = self
                 .max_backdrop_buffer_count
                 .max(self.last_free_backdrop_buffer);
@@ -929,6 +1030,7 @@ impl CompositeRenderingInstructionBuilder {
                 continued: !self.render_passes.is_empty(),
             };
             self.render_passes.push(rpr);
+            self.clip_invalidated = true;
             self.max_backdrop_buffer_count = self
                 .max_backdrop_buffer_count
                 .max(self.last_free_backdrop_buffer);
@@ -1086,6 +1188,7 @@ impl CompositeTree {
                 size.height as f32,
                 1.0,
                 Matrix4::IDENTITY,
+                None::<([SafeF32; 4], ClipConfig)>,
             ),
         )];
         while let Some((
@@ -1097,6 +1200,7 @@ impl CompositeTree {
                 effective_height,
                 parent_opacity,
                 parent_matrix,
+                active_clip,
             ),
         )) = processes.pop()
         {
@@ -1238,16 +1342,40 @@ impl CompositeTree {
                     _ => 0,
                 };
 
+                if let Some((clip_rect_px, clip_config)) = active_clip {
+                    inst_builder.set_clip(&clip_rect_px, &clip_config);
+                } else {
+                    inst_builder.clear_clip();
+                }
+
                 inst_builder.draw_instance(instance_slot_index, backdrop_buffer_index);
                 instance_slot_index += 1;
             }
 
-            processes.extend(
-                r.children
-                    .iter()
-                    .rev()
-                    .map(|&x| (x, (left, top, w, h, opacity, matrix.clone()))),
-            );
+            processes.extend(r.children.iter().rev().map(|&x| {
+                (
+                    x,
+                    (
+                        left,
+                        top,
+                        w,
+                        h,
+                        opacity,
+                        matrix.clone(),
+                        r.clip_child.map(|cc| {
+                            (
+                                [
+                                    unsafe { SafeF32::new_unchecked(left) },
+                                    unsafe { SafeF32::new_unchecked(top) },
+                                    unsafe { SafeF32::new_unchecked(left + w) },
+                                    unsafe { SafeF32::new_unchecked(top + h) },
+                                ],
+                                cc,
+                            )
+                        }),
+                    ),
+                )
+            }));
         }
 
         // let update_time = update_timer.elapsed();

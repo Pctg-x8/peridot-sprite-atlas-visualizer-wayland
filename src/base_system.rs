@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::Path};
+use std::{cell::RefCell, collections::HashMap, path::Path, rc::Rc};
 
 use crate::{
     BLEND_STATE_SINGLE_NONE, FillcolorRConstants, IA_STATE_TRIFAN, IA_STATE_TRILIST,
@@ -26,8 +26,8 @@ pub struct FontSet {
 }
 
 bitflags! {
-    #[derive(Debug, Clone, Copy)]
-    pub struct RenderPassOptions: u32 {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct RenderPassOptions: u8 {
         const FULL_PIXEL_RENDER = 0x01;
     }
 }
@@ -47,6 +47,8 @@ pub struct AppBaseSystem<'subsystem> {
     rounded_fill_rect_cache: HashMap<(SafeF32, SafeF32), AtlasRect>,
     rounded_rect_cache: HashMap<(SafeF32, SafeF32, SafeF32), AtlasRect>,
     text_cache: HashMap<FontType, HashMap<String, AtlasRect>>,
+    render_to_mask_atlas_pass_cache:
+        RefCell<HashMap<RenderPassOptions, Rc<br::RenderPassObject<&'subsystem Subsystem>>>>,
 }
 impl Drop for AppBaseSystem<'_> {
     fn drop(&mut self) {
@@ -133,6 +135,7 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
             rounded_fill_rect_cache: HashMap::new(),
             rounded_rect_cache: HashMap::new(),
             text_cache: HashMap::new(),
+            render_to_mask_atlas_pass_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -157,11 +160,23 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         self.atlas.size()
     }
 
+    #[tracing::instrument(
+        name = "AppBaseSystem::render_to_mask_atlas_pass",
+        skip(self),
+        err(Display)
+    )]
     pub fn render_to_mask_atlas_pass(
         &self,
         options: RenderPassOptions,
     ) -> br::Result<impl br::RenderPass + use<'subsystem>> {
-        br::RenderPassObject::new(
+        let mut cache_locked = self.render_to_mask_atlas_pass_cache.borrow_mut();
+        if let Some(r) = cache_locked.get(&options) {
+            // reuse existing
+            return Ok(r.clone());
+        }
+
+        tracing::info!("creating fresh");
+        let o = br::RenderPassObject::new(
             self.subsystem,
             &br::RenderPassCreateInfo2::new(
                 &[br::AttachmentDescription2::new(br::vk::VK_FORMAT_R8_UNORM)
@@ -193,7 +208,11 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
                     br::PipelineStageFlags::FRAGMENT_SHADER,
                 )],
             ),
-        )
+        )?;
+
+        let o = Rc::new(o);
+        cache_locked.insert(options, o.clone());
+        Ok(o)
     }
 
     pub const fn mask_atlas_resource_transparent_ref(

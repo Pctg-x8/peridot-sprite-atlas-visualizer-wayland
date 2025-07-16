@@ -34,7 +34,7 @@ use std::{
 
 use crate::{composite::FloatParameter, quadtree::QuadTree};
 use app_state::{AppState, SpriteInfo};
-use base_system::AppBaseSystem;
+use base_system::{AppBaseSystem, RenderPassOptions};
 use bedrock::{
     self as br, CommandBufferMut, CommandPoolMut, DescriptorPoolMut, Device, Fence, FenceMut,
     ImageChild, InstanceChild, MemoryBound, PhysicalDevice, RenderPass, ShaderModule, Swapchain,
@@ -1886,34 +1886,9 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         // window decorations must be rendered by client side
         let corner_cutout_atlas_rect = app_system.alloc_mask_atlas_rect(16, 16);
 
-        let rp = br::RenderPassObject::new(
-            app_system.subsystem,
-            &br::RenderPassCreateInfo2::new(
-                &[
-                    br::AttachmentDescription2::new(app_system.mask_atlas_format())
-                        .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store)
-                        .layout_transition(
-                            br::ImageLayout::Undefined,
-                            br::ImageLayout::ShaderReadOnlyOpt,
-                        ),
-                ],
-                &[br::SubpassDescription2::new()
-                    .colors(&[br::AttachmentReference2::color_attachment_opt(0)])],
-                &[br::SubpassDependency2::new(
-                    br::SubpassIndex::Internal(0),
-                    br::SubpassIndex::External,
-                )
-                .of_memory(
-                    br::AccessFlags::COLOR_ATTACHMENT.write,
-                    br::AccessFlags::SHADER.read,
-                )
-                .of_execution(
-                    br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                    br::PipelineStageFlags::FRAGMENT_SHADER,
-                )],
-            ),
-        )
-        .unwrap();
+        let rp = app_system
+            .render_to_mask_atlas_pass(RenderPassOptions::FULL_PIXEL_RENDER)
+            .unwrap();
         let fb = br::FramebufferObject::new(
             app_system.subsystem,
             &br::FramebufferCreateInfo::new(

@@ -6,6 +6,8 @@ use bedrock::{self as br, Image, ImageChild, MemoryBound, TypedVulkanStructure, 
 
 use crate::{AppEvent, AppEventBus, helper_types::SafeF32, mathext::Matrix4, subsystem::Subsystem};
 
+pub const BLUR_SAMPLE_STEPS: usize = 2;
+
 #[repr(C)]
 pub struct CompositeInstanceData {
     /// scale_x(width), scale_y(height), translate_x(left), translate_y(top)
@@ -1383,6 +1385,354 @@ impl CompositeTree {
 
         inst_builder.build()
     }
+}
+
+pub fn populate_composite_render_commands<'x, 'r, X>(
+    mut rec: br::CmdRecord<'x, X>,
+    mut in_render_pass: bool,
+    target_size: br::Extent2D,
+    render_data: &CompositeRenderingData,
+    render_target_pair_provider: impl Fn(
+        &RenderPassRequirements,
+    ) -> (
+        br::VkHandleRef<'r, br::vk::VkRenderPass>,
+        br::VkHandleRef<'r, br::vk::VkFramebuffer>,
+    ),
+    pipeline_provider: impl Fn(&RenderPassRequirements) -> br::VkHandleRef<'r, br::vk::VkPipeline>,
+    pipeline_layout: &impl br::VkHandle<Handle = br::vk::VkPipelineLayout>,
+    descriptor_set: br::DescriptorSet,
+    backdrop_buffer_descriptor_sets: &[br::DescriptorSet],
+    grab_buffer: &(impl br::ImageView + br::ImageChild),
+    current_rt_image: &impl br::VkHandle<Handle = br::vk::VkImage>,
+    backdrop_blur_render_pass: &impl br::VkHandle<Handle = br::vk::VkRenderPass>,
+    backdrop_blur_pipeline_layout: &impl br::VkHandle<Handle = br::vk::VkPipelineLayout>,
+    backdrop_blur_downsample_pipelines: &[impl br::VkHandle<Handle = br::vk::VkPipeline>],
+    backdrop_blur_upsample_pipelines: &[impl br::VkHandle<Handle = br::vk::VkPipeline>],
+    backdrop_blur_fixed_descriptors: &[br::DescriptorSet],
+    backdrop_blur_downsample_fixed_fbs: &[impl br::VkHandle<Handle = br::vk::VkFramebuffer>],
+    backdrop_blur_upsample_fixed_fbs: &[impl br::VkHandle<Handle = br::vk::VkFramebuffer>],
+    backdrop_blur_destination_fbs: &[impl br::VkHandle<Handle = br::vk::VkFramebuffer>],
+) -> br::CmdRecord<'x, X> {
+    let render_region = target_size.into_rect(br::Offset2D::ZERO);
+
+    let mut rpt_pointer = 0;
+    let mut pipeline_bound = false;
+
+    for x in render_data.instructions.iter() {
+        match x {
+            &CompositeRenderingInstruction::DrawInstanceRange {
+                ref index_range,
+                backdrop_buffer,
+            } => {
+                if !in_render_pass {
+                    in_render_pass = true;
+
+                    let (rp, fb) =
+                        render_target_pair_provider(&render_data.render_passes[rpt_pointer]);
+
+                    rec = rec.begin_render_pass2(
+                        &br::RenderPassBeginInfo::new(
+                            &rp,
+                            &fb,
+                            render_region,
+                            &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 1.0])],
+                        ),
+                        &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                    );
+                }
+                if !pipeline_bound {
+                    pipeline_bound = true;
+
+                    rec = rec
+                        .bind_pipeline(
+                            br::PipelineBindPoint::Graphics,
+                            &pipeline_provider(&render_data.render_passes[rpt_pointer]),
+                        )
+                        .push_constant(
+                            pipeline_layout,
+                            br::vk::VK_SHADER_STAGE_VERTEX_BIT,
+                            0,
+                            &[target_size.width as f32, target_size.height as f32],
+                        )
+                        .bind_descriptor_sets(
+                            br::PipelineBindPoint::Graphics,
+                            pipeline_layout,
+                            0,
+                            &[descriptor_set],
+                            &[],
+                        );
+                }
+
+                rec = rec
+                    .bind_descriptor_sets(
+                        br::PipelineBindPoint::Graphics,
+                        pipeline_layout,
+                        1,
+                        &[backdrop_buffer_descriptor_sets[backdrop_buffer]],
+                        &[],
+                    )
+                    .draw(4, index_range.len() as _, 0, index_range.start as _)
+            }
+            &CompositeRenderingInstruction::SetClip {
+                ref shader_parameters,
+            } => {
+                if !in_render_pass {
+                    in_render_pass = true;
+
+                    let (rp, fb) =
+                        render_target_pair_provider(&render_data.render_passes[rpt_pointer]);
+
+                    rec = rec.begin_render_pass2(
+                        &br::RenderPassBeginInfo::new(
+                            &rp,
+                            &fb,
+                            render_region,
+                            &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 1.0])],
+                        ),
+                        &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                    );
+                }
+                if !pipeline_bound {
+                    pipeline_bound = true;
+
+                    rec = rec
+                        .bind_pipeline(
+                            br::PipelineBindPoint::Graphics,
+                            &pipeline_provider(&render_data.render_passes[rpt_pointer]),
+                        )
+                        .push_constant(
+                            pipeline_layout,
+                            br::vk::VK_SHADER_STAGE_VERTEX_BIT,
+                            0,
+                            &[target_size.width as f32, target_size.height as f32],
+                        )
+                        .bind_descriptor_sets(
+                            br::PipelineBindPoint::Graphics,
+                            pipeline_layout,
+                            0,
+                            &[descriptor_set],
+                            &[],
+                        );
+                }
+
+                rec = rec.push_constant(
+                    pipeline_layout,
+                    br::vk::VK_SHADER_STAGE_FRAGMENT_BIT,
+                    16,
+                    &[
+                        shader_parameters[0].value() / target_size.width as f32,
+                        shader_parameters[1].value() / target_size.height as f32,
+                        shader_parameters[2].value() / target_size.width as f32,
+                        shader_parameters[3].value() / target_size.height as f32,
+                        shader_parameters[4].value() / target_size.width as f32,
+                        shader_parameters[5].value() / target_size.height as f32,
+                        shader_parameters[6].value() / target_size.width as f32,
+                        shader_parameters[7].value() / target_size.height as f32,
+                    ],
+                );
+            }
+            &CompositeRenderingInstruction::ClearClip => {
+                if !in_render_pass {
+                    in_render_pass = true;
+
+                    let (rp, fb) =
+                        render_target_pair_provider(&render_data.render_passes[rpt_pointer]);
+
+                    rec = rec.begin_render_pass2(
+                        &br::RenderPassBeginInfo::new(
+                            &rp,
+                            &fb,
+                            render_region,
+                            &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 1.0])],
+                        ),
+                        &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                    );
+                }
+                if !pipeline_bound {
+                    pipeline_bound = true;
+
+                    rec = rec
+                        .bind_pipeline(
+                            br::PipelineBindPoint::Graphics,
+                            &pipeline_provider(&render_data.render_passes[rpt_pointer]),
+                        )
+                        .push_constant(
+                            pipeline_layout,
+                            br::vk::VK_SHADER_STAGE_VERTEX_BIT,
+                            0,
+                            &[target_size.width as f32, target_size.height as f32],
+                        )
+                        .bind_descriptor_sets(
+                            br::PipelineBindPoint::Graphics,
+                            pipeline_layout,
+                            0,
+                            &[descriptor_set],
+                            &[],
+                        );
+                }
+
+                rec = rec.push_constant(
+                    pipeline_layout,
+                    br::vk::VK_SHADER_STAGE_FRAGMENT_BIT,
+                    16,
+                    &[0.0f32, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+                );
+            }
+            CompositeRenderingInstruction::GrabBackdrop => {
+                rec = rec
+                    .end_render_pass2(&br::SubpassEndInfo::new())
+                    .pipeline_barrier_2(&br::DependencyInfo::new(
+                        &[],
+                        &[],
+                        &[br::ImageMemoryBarrier2::new(
+                            grab_buffer.image(),
+                            br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+                        )
+                        .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
+                    ))
+                    .copy_image(
+                        current_rt_image,
+                        br::ImageLayout::TransferSrcOpt,
+                        grab_buffer.image(),
+                        br::ImageLayout::TransferDestOpt,
+                        &[br::ImageCopy {
+                            srcSubresource: br::ImageSubresourceLayers::new(
+                                br::AspectMask::COLOR,
+                                0,
+                                0..1,
+                            ),
+                            dstSubresource: br::ImageSubresourceLayers::new(
+                                br::AspectMask::COLOR,
+                                0,
+                                0..1,
+                            ),
+                            srcOffset: br::Offset3D::ZERO,
+                            dstOffset: br::Offset3D::ZERO,
+                            extent: target_size.with_depth(1),
+                        }],
+                    )
+                    .pipeline_barrier_2(&br::DependencyInfo::new(
+                        &[],
+                        &[],
+                        &[br::ImageMemoryBarrier2::new(
+                            grab_buffer.image(),
+                            br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+                        )
+                        .transit_from(
+                            br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt),
+                        )
+                        .from(
+                            br::PipelineStageFlags2::COPY,
+                            br::AccessFlags2::TRANSFER.write,
+                        )
+                        .to(
+                            br::PipelineStageFlags2::FRAGMENT_SHADER,
+                            br::AccessFlags2::SHADER.read,
+                        )],
+                    ));
+                rpt_pointer += 1;
+                in_render_pass = false;
+                pipeline_bound = false;
+            }
+            &CompositeRenderingInstruction::GenerateBackdropBlur {
+                stdev,
+                dest_backdrop_buffer,
+                // 本来は必要な範囲だけ処理できれば効率いいんだけど面倒なので全面処理しちゃう
+                ..
+            } => {
+                // downsample
+                for lv in 0..BLUR_SAMPLE_STEPS {
+                    rec = rec
+                        .begin_render_pass2(
+                            &br::RenderPassBeginInfo::new(
+                                backdrop_blur_render_pass,
+                                &backdrop_blur_downsample_fixed_fbs[lv],
+                                br::Rect2D {
+                                    offset: br::Offset2D::ZERO,
+                                    extent: br::Extent2D {
+                                        width: target_size.width >> (lv + 1),
+                                        height: target_size.height >> (lv + 1),
+                                    },
+                                },
+                                &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 0.0])],
+                            ),
+                            &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                        )
+                        .bind_pipeline(
+                            br::PipelineBindPoint::Graphics,
+                            &backdrop_blur_downsample_pipelines[lv],
+                        )
+                        .push_constant(
+                            backdrop_blur_pipeline_layout,
+                            br::vk::VK_SHADER_STAGE_VERTEX_BIT,
+                            0,
+                            &[
+                                ((target_size.width >> lv) as f32).recip(),
+                                ((target_size.height >> lv) as f32).recip(),
+                                stdev.value(),
+                            ],
+                        )
+                        .bind_descriptor_sets(
+                            br::PipelineBindPoint::Graphics,
+                            backdrop_blur_pipeline_layout,
+                            0,
+                            &[backdrop_blur_fixed_descriptors[lv]],
+                            &[],
+                        )
+                        .draw(3, 1, 0, 0)
+                        .end_render_pass2(&br::SubpassEndInfo::new());
+                }
+                // upsample
+                for lv in (0..BLUR_SAMPLE_STEPS).rev() {
+                    rec = rec
+                        .begin_render_pass2(
+                            &br::RenderPassBeginInfo::new(
+                                backdrop_blur_render_pass,
+                                &if lv == 0 {
+                                    // final upsample
+                                    backdrop_blur_destination_fbs[dest_backdrop_buffer]
+                                        .as_transparent_ref()
+                                } else {
+                                    backdrop_blur_upsample_fixed_fbs[lv - 1].as_transparent_ref()
+                                },
+                                br::Extent2D {
+                                    width: target_size.width >> lv,
+                                    height: target_size.height >> lv,
+                                }
+                                .into_rect(br::Offset2D::ZERO),
+                                &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 0.0])],
+                            ),
+                            &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                        )
+                        .bind_pipeline(
+                            br::PipelineBindPoint::Graphics,
+                            &backdrop_blur_upsample_pipelines[lv],
+                        )
+                        .push_constant(
+                            backdrop_blur_pipeline_layout,
+                            br::vk::VK_SHADER_STAGE_VERTEX_BIT,
+                            0,
+                            &[
+                                ((target_size.width >> (lv + 1)) as f32).recip(),
+                                ((target_size.height >> (lv + 1)) as f32).recip(),
+                                stdev.value(),
+                            ],
+                        )
+                        .bind_descriptor_sets(
+                            br::PipelineBindPoint::Graphics,
+                            backdrop_blur_pipeline_layout,
+                            0,
+                            &[backdrop_blur_fixed_descriptors[lv + 1]],
+                            &[],
+                        )
+                        .draw(3, 1, 0, 0)
+                        .end_render_pass2(&br::SubpassEndInfo::new());
+                }
+            }
+        };
+    }
+
+    rec
 }
 
 #[derive(Debug, Clone, Copy)]

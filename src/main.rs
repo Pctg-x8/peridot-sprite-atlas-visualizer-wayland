@@ -45,11 +45,11 @@ use bedrock::{
 };
 use bg_worker::{BackgroundWorker, BackgroundWorkerViewFeedback};
 use composite::{
-    AnimatableColor, AnimatableFloat, AnimationCurve, COMPOSITE_PUSH_CONSTANT_RANGES,
-    CompositeInstanceData, CompositeMode, CompositeRect, CompositeRenderingData,
-    CompositeRenderingInstruction, CompositeStreamingData, CompositeTree,
-    CompositeTreeFloatParameterRef, CompositeTreeRef, RenderPassAfterOperation,
-    RenderPassRequirements,
+    AnimatableColor, AnimatableFloat, AnimationCurve, BLUR_SAMPLE_STEPS,
+    COMPOSITE_PUSH_CONSTANT_RANGES, CompositeInstanceData, CompositeMode, CompositeRect,
+    CompositeRenderingData, CompositeStreamingData, CompositeTree, CompositeTreeFloatParameterRef,
+    CompositeTreeRef, RenderPassAfterOperation, RenderPassRequirements,
+    populate_composite_render_commands,
 };
 use coordinate::SizePixels;
 use feature::editing_atlas_renderer::EditingAtlasRenderer;
@@ -1453,7 +1453,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         })
         .collect::<Vec<_>>();
 
-    const BLUR_SAMPLE_STEPS: usize = 2;
     let mut blur_temporal_buffers = Vec::with_capacity(BLUR_SAMPLE_STEPS);
     let mut resources_offsets = Vec::with_capacity(BLUR_SAMPLE_STEPS);
     let mut top = 0;
@@ -3547,432 +3546,66 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                 ),
                                 &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
                             )
+                            .inject(|r| editing_atlas_renderer.borrow().render_commands(sc.size, r))
                             .inject(|r| {
-                                editing_atlas_renderer
-                                    .borrow()
-                                    .render_commands(sc.size, r)
-                            })
-                            .inject(|mut r| {
-                                let mut rpt_pointer = 0;
-                                let mut in_render_pass = true;
-                                let mut pipeline_bound = false;
-
-                                for x in last_composite_render_instructions.instructions.iter() {
-                                    match x {
-                                        &CompositeRenderingInstruction::DrawInstanceRange {
-                                            ref index_range,
-                                            backdrop_buffer,
+                                populate_composite_render_commands(
+                                    r,
+                                    true,
+                                    sc.size,
+                                    &last_composite_render_instructions,
+                                    |rpreq| match rpreq {
+                                        RenderPassRequirements {
+                                            continued: false, ..
+                                        } => unreachable!("not at first(must be continued)"),
+                                        RenderPassRequirements {
+                                            continued: true,
+                                            after_operation: RenderPassAfterOperation::Grab,
+                                        } => (
+                                            main_rp_continue_grabbed.as_transparent_ref(),
+                                            main_continue_grabbed_fbs[n].as_transparent_ref(),
+                                        ),
+                                        RenderPassRequirements {
+                                            continued: true,
+                                            after_operation: RenderPassAfterOperation::None,
+                                        } => (
+                                            main_rp_continue_final.as_transparent_ref(),
+                                            main_continue_final_fbs[n].as_transparent_ref(),
+                                        ),
+                                    },
+                                    |rpreq| match rpreq {
+                                        RenderPassRequirements {
+                                            continued: false,
+                                            after_operation: RenderPassAfterOperation::Grab,
+                                        } => composite_pipeline_grabbed.as_transparent_ref(),
+                                        RenderPassRequirements {
+                                            continued: false,
+                                            after_operation: RenderPassAfterOperation::None,
+                                        } => composite_pipeline_final.as_transparent_ref(),
+                                        RenderPassRequirements {
+                                            continued: true,
+                                            after_operation: RenderPassAfterOperation::Grab,
                                         } => {
-                                            if !in_render_pass {
-                                                in_render_pass = true;
-
-                                                let (rp, fb) = match last_composite_render_instructions.render_passes[rpt_pointer] {
-                                                    RenderPassRequirements { continued: false, .. } => unreachable!("not at first(must be continued)"),
-                                                    RenderPassRequirements { continued: true, after_operation: RenderPassAfterOperation::Grab } => {
-                                                        (&main_rp_continue_grabbed, &main_continue_grabbed_fbs[n])
-                                                    }
-                                                    RenderPassRequirements { continued: true, after_operation: RenderPassAfterOperation::None } => {
-                                                        (&main_rp_continue_final, &main_continue_final_fbs[n])
-                                                    }
-                                                };
-
-                                                r = r.begin_render_pass2(
-                                                    &br::RenderPassBeginInfo::new(
-                                                        rp,
-                                                        fb,
-                                                        sc.size.into_rect(br::Offset2D::ZERO),
-                                                        &[br::ClearValue::color_f32([
-                                                            0.0, 0.0, 0.0, 1.0,
-                                                        ])],
-                                                    ),
-                                                    &br::SubpassBeginInfo::new(
-                                                        br::SubpassContents::Inline,
-                                                    ),
-                                                );
-                                            }
-                                            if !pipeline_bound {
-                                                pipeline_bound = true;
-
-                                                r = r
-                                                    .bind_pipeline(
-                                                        br::PipelineBindPoint::Graphics,
-                                                        match last_composite_render_instructions.render_passes[rpt_pointer] {
-                                                            RenderPassRequirements { continued: false, after_operation: RenderPassAfterOperation::Grab } => {
-                                                                &composite_pipeline_grabbed
-                                                            }
-                                                            RenderPassRequirements { continued: false, after_operation: RenderPassAfterOperation::None } => {
-                                                                &composite_pipeline_final
-                                                            }
-                                                            RenderPassRequirements { continued: true, after_operation: RenderPassAfterOperation::Grab } => {
-                                                                &composite_pipeline_continue_grabbed
-                                                            }
-                                                            RenderPassRequirements { continued: true, after_operation: RenderPassAfterOperation::None } => {
-                                                                &composite_pipeline_continue_final
-                                                            }
-                                                        },
-                                                    )
-                                                    .push_constant(
-                                                        &composite_pipeline_layout,
-                                                        br::vk::VK_SHADER_STAGE_VERTEX_BIT,
-                                                        0,
-                                                        &[
-                                                            sc.size.width as f32,
-                                                            sc.size.height as f32,
-                                                        ],
-                                                    )
-                                                    .bind_descriptor_sets(
-                                                        br::PipelineBindPoint::Graphics,
-                                                        &composite_pipeline_layout,
-                                                        0,
-                                                        &[composite_alphamask_group_descriptor],
-                                                        &[],
-                                                    );
-                                            }
-
-                                            r = r
-                                                .bind_descriptor_sets(
-                                                    br::PipelineBindPoint::Graphics,
-                                                    &composite_pipeline_layout,
-                                                    1,
-                                                    &[composite_backdrop_buffer_descriptor_sets
-                                                        [backdrop_buffer]],
-                                                    &[],
-                                                )
-                                                .draw(
-                                                    4,
-                                                    index_range.len() as _,
-                                                    0,
-                                                    index_range.start as _,
-                                                )
+                                            composite_pipeline_continue_grabbed.as_transparent_ref()
                                         }
-                                        &CompositeRenderingInstruction::SetClip {
-                                            ref shader_parameters
-                                        } => {
-                                            if !in_render_pass {
-                                                in_render_pass = true;
-
-                                                let (rp, fb) = match last_composite_render_instructions.render_passes[rpt_pointer] {
-                                                    RenderPassRequirements { continued: false, .. } => unreachable!("not at first(must be continued)"),
-                                                    RenderPassRequirements { continued: true, after_operation: RenderPassAfterOperation::Grab } => {
-                                                        (&main_rp_continue_grabbed, &main_continue_grabbed_fbs[n])
-                                                    }
-                                                    RenderPassRequirements { continued: true, after_operation: RenderPassAfterOperation::None } => {
-                                                        (&main_rp_continue_final, &main_continue_final_fbs[n])
-                                                    }
-                                                };
-
-                                                r = r.begin_render_pass2(
-                                                    &br::RenderPassBeginInfo::new(
-                                                        rp,
-                                                        fb,
-                                                        sc.size.into_rect(br::Offset2D::ZERO),
-                                                        &[br::ClearValue::color_f32([
-                                                            0.0, 0.0, 0.0, 1.0,
-                                                        ])],
-                                                    ),
-                                                    &br::SubpassBeginInfo::new(
-                                                        br::SubpassContents::Inline,
-                                                    ),
-                                                );
-                                            }
-                                            if !pipeline_bound {
-                                                pipeline_bound = true;
-
-                                                r = r
-                                                    .bind_pipeline(
-                                                        br::PipelineBindPoint::Graphics,
-                                                        match last_composite_render_instructions.render_passes[rpt_pointer] {
-                                                            RenderPassRequirements { continued: false, after_operation: RenderPassAfterOperation::Grab } => {
-                                                                &composite_pipeline_grabbed
-                                                            }
-                                                            RenderPassRequirements { continued: false, after_operation: RenderPassAfterOperation::None } => {
-                                                                &composite_pipeline_final
-                                                            }
-                                                            RenderPassRequirements { continued: true, after_operation: RenderPassAfterOperation::Grab } => {
-                                                                &composite_pipeline_continue_grabbed
-                                                            }
-                                                            RenderPassRequirements { continued: true, after_operation: RenderPassAfterOperation::None } => {
-                                                                &composite_pipeline_continue_final
-                                                            }
-                                                        },
-                                                    )
-                                                    .push_constant(
-                                                        &composite_pipeline_layout,
-                                                        br::vk::VK_SHADER_STAGE_VERTEX_BIT,
-                                                        0,
-                                                        &[
-                                                            sc.size.width as f32,
-                                                            sc.size.height as f32,
-                                                        ],
-                                                    )
-                                                    .bind_descriptor_sets(
-                                                        br::PipelineBindPoint::Graphics,
-                                                        &composite_pipeline_layout,
-                                                        0,
-                                                        &[composite_alphamask_group_descriptor],
-                                                        &[],
-                                                    );
-                                            }
-
-                                            r = r
-                                                .push_constant(&composite_pipeline_layout, br::vk::VK_SHADER_STAGE_FRAGMENT_BIT, 16, &[
-                                                    shader_parameters[0].value() / sc.size.width as f32,
-                                                    shader_parameters[1].value() / sc.size.height as f32,
-                                                    shader_parameters[2].value() / sc.size.width as f32,
-                                                    shader_parameters[3].value() / sc.size.height as f32,
-                                                    shader_parameters[4].value() / sc.size.width as f32,
-                                                    shader_parameters[5].value() / sc.size.height as f32,
-                                                    shader_parameters[6].value() / sc.size.width as f32,
-                                                    shader_parameters[7].value() / sc.size.height as f32,
-                                                ]);
-                                        }
-                                        &CompositeRenderingInstruction::ClearClip => {
-                                            if !in_render_pass {
-                                                in_render_pass = true;
-
-                                                let (rp, fb) = match last_composite_render_instructions.render_passes[rpt_pointer] {
-                                                    RenderPassRequirements { continued: false, .. } => unreachable!("not at first(must be continued)"),
-                                                    RenderPassRequirements { continued: true, after_operation: RenderPassAfterOperation::Grab } => {
-                                                        (&main_rp_continue_grabbed, &main_continue_grabbed_fbs[n])
-                                                    }
-                                                    RenderPassRequirements { continued: true, after_operation: RenderPassAfterOperation::None } => {
-                                                        (&main_rp_continue_final, &main_continue_final_fbs[n])
-                                                    }
-                                                };
-
-                                                r = r.begin_render_pass2(
-                                                    &br::RenderPassBeginInfo::new(
-                                                        rp,
-                                                        fb,
-                                                        sc.size.into_rect(br::Offset2D::ZERO),
-                                                        &[br::ClearValue::color_f32([
-                                                            0.0, 0.0, 0.0, 1.0,
-                                                        ])],
-                                                    ),
-                                                    &br::SubpassBeginInfo::new(
-                                                        br::SubpassContents::Inline,
-                                                    ),
-                                                );
-                                            }
-                                            if !pipeline_bound {
-                                                pipeline_bound = true;
-
-                                                r = r
-                                                    .bind_pipeline(
-                                                        br::PipelineBindPoint::Graphics,
-                                                        match last_composite_render_instructions.render_passes[rpt_pointer] {
-                                                            RenderPassRequirements { continued: false, after_operation: RenderPassAfterOperation::Grab } => {
-                                                                &composite_pipeline_grabbed
-                                                            }
-                                                            RenderPassRequirements { continued: false, after_operation: RenderPassAfterOperation::None } => {
-                                                                &composite_pipeline_final
-                                                            }
-                                                            RenderPassRequirements { continued: true, after_operation: RenderPassAfterOperation::Grab } => {
-                                                                &composite_pipeline_continue_grabbed
-                                                            }
-                                                            RenderPassRequirements { continued: true, after_operation: RenderPassAfterOperation::None } => {
-                                                                &composite_pipeline_continue_final
-                                                            }
-                                                        },
-                                                    )
-                                                    .push_constant(
-                                                        &composite_pipeline_layout,
-                                                        br::vk::VK_SHADER_STAGE_VERTEX_BIT,
-                                                        0,
-                                                        &[
-                                                            sc.size.width as f32,
-                                                            sc.size.height as f32,
-                                                        ],
-                                                    )
-                                                    .bind_descriptor_sets(
-                                                        br::PipelineBindPoint::Graphics,
-                                                        &composite_pipeline_layout,
-                                                        0,
-                                                        &[composite_alphamask_group_descriptor],
-                                                        &[],
-                                                    );
-                                            }
-
-                                            r = r
-                                                .push_constant(&composite_pipeline_layout, br::vk::VK_SHADER_STAGE_FRAGMENT_BIT, 16, &[0.0f32, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]);
-                                        }
-                                        CompositeRenderingInstruction::GrabBackdrop => {
-                                            r = r
-                                                .end_render_pass2(&br::SubpassEndInfo::new())
-                                                .pipeline_barrier_2(&br::DependencyInfo::new(
-                                                    &[],
-                                                    &[],
-                                                    &[
-                                                        br::ImageMemoryBarrier2::new(
-                                                            composite_grab_buffer.image(),
-                                                            br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1)
-                                                        ).transit_to(br::ImageLayout::TransferDestOpt.from_undefined())
-                                                    ]
-                                                ))
-                                                .copy_image(
-                                                    &sc.backbuffer_image(n),
-                                                    br::ImageLayout::TransferSrcOpt,
-                                                    composite_grab_buffer.image(),
-                                                    br::ImageLayout::TransferDestOpt,
-                                                    &[br::ImageCopy {
-                                                        srcSubresource:
-                                                            br::ImageSubresourceLayers::new(
-                                                                br::AspectMask::COLOR,
-                                                                0,
-                                                                0..1,
-                                                            ),
-                                                        dstSubresource:
-                                                            br::ImageSubresourceLayers::new(
-                                                                br::AspectMask::COLOR,
-                                                                0,
-                                                                0..1,
-                                                            ),
-                                                        srcOffset: br::Offset3D::ZERO,
-                                                        dstOffset: br::Offset3D::ZERO,
-                                                        extent: sc.size.with_depth(1),
-                                                    }],
-                                                )
-                                                .pipeline_barrier_2(&br::DependencyInfo::new(
-                                                    &[],
-                                                    &[],
-                                                    &[br::ImageMemoryBarrier2::new(
-                                                        composite_grab_buffer.image(),
-                                                        br::ImageSubresourceRange::new(
-                                                            br::AspectMask::COLOR,
-                                                            0..1,
-                                                            0..1,
-                                                        ),
-                                                    )
-                                                    .transit_from(
-                                                        br::ImageLayout::TransferDestOpt
-                                                            .to(br::ImageLayout::ShaderReadOnlyOpt),
-                                                    )
-                                                    .from(
-                                                        br::PipelineStageFlags2::COPY,
-                                                        br::AccessFlags2::TRANSFER.write,
-                                                    )
-                                                    .to(
-                                                        br::PipelineStageFlags2::FRAGMENT_SHADER,
-                                                        br::AccessFlags2::SHADER.read,
-                                                    )],
-                                                ));
-                                            rpt_pointer += 1;
-                                            in_render_pass = false;
-                                            pipeline_bound = false;
-                                        }
-                                        &CompositeRenderingInstruction::GenerateBackdropBlur {
-                                            stdev,
-                                            dest_backdrop_buffer,
-                                            // 本来は必要な範囲だけ処理できれば効率いいんだけど面倒なので全面処理しちゃう
-                                            ..
-                                        } => {
-                                            // downsample
-                                            for lv in 0..BLUR_SAMPLE_STEPS {
-                                                r = r
-                                                    .begin_render_pass2(
-                                                        &br::RenderPassBeginInfo::new(
-                                                            &composite_backdrop_blur_rp,
-                                                            &blur_downsample_pass_fbs[lv],
-                                                            br::Rect2D {
-                                                                offset: br::Offset2D::ZERO,
-                                                                extent: br::Extent2D {
-                                                                    width: sc.size.width
-                                                                        >> (lv + 1),
-                                                                    height: sc.size.height
-                                                                        >> (lv + 1),
-                                                                },
-                                                            },
-                                                            &[br::ClearValue::color_f32([
-                                                                0.0, 0.0, 0.0, 0.0,
-                                                            ])],
-                                                        ),
-                                                        &br::SubpassBeginInfo::new(
-                                                            br::SubpassContents::Inline,
-                                                        ),
-                                                    )
-                                                    .bind_pipeline(
-                                                        br::PipelineBindPoint::Graphics,
-                                                        &blur_downsample_pipelines[lv],
-                                                    )
-                                                    .push_constant(
-                                                        &blur_pipeline_layout,
-                                                        br::vk::VK_SHADER_STAGE_VERTEX_BIT,
-                                                        0,
-                                                        &[
-                                                            ((sc.size.width >> lv) as f32).recip(),
-                                                            ((sc.size.height >> lv) as f32).recip(),
-                                                            stdev.value(),
-                                                        ],
-                                                    )
-                                                    .bind_descriptor_sets(
-                                                        br::PipelineBindPoint::Graphics,
-                                                        &blur_pipeline_layout,
-                                                        0,
-                                                        &[blur_fixed_descriptors[lv]],
-                                                        &[],
-                                                    )
-                                                    .draw(3, 1, 0, 0)
-                                                    .end_render_pass2(&br::SubpassEndInfo::new());
-                                            }
-                                            // upsample
-                                            for lv in (0..BLUR_SAMPLE_STEPS).rev() {
-                                                r = r
-                                                    .begin_render_pass2(
-                                                        &br::RenderPassBeginInfo::new(
-                                                            &composite_backdrop_blur_rp,
-                                                            if lv == 0 {
-                                                                // final upsample
-                                                                &composite_backdrop_blur_destination_fbs[dest_backdrop_buffer]
-                                                            } else {
-                                                                &blur_upsample_pass_fixed_fbs
-                                                                    [lv - 1]
-                                                            },
-                                                            br::Rect2D {
-                                                                offset: br::Offset2D::ZERO,
-                                                                extent: br::Extent2D {
-                                                                    width: sc.size.width >> lv,
-                                                                    height: sc.size.height >> lv,
-                                                                },
-                                                            },
-                                                            &[br::ClearValue::color_f32([
-                                                                0.0, 0.0, 0.0, 0.0,
-                                                            ])],
-                                                        ),
-                                                        &br::SubpassBeginInfo::new(
-                                                            br::SubpassContents::Inline,
-                                                        ),
-                                                    )
-                                                    .bind_pipeline(
-                                                        br::PipelineBindPoint::Graphics,
-                                                        &blur_upsample_pipelines[lv],
-                                                    )
-                                                    .push_constant(
-                                                        &blur_pipeline_layout,
-                                                        br::vk::VK_SHADER_STAGE_VERTEX_BIT,
-                                                        0,
-                                                        &[
-                                                            ((sc.size.width >> (lv + 1)) as f32)
-                                                                .recip(),
-                                                            ((sc.size.height >> (lv + 1)) as f32)
-                                                                .recip(),
-                                                            stdev.value(),
-                                                        ],
-                                                    )
-                                                    .bind_descriptor_sets(
-                                                        br::PipelineBindPoint::Graphics,
-                                                        &blur_pipeline_layout,
-                                                        0,
-                                                        &[blur_fixed_descriptors[lv + 1]],
-                                                        &[],
-                                                    )
-                                                    .draw(3, 1, 0, 0)
-                                                    .end_render_pass2(&br::SubpassEndInfo::new());
-                                            }
-                                        }
-                                    };
-                                }
-
-                                r
+                                        RenderPassRequirements {
+                                            continued: true,
+                                            after_operation: RenderPassAfterOperation::None,
+                                        } => composite_pipeline_continue_final.as_transparent_ref(),
+                                    },
+                                    &composite_pipeline_layout,
+                                    composite_alphamask_group_descriptor,
+                                    &composite_backdrop_buffer_descriptor_sets,
+                                    &composite_grab_buffer,
+                                    &sc.backbuffer_image(n),
+                                    &composite_backdrop_blur_rp,
+                                    &blur_pipeline_layout,
+                                    &blur_downsample_pipelines,
+                                    &blur_upsample_pipelines,
+                                    &blur_fixed_descriptors,
+                                    &blur_downsample_pass_fbs,
+                                    &blur_upsample_pass_fixed_fbs,
+                                    &composite_backdrop_blur_destination_fbs,
+                                )
                             })
                             .inject(|r| {
                                 if app_shell.is_tiled() {
@@ -3985,19 +3618,43 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                     return r;
                                 }
 
-                                let rp_last_continued = last_composite_render_instructions.render_passes.last().map_or(false, |x| x.continued);
-                                assert!(last_composite_render_instructions.render_passes
+                                let rp_last_continued = last_composite_render_instructions
+                                    .render_passes
                                     .last()
-                                    .is_none_or(|x| x.after_operation == RenderPassAfterOperation::None));
+                                    .map_or(false, |x| x.continued);
+                                assert!(
+                                    last_composite_render_instructions
+                                        .render_passes
+                                        .last()
+                                        .is_none_or(
+                                            |x| x.after_operation == RenderPassAfterOperation::None
+                                        )
+                                );
 
-                                r.bind_pipeline(br::PipelineBindPoint::Graphics, if rp_last_continued {
-                                    corner_cutout_render_pipeline_cont.as_ref().unwrap()
-                                } else {
-                                    corner_cutout_render_pipeline.as_ref().unwrap()
-                                })
-                                .bind_descriptor_sets(br::PipelineBindPoint::Graphics, corner_cutout_render_pipeline_layout.as_ref().unwrap(),
-                                    0, &[corner_cutout_render_descriptors.as_ref().unwrap().0], &[])
-                                .bind_vertex_buffer_array(0, &[corner_cutout_render_data.as_ref().unwrap().0.as_transparent_ref()], &[0])
+                                r.bind_pipeline(
+                                    br::PipelineBindPoint::Graphics,
+                                    if rp_last_continued {
+                                        corner_cutout_render_pipeline_cont.as_ref().unwrap()
+                                    } else {
+                                        corner_cutout_render_pipeline.as_ref().unwrap()
+                                    },
+                                )
+                                .bind_descriptor_sets(
+                                    br::PipelineBindPoint::Graphics,
+                                    corner_cutout_render_pipeline_layout.as_ref().unwrap(),
+                                    0,
+                                    &[corner_cutout_render_descriptors.as_ref().unwrap().0],
+                                    &[],
+                                )
+                                .bind_vertex_buffer_array(
+                                    0,
+                                    &[corner_cutout_render_data
+                                        .as_ref()
+                                        .unwrap()
+                                        .0
+                                        .as_transparent_ref()],
+                                    &[0],
+                                )
                                 .draw(4, 4, 0, 0)
                             })
                             .end_render_pass2(&br::SubpassEndInfo::new())

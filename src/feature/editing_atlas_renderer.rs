@@ -268,6 +268,28 @@ pub struct EditingAtlasRenderer<'d> {
     sprite_image_copies: Arc<RwLock<HashMap<usize, Vec<br::vk::VkBufferImageCopy>>>>,
 }
 impl<'d> EditingAtlasRenderer<'d> {
+    const SPRITES_RENDER_PIPELINE_VI_STATE: &'static br::PipelineVertexInputStateCreateInfo<
+        'static,
+    > = &br::PipelineVertexInputStateCreateInfo::new(
+        &[br::VertexInputBindingDescription::per_instance_typed::<
+            [f32; 8],
+        >(0)],
+        &[
+            br::VertexInputAttributeDescription {
+                location: 0,
+                binding: 0,
+                format: br::vk::VK_FORMAT_R32G32B32A32_SFLOAT,
+                offset: 0,
+            },
+            br::VertexInputAttributeDescription {
+                location: 1,
+                binding: 0,
+                format: br::vk::VK_FORMAT_R32G32B32A32_SFLOAT,
+                offset: (core::mem::size_of::<f32>() * 4) as _,
+            },
+        ],
+    );
+
     #[tracing::instrument(skip(app_system, rendered_pass))]
     pub fn new(
         app_system: &AppBaseSystem<'d>,
@@ -407,6 +429,14 @@ impl<'d> EditingAtlasRenderer<'d> {
                 std::process::exit(1);
             }
         };
+
+        let main_viewports = [main_buffer_size
+            .into_rect(br::Offset2D::ZERO)
+            .make_viewport(0.0..1.0)];
+        let main_scissors = [main_buffer_size.into_rect(br::Offset2D::ZERO)];
+        let main_viewport_state =
+            br::PipelineViewportStateCreateInfo::new_array(&main_viewports, &main_scissors);
+
         let [
             render_pipeline,
             bg_render_pipeline,
@@ -422,12 +452,7 @@ impl<'d> EditingAtlasRenderer<'d> {
                     ],
                     VI_STATE_EMPTY,
                     IA_STATE_TRILIST,
-                    &br::PipelineViewportStateCreateInfo::new(
-                        &[main_buffer_size
-                            .into_rect(br::Offset2D::ZERO)
-                            .make_viewport(0.0..1.0)],
-                        &[main_buffer_size.into_rect(br::Offset2D::ZERO)],
-                    ),
+                    &main_viewport_state,
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
                     BLEND_STATE_SINGLE_NONE,
                 )
@@ -441,12 +466,7 @@ impl<'d> EditingAtlasRenderer<'d> {
                     ],
                     VI_STATE_FLOAT4_ONLY,
                     IA_STATE_TRISTRIP,
-                    &br::PipelineViewportStateCreateInfo::new(
-                        &[main_buffer_size
-                            .into_rect(br::Offset2D::ZERO)
-                            .make_viewport(0.0..1.0)],
-                        &[main_buffer_size.into_rect(br::Offset2D::ZERO)],
-                    ),
+                    &main_viewport_state,
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
                     BLEND_STATE_SINGLE_NONE,
                 )
@@ -458,32 +478,9 @@ impl<'d> EditingAtlasRenderer<'d> {
                         sprite_instance_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
                         sprite_instance_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
                     ],
-                    &br::PipelineVertexInputStateCreateInfo::new(
-                        &[br::VertexInputBindingDescription::per_instance_typed::<
-                            [f32; 8],
-                        >(0)],
-                        &[
-                            br::VertexInputAttributeDescription {
-                                location: 0,
-                                binding: 0,
-                                format: br::vk::VK_FORMAT_R32G32B32A32_SFLOAT,
-                                offset: 0,
-                            },
-                            br::VertexInputAttributeDescription {
-                                location: 1,
-                                binding: 0,
-                                format: br::vk::VK_FORMAT_R32G32B32A32_SFLOAT,
-                                offset: (core::mem::size_of::<f32>() * 4) as _,
-                            },
-                        ],
-                    ),
+                    Self::SPRITES_RENDER_PIPELINE_VI_STATE,
                     IA_STATE_TRISTRIP,
-                    &br::PipelineViewportStateCreateInfo::new(
-                        &[main_buffer_size
-                            .into_rect(br::Offset2D::ZERO)
-                            .make_viewport(0.0..1.0)],
-                        &[main_buffer_size.into_rect(br::Offset2D::ZERO)],
-                    ),
+                    &main_viewport_state,
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
                     BLEND_STATE_SINGLE_PREMULTIPLIED,
                 )
@@ -896,6 +893,13 @@ impl<'d> EditingAtlasRenderer<'d> {
         let sprite_instance_vsh = app_system.require_shader("resources/sprite_instance.vert");
         let sprite_instance_fsh = app_system.require_shader("resources/sprite_instance.frag");
 
+        let main_viewport = [main_buffer_size
+            .into_rect(br::Offset2D::ZERO)
+            .make_viewport(0.0..1.0)];
+        let main_scissor_rect = [main_buffer_size.into_rect(br::Offset2D::ZERO)];
+        let main_viewport_state =
+            br::PipelineViewportStateCreateInfo::new_array(&main_viewport, &main_scissor_rect);
+
         let [
             render_pipeline,
             bg_render_pipeline,
@@ -911,12 +915,7 @@ impl<'d> EditingAtlasRenderer<'d> {
                     ],
                     VI_STATE_EMPTY,
                     IA_STATE_TRILIST,
-                    &br::PipelineViewportStateCreateInfo::new(
-                        &[main_buffer_size
-                            .into_rect(br::Offset2D::ZERO)
-                            .make_viewport(0.0..1.0)],
-                        &[main_buffer_size.into_rect(br::Offset2D::ZERO)],
-                    ),
+                    &main_viewport_state,
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
                     BLEND_STATE_SINGLE_NONE,
                 )
@@ -930,12 +929,7 @@ impl<'d> EditingAtlasRenderer<'d> {
                     ],
                     VI_STATE_FLOAT4_ONLY,
                     IA_STATE_TRISTRIP,
-                    &br::PipelineViewportStateCreateInfo::new(
-                        &[main_buffer_size
-                            .into_rect(br::Offset2D::ZERO)
-                            .make_viewport(0.0..1.0)],
-                        &[main_buffer_size.into_rect(br::Offset2D::ZERO)],
-                    ),
+                    &main_viewport_state,
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
                     BLEND_STATE_SINGLE_NONE,
                 )
@@ -947,32 +941,9 @@ impl<'d> EditingAtlasRenderer<'d> {
                         sprite_instance_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
                         sprite_instance_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
                     ],
-                    &br::PipelineVertexInputStateCreateInfo::new(
-                        &[br::VertexInputBindingDescription::per_instance_typed::<
-                            [f32; 8],
-                        >(0)],
-                        &[
-                            br::VertexInputAttributeDescription {
-                                location: 0,
-                                binding: 0,
-                                format: br::vk::VK_FORMAT_R32G32B32A32_SFLOAT,
-                                offset: 0,
-                            },
-                            br::VertexInputAttributeDescription {
-                                location: 1,
-                                binding: 0,
-                                format: br::vk::VK_FORMAT_R32G32B32A32_SFLOAT,
-                                offset: (core::mem::size_of::<f32>() * 4) as _,
-                            },
-                        ],
-                    ),
+                    Self::SPRITES_RENDER_PIPELINE_VI_STATE,
                     IA_STATE_TRISTRIP,
-                    &br::PipelineViewportStateCreateInfo::new(
-                        &[main_buffer_size
-                            .into_rect(br::Offset2D::ZERO)
-                            .make_viewport(0.0..1.0)],
-                        &[main_buffer_size.into_rect(br::Offset2D::ZERO)],
-                    ),
+                    &main_viewport_state,
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
                     BLEND_STATE_SINGLE_PREMULTIPLIED,
                 )

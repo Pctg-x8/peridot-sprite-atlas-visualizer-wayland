@@ -1,4 +1,8 @@
-use std::{cell::Cell, path::Path, rc::Rc};
+use std::{
+    cell::Cell,
+    path::{Path, PathBuf},
+    rc::Rc,
+};
 
 use crate::{
     AppEvent, AppUpdateContext, PresenterInitContext, ViewInitContext,
@@ -10,6 +14,7 @@ use crate::{
     helper_types::SafeF32,
     hittest::{self, HitTestTreeActionHandler, HitTestTreeData, HitTestTreeRef},
     input::EventContinueControl,
+    subsystem::StagingScratchBufferManager,
     trigger_cell::TriggerCell,
 };
 
@@ -26,6 +31,8 @@ struct CommandButtonView {
     ct_bg_alpha_rate_shown: CompositeTreeFloatParameterRef,
     ct_bg_alpha_rate_pointer: CompositeTreeFloatParameterRef,
     ht_root: HitTestTreeRef,
+    icon_path: PathBuf,
+    label: String,
     left: f32,
     top: f32,
     show_delay_sec: f32,
@@ -46,7 +53,7 @@ impl CommandButtonView {
     const CONTENT_COLOR_HIDDEN: [f32; 4] = [1.0, 1.0, 1.0, 0.0];
 
     #[tracing::instrument(name = "AppMenuButtonView::new", skip(init), fields(icon_path = %icon_path.as_ref().display()))]
-    pub fn new(
+    fn new(
         init: &mut ViewInitContext,
         label: &str,
         icon_path: impl AsRef<Path>,
@@ -67,7 +74,7 @@ impl CommandButtonView {
             .rasterize_svg(
                 (Self::ICON_SIZE * init.ui_scale_factor).ceil() as _,
                 (Self::ICON_SIZE * init.ui_scale_factor).ceil() as _,
-                icon_path,
+                &icon_path,
             )
             .unwrap();
         let label_atlas_rect = init
@@ -89,13 +96,11 @@ impl CommandButtonView {
             .parameter_store_mut()
             .alloc_float(FloatParameter::Value(0.0));
         let ct_root = init.base_system.register_composite_rect(CompositeRect {
-            offset: [
-                AnimatableFloat::Value(left * init.ui_scale_factor),
-                AnimatableFloat::Value(top * init.ui_scale_factor),
-            ],
+            base_scale_factor: init.ui_scale_factor,
+            offset: [AnimatableFloat::Value(left), AnimatableFloat::Value(top)],
             size: [
-                AnimatableFloat::Value(width * init.ui_scale_factor),
-                AnimatableFloat::Value(Self::BUTTON_HEIGHT * init.ui_scale_factor),
+                AnimatableFloat::Value(width),
+                AnimatableFloat::Value(Self::BUTTON_HEIGHT),
             ],
             has_bitmap: true,
             texatlas_rect: bg_atlas_rect,
@@ -111,13 +116,14 @@ impl CommandButtonView {
             ..Default::default()
         });
         let ct_icon = init.base_system.register_composite_rect(CompositeRect {
+            base_scale_factor: init.ui_scale_factor,
             size: [
-                AnimatableFloat::Value(Self::ICON_SIZE * init.ui_scale_factor),
-                AnimatableFloat::Value(Self::ICON_SIZE * init.ui_scale_factor),
+                AnimatableFloat::Value(Self::ICON_SIZE),
+                AnimatableFloat::Value(Self::ICON_SIZE),
             ],
             offset: [
-                AnimatableFloat::Value(Self::HPADDING * init.ui_scale_factor),
-                AnimatableFloat::Value(-Self::ICON_SIZE * 0.5 * init.ui_scale_factor),
+                AnimatableFloat::Value(Self::HPADDING),
+                AnimatableFloat::Value(-Self::ICON_SIZE * 0.5),
             ],
             relative_offset_adjustment: [0.0, 0.5],
             has_bitmap: true,
@@ -128,16 +134,16 @@ impl CommandButtonView {
             ..Default::default()
         });
         let ct_label = init.base_system.register_composite_rect(CompositeRect {
+            base_scale_factor: init.ui_scale_factor,
             size: [
-                AnimatableFloat::Value(label_atlas_rect.width() as _),
-                AnimatableFloat::Value(label_atlas_rect.height() as _),
+                AnimatableFloat::Value(label_atlas_rect.width() as f32 / init.ui_scale_factor),
+                AnimatableFloat::Value(label_atlas_rect.height() as f32 / init.ui_scale_factor),
             ],
             offset: [
+                AnimatableFloat::Value(Self::HPADDING + Self::ICON_SIZE + Self::ICON_LABEL_GAP),
                 AnimatableFloat::Value(
-                    (Self::HPADDING + Self::ICON_SIZE + Self::ICON_LABEL_GAP)
-                        * init.ui_scale_factor,
+                    -(label_atlas_rect.height() as f32 / init.ui_scale_factor) * 0.5,
                 ),
-                AnimatableFloat::Value(-(label_atlas_rect.height() as f32) * 0.5),
             ],
             relative_offset_adjustment: [0.0, 0.5],
             has_bitmap: true,
@@ -167,6 +173,8 @@ impl CommandButtonView {
             ct_bg_alpha_rate_shown,
             ct_bg_alpha_rate_pointer,
             ht_root,
+            icon_path: icon_path.as_ref().into(),
+            label: label.into(),
             left,
             top,
             show_delay_sec,
@@ -179,7 +187,7 @@ impl CommandButtonView {
         }
     }
 
-    pub fn mount(
+    fn mount(
         &self,
         app_system: &mut AppBaseSystem,
         ct_parent: CompositeTreeRef,
@@ -188,7 +196,67 @@ impl CommandButtonView {
         app_system.set_tree_parent((self.ct_root, self.ht_root), (ct_parent, ht_parent));
     }
 
-    pub fn update(&self, app_system: &mut AppBaseSystem, current_sec: f32) {
+    fn rescale(
+        &self,
+        base_system: &mut AppBaseSystem,
+        staging_scratch_buffer: &mut StagingScratchBufferManager,
+        ui_scale_factor: f32,
+    ) {
+        base_system
+            .free_mask_atlas_rect(base_system.composite_tree.get(self.ct_root).texatlas_rect);
+        base_system
+            .free_mask_atlas_rect(base_system.composite_tree.get(self.ct_icon).texatlas_rect);
+        base_system
+            .free_mask_atlas_rect(base_system.composite_tree.get(self.ct_label).texatlas_rect);
+
+        base_system
+            .composite_tree
+            .get_mut(self.ct_root)
+            .texatlas_rect = base_system
+            .rounded_fill_rect_mask(unsafe { SafeF32::new_unchecked(ui_scale_factor) }, unsafe {
+                SafeF32::new_unchecked(Self::BUTTON_HEIGHT / 2.0)
+            })
+            .unwrap();
+        base_system
+            .composite_tree
+            .get_mut(self.ct_icon)
+            .texatlas_rect = base_system
+            .rasterize_svg(
+                (Self::ICON_SIZE * ui_scale_factor).ceil() as _,
+                (Self::ICON_SIZE * ui_scale_factor).ceil() as _,
+                &self.icon_path,
+            )
+            .unwrap();
+        base_system
+            .composite_tree
+            .get_mut(self.ct_label)
+            .texatlas_rect = base_system
+            .text_mask(staging_scratch_buffer, FontType::UI, &self.label)
+            .unwrap();
+
+        base_system
+            .composite_tree
+            .get_mut(self.ct_root)
+            .slice_borders = [Self::BUTTON_HEIGHT * 0.5 * ui_scale_factor; 4];
+
+        base_system
+            .composite_tree
+            .get_mut(self.ct_root)
+            .base_scale_factor = ui_scale_factor;
+        base_system
+            .composite_tree
+            .get_mut(self.ct_icon)
+            .base_scale_factor = ui_scale_factor;
+        base_system
+            .composite_tree
+            .get_mut(self.ct_label)
+            .base_scale_factor = ui_scale_factor;
+        base_system.composite_tree.mark_dirty(self.ct_root);
+        base_system.composite_tree.mark_dirty(self.ct_icon);
+        base_system.composite_tree.mark_dirty(self.ct_label);
+    }
+
+    fn update(&self, app_system: &mut AppBaseSystem, current_sec: f32) {
         if let Some(shown) = self.shown.get_if_triggered() {
             if shown {
                 app_system.composite_tree.parameter_store_mut().set_float(
@@ -224,13 +292,12 @@ impl CommandButtonView {
                     curve: AnimationCurve::Linear,
                     event_on_complete: None,
                 });
-                // TODO: ここでui_scale_factor適用するとui_scale_factorがかわったときにアニメーションが破綻するので別のところにおいたほうがよさそう(CompositeTreeで位置計算するときに適用する)
                 app_system.composite_tree.get_mut(self.ct_root).offset[0] =
                     AnimatableFloat::Animated {
                         start_sec: current_sec + self.show_delay_sec,
                         end_sec: current_sec + self.show_delay_sec + 0.25,
-                        from_value: (self.left + 8.0) * self.ui_scale_factor,
-                        to_value: self.left * self.ui_scale_factor,
+                        from_value: self.left + 8.0,
+                        to_value: self.left,
                         curve: AnimationCurve::CubicBezier {
                             p1: (0.5, 0.5),
                             p2: (0.5, 1.0),
@@ -681,6 +748,17 @@ impl Presenter {
         ht_parent: HitTestTreeRef,
     ) {
         self.base_view.mount(app_system, ct_parent, ht_parent);
+    }
+
+    pub fn rescale(
+        &self,
+        base_system: &mut AppBaseSystem,
+        staging_scratch_buffer: &mut StagingScratchBufferManager,
+        ui_scale_factor: f32,
+    ) {
+        for v in self.action_handler.item_views.iter() {
+            v.rescale(base_system, staging_scratch_buffer, ui_scale_factor);
+        }
     }
 
     pub fn update(&self, app_system: &mut AppBaseSystem, current_sec: f32) {

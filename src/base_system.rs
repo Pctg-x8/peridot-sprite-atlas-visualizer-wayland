@@ -16,8 +16,8 @@ use crate::{
 };
 
 use bedrock::{
-    self as br, CommandBufferMut, Device, DeviceMemoryMut, ImageChild, MemoryBound, RenderPass,
-    ShaderModule, VkHandle,
+    self as br, CommandBufferMut, Device, DeviceChild, DeviceMemoryMut, ImageChild, ImageChildMut,
+    MemoryBound, RenderPass, ShaderModule, VkHandle,
 };
 use bitflags::bitflags;
 
@@ -32,7 +32,7 @@ bitflags! {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FontType {
     UI,
 }
@@ -45,6 +45,8 @@ pub struct AppBaseSystem<'subsystem> {
     pub hit_tree: HitTestTreeManager<'subsystem>,
     pub fonts: FontSet,
     rounded_fill_rect_cache: HashMap<(SafeF32, SafeF32), AtlasRect>,
+    rounded_rect_cache: HashMap<(SafeF32, SafeF32), AtlasRect>,
+    text_cache: HashMap<FontType, HashMap<String, AtlasRect>>,
 }
 impl Drop for AppBaseSystem<'_> {
     fn drop(&mut self) {
@@ -129,6 +131,8 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
             },
             subsystem,
             rounded_fill_rect_cache: HashMap::new(),
+            rounded_rect_cache: HashMap::new(),
+            text_cache: HashMap::new(),
         }
     }
 
@@ -140,6 +144,9 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         {
             tracing::warn!(reason = ?e, "Failed to set char size");
         }
+
+        // evict all text caches
+        self.text_cache.clear();
     }
 
     pub const fn mask_atlas_format(&self) -> br::Format {
@@ -208,6 +215,11 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         self.atlas.alloc(required_width, required_height)
     }
 
+    #[inline(always)]
+    pub fn free_mask_atlas_rect(&mut self, rect: AtlasRect) {
+        self.atlas.free(rect)
+    }
+
     #[tracing::instrument(
         name = "AppBaseSystem::text_mask",
         skip(self, staging_scratch_buffer),
@@ -219,6 +231,12 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         font_type: FontType,
         text: &str,
     ) -> br::Result<AtlasRect> {
+        if let Some(&r) = self.text_cache.get(&font_type).and_then(|x| x.get(text)) {
+            // found in cache
+            return Ok(r);
+        }
+
+        tracing::info!("creating fresh");
         let layout = TextLayout::build_simple(
             text,
             match font_type {
@@ -277,12 +295,26 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
             ))
         })?;
 
+        self.text_cache
+            .entry(font_type)
+            .or_insert_with(HashMap::new)
+            .insert(text.into(), atlas_rect);
         Ok(atlas_rect)
     }
 
     #[tracing::instrument(name = "AppBaseSystem::rounded_rect_mask", skip(self), err(Display))]
-    pub fn rounded_rect_mask(&mut self, render_scale: f32, radius: f32) -> br::Result<AtlasRect> {
-        let size_px = ((radius * 2.0 + 1.0) * render_scale).ceil() as u32;
+    pub fn rounded_rect_mask(
+        &mut self,
+        render_scale: SafeF32,
+        radius: SafeF32,
+    ) -> br::Result<AtlasRect> {
+        if let Some(&r) = self.rounded_rect_cache.get(&(render_scale, radius)) {
+            // found in cache
+            return Ok(r);
+        }
+
+        tracing::info!("creating fresh");
+        let size_px = ((radius.value() * 2.0 + 1.0) * render_scale.value()).ceil() as u32;
         let atlas_rect = self.alloc_mask_atlas_rect(size_px, size_px);
 
         let render_pass = self.render_to_mask_atlas_pass(RenderPassOptions::FULL_PIXEL_RENDER)?;
@@ -310,7 +342,7 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
                         .on_stage(br::ShaderStage::Fragment, c"main")
                         .with_specialization_info(&br::SpecializationInfo::new(
                             &RoundedRectConstants {
-                                corner_radius: radius,
+                                corner_radius: radius.value(),
                             },
                         )),
                 ],
@@ -340,6 +372,8 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
             .end_render_pass2(&br::SubpassEndInfo::new())
         })?;
 
+        self.rounded_rect_cache
+            .insert((render_scale, radius), atlas_rect);
         Ok(atlas_rect)
     }
 
@@ -414,7 +448,7 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         })?;
 
         self.rounded_fill_rect_cache
-            .insert((render_scale, radius), atlas_rect.clone());
+            .insert((render_scale, radius), atlas_rect);
         Ok(atlas_rect)
     }
 
@@ -1226,6 +1260,36 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         self.subsystem.is_coherent_memory_type(index)
     }
 
+    #[tracing::instrument(name = "AppBaseSystem::new_writable_buffer", skip(self), err(Display))]
+    pub fn new_writable_buffer(
+        &self,
+        size: usize,
+        usage: br::BufferUsage,
+    ) -> br::Result<MemoryBoundBuffer<'subsystem>> {
+        // TODO: direct memoryにするかはサイズとかみて判断する
+        let mut b = br::BufferObject::new(self.subsystem, &br::BufferCreateInfo::new(size, usage))?;
+        let req = b.requirements();
+        let Some(memindex) = self.find_direct_memory_index(req.memoryTypeBits) else {
+            // TODO: return error
+            panic!("no suitable memory");
+        };
+        let mem = br::DeviceMemoryObject::new(
+            self.subsystem,
+            &br::MemoryAllocateInfo::new(req.size, memindex),
+        )?;
+        b.bind(&mem, 0)?;
+
+        Ok(MemoryBoundBuffer {
+            buffer: b,
+            memory: mem,
+            memory_characteristics: if self.is_coherent_memory_type(memindex) {
+                MemoryCharacteristics::COHERENT
+            } else {
+                MemoryCharacteristics::empty()
+            },
+        })
+    }
+
     #[inline(always)]
     pub fn require_shader(&self, path: impl AsRef<Path>) -> SubsystemShaderModuleRef<'subsystem> {
         self.subsystem.require_shader(path)
@@ -1310,5 +1374,304 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         req: &br::vk::VkMemoryRequirements,
     ) -> br::DeviceMemoryObject<&'subsystem Subsystem> {
         self.alloc_device_local_memory(req.size, req.memoryTypeBits)
+    }
+}
+
+bitflags! {
+    #[derive(Debug, Clone, Copy)]
+    pub struct MemoryCharacteristics : u8 {
+        const COHERENT = 0x01;
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum BufferMapMode {
+    Read = 0x01,
+    Write = 0x02,
+    ReadWrite = 0x03,
+}
+impl BufferMapMode {
+    const fn is_read(&self) -> bool {
+        matches!(*self, Self::Read | Self::ReadWrite)
+    }
+
+    const fn is_write(&self) -> bool {
+        matches!(*self, Self::Write | Self::ReadWrite)
+    }
+}
+
+pub struct MemoryBoundBuffer<'subsystem> {
+    buffer: br::BufferObject<&'subsystem Subsystem>,
+    memory: br::DeviceMemoryObject<&'subsystem Subsystem>,
+    memory_characteristics: MemoryCharacteristics,
+}
+impl<'subsystem> br::VkHandle for MemoryBoundBuffer<'subsystem> {
+    type Handle = br::vk::VkBuffer;
+
+    #[inline(always)]
+    fn native_ptr(&self) -> Self::Handle {
+        self.buffer.native_ptr()
+    }
+}
+impl<'subsystem> br::VkHandleMut for MemoryBoundBuffer<'subsystem> {
+    #[inline(always)]
+    fn native_ptr_mut(&mut self) -> Self::Handle {
+        self.buffer.native_ptr_mut()
+    }
+}
+impl<'subsystem> br::DeviceChildHandle for MemoryBoundBuffer<'subsystem> {
+    #[inline(always)]
+    fn device_handle(&self) -> bedrock::vk::VkDevice {
+        self.buffer.device_handle()
+    }
+}
+impl<'subsystem> br::DeviceChild for MemoryBoundBuffer<'subsystem> {
+    type ConcreteDevice = &'subsystem Subsystem;
+
+    #[inline(always)]
+    fn device(&self) -> &Self::ConcreteDevice {
+        self.buffer.device()
+    }
+}
+impl<'subsystem> br::Buffer for MemoryBoundBuffer<'subsystem> {}
+impl<'subsystem> MemoryBoundBuffer<'subsystem> {
+    pub fn map<'b>(
+        &'b mut self,
+        range: core::ops::Range<usize>,
+        mode: BufferMapMode,
+    ) -> br::Result<MappedBuffer<'b, 'subsystem>> {
+        let p = unsafe { self.memory.map_raw(range.start as _..range.end as _)? };
+        if mode.is_read()
+            && !self
+                .memory_characteristics
+                .contains(MemoryCharacteristics::COHERENT)
+        {
+            unsafe {
+                self.buffer
+                    .device()
+                    .invalidate_memory_range(&[br::MappedMemoryRange::new(
+                        &self.memory,
+                        range.start as _..range.end as _,
+                    )])?;
+            }
+        }
+
+        Ok(MappedBuffer {
+            ptr: unsafe { core::ptr::NonNull::new_unchecked(p) },
+            range,
+            mode,
+            buffer: self,
+        })
+    }
+}
+
+#[must_use]
+pub struct MappedBuffer<'b, 'subsystem> {
+    ptr: core::ptr::NonNull<core::ffi::c_void>,
+    range: core::ops::Range<usize>,
+    mode: BufferMapMode,
+    buffer: &'b mut MemoryBoundBuffer<'subsystem>,
+}
+impl Drop for MappedBuffer<'_, '_> {
+    fn drop(&mut self) {
+        tracing::warn!("MappedBuffer must be closed with `unmap`!");
+    }
+}
+impl<'b, 'subsystem> MappedBuffer<'b, 'subsystem> {
+    pub fn unmap(self) -> br::Result<()> {
+        if self.mode.is_write()
+            && !self
+                .buffer
+                .memory_characteristics
+                .contains(MemoryCharacteristics::COHERENT)
+        {
+            unsafe {
+                self.buffer
+                    .device()
+                    .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new(
+                        &self.buffer.memory,
+                        self.range.start as _..self.range.end as _,
+                    )])?;
+            }
+        }
+
+        unsafe {
+            self.buffer.memory.unmap();
+        }
+
+        core::mem::forget(self);
+        Ok(())
+    }
+
+    pub const fn ptr_of<T>(&self) -> core::ptr::NonNull<T> {
+        self.ptr.cast()
+    }
+
+    pub const fn addr_of_mut<T>(&self, byte_offset: usize) -> *mut T {
+        unsafe { self.ptr.byte_add(byte_offset).cast().as_ptr() }
+    }
+}
+
+bitflags! {
+    #[derive(Debug, Clone, Copy)]
+    pub struct RenderTextureFlags : u8 {
+        const ALLOW_TRANSFER_SRC = 0x01;
+        const NON_SAMPLED = 0x02;
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RenderTextureOptions {
+    pub flags: RenderTextureFlags,
+    pub msaa_count: Option<br::vk::VkSampleCountFlagBits>,
+}
+impl Default for RenderTextureOptions {
+    fn default() -> Self {
+        Self {
+            flags: RenderTextureFlags::empty(),
+            msaa_count: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum PixelFormat {
+    R8,
+}
+impl PixelFormat {
+    const fn vk_format(&self) -> br::Format {
+        match self {
+            Self::R8 => br::vk::VK_FORMAT_R8_UNORM,
+        }
+    }
+
+    const fn aspect_mask(&self) -> br::AspectMask {
+        match self {
+            Self::R8 => br::AspectMask::COLOR,
+        }
+    }
+}
+
+pub struct RenderTexture<'subsystem> {
+    res: br::ImageViewObject<br::ImageObject<&'subsystem Subsystem>>,
+    mem: br::DeviceMemoryObject<&'subsystem Subsystem>,
+    size: br::Extent2D,
+    pixel_format: PixelFormat,
+    msaa_count: Option<br::vk::VkSampleCountFlagBits>,
+}
+impl<'subsystem> br::VkHandle for RenderTexture<'subsystem> {
+    type Handle = br::vk::VkImageView;
+
+    #[inline(always)]
+    fn native_ptr(&self) -> Self::Handle {
+        self.res.native_ptr()
+    }
+}
+impl<'subsystem> br::VkHandleMut for RenderTexture<'subsystem> {
+    #[inline(always)]
+    fn native_ptr_mut(&mut self) -> Self::Handle {
+        self.res.native_ptr_mut()
+    }
+}
+impl<'subsystem> br::DeviceChildHandle for RenderTexture<'subsystem> {
+    #[inline(always)]
+    fn device_handle(&self) -> bedrock::vk::VkDevice {
+        self.res.device_handle()
+    }
+}
+impl<'subsystem> br::DeviceChild for RenderTexture<'subsystem> {
+    type ConcreteDevice = &'subsystem Subsystem;
+
+    #[inline(always)]
+    fn device(&self) -> &Self::ConcreteDevice {
+        self.res.device()
+    }
+}
+impl<'subsystem> RenderTexture<'subsystem> {
+    #[tracing::instrument(name = "RenderTexture::new", skip(base_sys), err(Display))]
+    pub fn new(
+        base_sys: &AppBaseSystem<'subsystem>,
+        size: br::Extent2D,
+        format: PixelFormat,
+        options: &RenderTextureOptions,
+    ) -> br::Result<RenderTexture<'subsystem>> {
+        let mut create_info =
+            br::ImageCreateInfo::new(size, format.vk_format()).as_color_attachment();
+        if options
+            .flags
+            .contains(RenderTextureFlags::ALLOW_TRANSFER_SRC)
+        {
+            create_info = create_info.usage_with(br::ImageUsageFlags::TRANSFER_SRC);
+        }
+        if !options.flags.contains(RenderTextureFlags::NON_SAMPLED) {
+            create_info = create_info.usage_with(br::ImageUsageFlags::SAMPLED);
+        }
+        if let Some(msaa_count) = options.msaa_count {
+            create_info = create_info.sample_counts(msaa_count);
+        }
+
+        let mut img = br::ImageObject::new(base_sys.subsystem, &create_info)?;
+        let mem = base_sys.alloc_device_local_memory_for_requirements(&img.requirements());
+        img.bind(&mem, 0)?;
+
+        Ok(RenderTexture {
+            res: br::ImageViewBuilder::new(
+                img,
+                br::ImageSubresourceRange::new(format.aspect_mask(), 0..1, 0..1),
+            )
+            .create()?,
+            mem,
+            size,
+            pixel_format: format,
+            msaa_count: options.msaa_count,
+        })
+    }
+
+    pub fn make_attachment_description(&self) -> br::AttachmentDescription2 {
+        let mut d = br::AttachmentDescription2::new(self.pixel_format.vk_format());
+        if let Some(c) = self.msaa_count {
+            d = d.samples(c);
+        }
+
+        d
+    }
+
+    pub const fn as_image(&self) -> &RenderTextureImageAccess<'subsystem> {
+        unsafe { core::mem::transmute(self) }
+    }
+
+    pub const fn render_region(&self) -> br::Rect2D {
+        self.size.into_rect(br::Offset2D::ZERO)
+    }
+}
+
+#[repr(transparent)]
+pub struct RenderTextureImageAccess<'subsystem>(RenderTexture<'subsystem>);
+impl<'subsystem> br::VkHandle for RenderTextureImageAccess<'subsystem> {
+    type Handle = br::vk::VkImage;
+
+    #[inline(always)]
+    fn native_ptr(&self) -> Self::Handle {
+        self.0.res.image().native_ptr()
+    }
+}
+impl<'subsystem> br::VkHandleMut for RenderTextureImageAccess<'subsystem> {
+    #[inline(always)]
+    fn native_ptr_mut(&mut self) -> Self::Handle {
+        self.0.res.image_mut().native_ptr_mut()
+    }
+}
+impl<'subsystem> br::DeviceChildHandle for RenderTextureImageAccess<'subsystem> {
+    #[inline(always)]
+    fn device_handle(&self) -> bedrock::vk::VkDevice {
+        self.0.res.image().device_handle()
+    }
+}
+impl<'subsystem> br::DeviceChild for RenderTextureImageAccess<'subsystem> {
+    type ConcreteDevice = &'subsystem Subsystem;
+
+    #[inline(always)]
+    fn device(&self) -> &Self::ConcreteDevice {
+        self.0.res.image().device()
     }
 }

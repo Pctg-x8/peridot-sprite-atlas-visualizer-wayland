@@ -370,6 +370,7 @@ fn interpolate_cubic_bezier(t: f32, p1: (f32, f32), p2: (f32, f32)) -> f32 {
 
 pub struct CompositeRect {
     pub has_bitmap: bool,
+    pub base_scale_factor: f32,
     pub offset: [AnimatableFloat; 2],
     pub size: [AnimatableFloat; 2],
     pub relative_offset_adjustment: [f32; 2],
@@ -389,6 +390,7 @@ impl Default for CompositeRect {
     fn default() -> Self {
         Self {
             has_bitmap: false,
+            base_scale_factor: 1.0,
             offset: [const { AnimatableFloat::Value(0.0) }; 2],
             size: [const { AnimatableFloat::Value(0.0) }; 2],
             relative_offset_adjustment: [0.0, 0.0],
@@ -698,6 +700,28 @@ impl<'d> CompositeInstanceManager<'d> {
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct CompositeTreeRef(usize);
+impl CompositeTreeRef {
+    #[inline(always)]
+    pub fn entity<'c>(&self, mgr: &'c CompositeTree) -> &'c CompositeRect {
+        mgr.get(*self)
+    }
+
+    #[inline(always)]
+    pub fn entity_mut<'c>(&self, mgr: &'c mut CompositeTree) -> &'c mut CompositeRect {
+        mgr.get_mut(*self)
+    }
+
+    #[inline(always)]
+    pub fn entity_mut_dirtified<'c>(&self, mgr: &'c mut CompositeTree) -> &'c mut CompositeRect {
+        mgr.mark_dirty(*self);
+        mgr.get_mut(*self)
+    }
+
+    #[inline(always)]
+    pub fn mark_dirty(&self, mgr: &mut CompositeTree) {
+        mgr.mark_dirty(*self);
+    }
+}
 
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1078,10 +1102,14 @@ impl CompositeTree {
         {
             let r = &mut self.rects[r];
             r.dirty = false;
-            let local_left = r.offset[0].evaluate(current_sec, &self.parameter_store);
-            let local_top = r.offset[1].evaluate(current_sec, &self.parameter_store);
-            let local_width = r.size[0].evaluate(current_sec, &self.parameter_store);
-            let local_height = r.size[1].evaluate(current_sec, &self.parameter_store);
+            let local_left =
+                r.offset[0].evaluate(current_sec, &self.parameter_store) * r.base_scale_factor;
+            let local_top =
+                r.offset[1].evaluate(current_sec, &self.parameter_store) * r.base_scale_factor;
+            let local_width =
+                r.size[0].evaluate(current_sec, &self.parameter_store) * r.base_scale_factor;
+            let local_height =
+                r.size[1].evaluate(current_sec, &self.parameter_store) * r.base_scale_factor;
 
             let left = effective_base_left
                 + (effective_width * r.relative_offset_adjustment[0])
@@ -1091,6 +1119,7 @@ impl CompositeTree {
                 + local_top;
             let w = effective_width * r.relative_size_adjustment[0] + local_width;
             let h = effective_height * r.relative_size_adjustment[1] + local_height;
+
             let opacity = parent_opacity * r.opacity.evaluate(current_sec, &self.parameter_store);
             let matrix = parent_matrix.mul_mat4(
                 Matrix4::translate(
@@ -1228,7 +1257,7 @@ impl CompositeTree {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct AtlasRect {
     pub left: u32,
     pub top: u32,
@@ -1478,6 +1507,10 @@ impl UnboundedCompositionSurfaceAtlas {
             right: l + required_width,
             bottom: self.used_top + required_height,
         }
+    }
+
+    pub fn free(&mut self, rect: AtlasRect) {
+        tracing::warn!(?rect, "TODO: free atlas rect");
     }
 }
 

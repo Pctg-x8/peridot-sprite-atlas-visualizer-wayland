@@ -25,7 +25,7 @@ pub struct CommonButtonView {
 impl CommonButtonView {
     const PADDING_H: f32 = 24.0;
     const PADDING_V: f32 = 12.0;
-    const CORNER_RADIUS: f32 = 12.0;
+    const CORNER_RADIUS: SafeF32 = unsafe { SafeF32::new_unchecked(12.0) };
 
     #[tracing::instrument(name = "CommonButtonView::new", skip(init))]
     pub fn new(init: &mut ViewInitContext, label: &str) -> Self {
@@ -36,13 +36,16 @@ impl CommonButtonView {
         let frame_image_atlas_rect = init
             .base_system
             .rounded_fill_rect_mask(
-                unsafe { SafeF32::new_unchecked(init.ui_scale_factor) },
-                unsafe { SafeF32::new_unchecked(Self::CORNER_RADIUS) },
+                unsafe { SafeF32::new_unchecked(init.ui_scale_factor.ceil()) },
+                Self::CORNER_RADIUS,
             )
             .unwrap();
         let frame_border_image_atlas_rect = init
             .base_system
-            .rounded_rect_mask(init.ui_scale_factor, Self::CORNER_RADIUS)
+            .rounded_rect_mask(
+                unsafe { SafeF32::new_unchecked(init.ui_scale_factor.ceil()) },
+                Self::CORNER_RADIUS,
+            )
             .unwrap();
 
         let preferred_width =
@@ -51,13 +54,14 @@ impl CommonButtonView {
             Self::PADDING_V * 2.0 + text_atlas_rect.height() as f32 / init.ui_scale_factor;
 
         let ct_root = init.base_system.register_composite_rect(CompositeRect {
+            base_scale_factor: init.ui_scale_factor,
             size: [
-                AnimatableFloat::Value(preferred_width * init.ui_scale_factor),
-                AnimatableFloat::Value(preferred_height * init.ui_scale_factor),
+                AnimatableFloat::Value(preferred_width),
+                AnimatableFloat::Value(preferred_height),
             ],
             has_bitmap: true,
             texatlas_rect: frame_image_atlas_rect,
-            slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor.ceil(); 4],
+            slice_borders: [Self::CORNER_RADIUS.value() * init.ui_scale_factor.ceil(); 4],
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 0.0])),
             ..Default::default()
         });
@@ -65,7 +69,7 @@ impl CommonButtonView {
             relative_size_adjustment: [1.0, 1.0],
             has_bitmap: true,
             texatlas_rect: frame_border_image_atlas_rect,
-            slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor.ceil(); 4],
+            slice_borders: [Self::CORNER_RADIUS.value() * init.ui_scale_factor.ceil(); 4],
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([1.0, 1.0, 1.0, 0.25])),
             ..Default::default()
         });

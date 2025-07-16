@@ -35,13 +35,16 @@ impl ContentView {
             Self::FRAME_PADDING_V * 2.0 + text_atlas_rect.height() as f32 / init.ui_scale_factor;
 
         let ct_root = init.base_system.register_composite_rect(CompositeRect {
+            base_scale_factor: init.ui_scale_factor,
             size: [
-                AnimatableFloat::Value(text_atlas_rect.width() as _),
-                AnimatableFloat::Value(text_atlas_rect.height() as _),
+                AnimatableFloat::Value(text_atlas_rect.width() as f32 / init.ui_scale_factor),
+                AnimatableFloat::Value(text_atlas_rect.height() as f32 / init.ui_scale_factor),
             ],
             offset: [
-                AnimatableFloat::Value(-(text_atlas_rect.width() as f32) * 0.5),
-                AnimatableFloat::Value(Self::FRAME_PADDING_V * init.ui_scale_factor),
+                AnimatableFloat::Value(
+                    -(text_atlas_rect.width() as f32 / init.ui_scale_factor) * 0.5,
+                ),
+                AnimatableFloat::Value(Self::FRAME_PADDING_V),
             ],
             relative_offset_adjustment: [0.5, 0.0],
             has_bitmap: true,
@@ -226,12 +229,8 @@ impl Presenter {
 
             confirm_button_ct.relative_offset_adjustment = [0.5, 0.0];
             confirm_button_ct.offset = [
-                AnimatableFloat::Value(
-                    -0.5 * confirm_button.preferred_width() * init.for_view.ui_scale_factor,
-                ),
-                AnimatableFloat::Value(
-                    (content_view.preferred_height - 4.0) * init.for_view.ui_scale_factor,
-                ),
+                AnimatableFloat::Value(-0.5 * confirm_button.preferred_width()),
+                AnimatableFloat::Value(content_view.preferred_height - 4.0),
             ];
             confirm_button_ht.left_adjustment_factor = 0.5;
             confirm_button_ht.left = -0.5 * confirm_button_ht.width;

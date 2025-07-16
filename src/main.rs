@@ -34,11 +34,14 @@ use std::{
 
 use crate::{composite::FloatParameter, quadtree::QuadTree};
 use app_state::{AppState, SpriteInfo};
-use base_system::{AppBaseSystem, FontType, RenderPassOptions};
+use base_system::{
+    AppBaseSystem, BufferMapMode, FontType, PixelFormat, RenderPassOptions, RenderTexture,
+    RenderTextureFlags, RenderTextureOptions,
+};
 use bedrock::{
-    self as br, CommandBufferMut, CommandPoolMut, DescriptorPoolMut, Device, DeviceMemoryMut,
-    Fence, FenceMut, ImageChild, InstanceChild, MemoryBound, PhysicalDevice, RenderPass,
-    ShaderModule, Swapchain, VkHandle, VkHandleMut, VkObject, VkRawHandle,
+    self as br, CommandBufferMut, CommandPoolMut, DescriptorPoolMut, Device, Fence, FenceMut,
+    ImageChild, InstanceChild, MemoryBound, PhysicalDevice, RenderPass, ShaderModule, Swapchain,
+    VkHandle, VkHandleMut, VkObject, VkRawHandle,
 };
 use bg_worker::{BackgroundWorker, BackgroundWorkerViewFeedback};
 use composite::{
@@ -56,7 +59,6 @@ use input::EventContinueControl;
 use parking_lot::RwLock;
 use shell::AppShell;
 use subsystem::{StagingScratchBufferManager, Subsystem};
-use text::TextLayout;
 use trigger_cell::TriggerCell;
 
 pub enum AppEvent {
@@ -279,15 +281,6 @@ impl<'subsystem> BufferedStagingScratchBuffer<'subsystem> {
     }
 }
 
-/// Attachment Description that Renders to read-only texture(shader read-only) covering entire pixels(no blending with previous content and nothing needs to be cleared)
-const fn attachment_description_2_full_pixel_render_to_ro_texture(
-    format: br::Format,
-) -> br::AttachmentDescription2 {
-    br::AttachmentDescription2::new(format)
-        .with_layout_to(br::ImageLayout::ShaderReadOnlyOpt.from_undefined())
-        .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store)
-}
-
 const fn const_subpass_description_2_single_color_write_only<const ATTACHMENT_INDEX: u32>()
 -> br::SubpassDescription2<'static> {
     br::SubpassDescription2::new().colors(
@@ -319,14 +312,17 @@ pub struct CurrentSelectedSpriteMarkerView {
     view_offset_y: Cell<f32>,
 }
 impl CurrentSelectedSpriteMarkerView {
-    const CORNER_RADIUS: f32 = 4.0;
+    const CORNER_RADIUS: SafeF32 = unsafe { SafeF32::new_unchecked(4.0) };
     const THICKNESS: f32 = 2.0;
     const COLOR: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
 
     pub fn new(init: &mut ViewInitContext) -> Self {
         let border_image_atlas_rect = init
             .base_system
-            .rounded_rect_mask(init.ui_scale_factor, Self::CORNER_RADIUS)
+            .rounded_rect_mask(
+                unsafe { SafeF32::new_unchecked(init.ui_scale_factor) },
+                Self::CORNER_RADIUS,
+            )
             .unwrap();
 
         let global_x_param = init
@@ -360,7 +356,7 @@ impl CurrentSelectedSpriteMarkerView {
                 })),
             ],
             has_bitmap: true,
-            slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
+            slice_borders: [Self::CORNER_RADIUS.value() * init.ui_scale_factor; 4],
             texatlas_rect: border_image_atlas_rect,
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value(Self::COLOR)),
             opacity: AnimatableFloat::Value(0.0),
@@ -381,6 +377,26 @@ impl CurrentSelectedSpriteMarkerView {
 
     pub fn mount(&self, ct_parent: CompositeTreeRef, ct: &mut CompositeTree) {
         ct.add_child(ct_parent, self.ct_root);
+    }
+
+    pub fn rescale(&self, base_system: &mut AppBaseSystem, ui_scale_factor: f32) {
+        base_system
+            .free_mask_atlas_rect(base_system.composite_tree.get(self.ct_root).texatlas_rect);
+        base_system
+            .composite_tree
+            .get_mut(self.ct_root)
+            .texatlas_rect = base_system
+            .rounded_rect_mask(
+                unsafe { SafeF32::new_unchecked(ui_scale_factor) },
+                Self::CORNER_RADIUS,
+            )
+            .unwrap();
+
+        base_system
+            .composite_tree
+            .get_mut(self.ct_root)
+            .slice_borders = [Self::CORNER_RADIUS.value() * ui_scale_factor; 4];
+        base_system.composite_tree.mark_dirty(self.ct_root);
     }
 
     pub fn update(&self, ct: &mut CompositeTree, current_sec: f32) {
@@ -483,7 +499,6 @@ pub struct SpriteListToggleButtonView {
     ct_root: CompositeTreeRef,
     ct_icon: CompositeTreeRef,
     ht_root: HitTestTreeRef,
-    ui_scale_factor: Cell<f32>,
     hovering: Cell<bool>,
     pressing: Cell<bool>,
     is_dirty: Cell<bool>,
@@ -527,92 +542,49 @@ impl SpriteListToggleButtonView {
         0u16, 1, 2, 2, 1, 3, 2, 3, 4, 4, 3, 5, 6, 7, 8, 8, 7, 9, 8, 9, 10, 10, 9, 11,
     ];
 
-    #[tracing::instrument(name = "SpriteListToggleButtonView::new", skip(init))]
-    pub fn new(init: &mut ViewInitContext) -> Self {
-        let icon_size_px = (Self::ICON_SIZE * init.ui_scale_factor).ceil() as u32;
-        let icon_atlas_rect = init
-            .base_system
-            .alloc_mask_atlas_rect(icon_size_px, icon_size_px);
-        let circle_atlas_rect = init.base_system.alloc_mask_atlas_rect(
-            (Self::SIZE * init.ui_scale_factor) as _,
-            (Self::SIZE * init.ui_scale_factor) as _,
-        );
-
+    fn render_icon_circle(
+        base_system: &mut AppBaseSystem,
+        icon_atlas_rect: &AtlasRect,
+        circle_atlas_rect: &AtlasRect,
+    ) {
         let bufsize = Self::ICON_VERTICES.len() * core::mem::size_of::<[f32; 2]>()
             + Self::ICON_INDICES.len() * core::mem::size_of::<u16>();
-        let mut buf = br::BufferObject::new(
-            &init.base_system.subsystem,
-            &br::BufferCreateInfo::new(
+        let mut buf = base_system
+            .new_writable_buffer(
                 bufsize,
                 br::BufferUsage::VERTEX_BUFFER | br::BufferUsage::INDEX_BUFFER,
-            ),
-        )
-        .unwrap();
-        let mreq = buf.requirements();
-        let memindex = init
-            .base_system
-            .find_direct_memory_index(mreq.memoryTypeBits)
-            .expect("no suitable memory");
-        let mut mem = br::DeviceMemoryObject::new(
-            &init.base_system.subsystem,
-            &br::MemoryAllocateInfo::new(mreq.size, memindex),
-        )
-        .unwrap();
-        buf.bind(&mem, 0).unwrap();
-        let n = mem.native_ptr();
-        let ptr = mem.map(0..bufsize).unwrap();
+            )
+            .unwrap();
+        let ptr = buf.map(0..bufsize, BufferMapMode::Write).unwrap();
         unsafe {
-            core::ptr::copy_nonoverlapping(
-                Self::ICON_VERTICES.as_ptr(),
-                ptr.addr_of_mut(0),
-                Self::ICON_VERTICES.len(),
-            );
-            core::ptr::copy_nonoverlapping(
-                Self::ICON_INDICES.as_ptr(),
-                ptr.addr_of_mut(Self::ICON_VERTICES.len() * core::mem::size_of::<[f32; 2]>()),
-                Self::ICON_INDICES.len(),
-            );
+            ptr.addr_of_mut::<[f32; 2]>(0)
+                .copy_from_nonoverlapping(Self::ICON_VERTICES.as_ptr(), Self::ICON_VERTICES.len());
+            ptr.addr_of_mut::<u16>(Self::ICON_VERTICES.len() * core::mem::size_of::<[f32; 2]>())
+                .copy_from_nonoverlapping(Self::ICON_INDICES.as_ptr(), Self::ICON_INDICES.len());
         }
-        if !init.base_system.is_coherent_memory_type(memindex) {
-            unsafe {
-                init.base_system
-                    .subsystem
-                    .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(
-                        n,
-                        0,
-                        bufsize as _,
-                    )])
-                    .unwrap();
-            }
-        }
-        ptr.end();
+        ptr.unmap().unwrap();
 
-        let mut msaa_buffer = br::ImageObject::new(
-            &init.base_system.subsystem,
-            &br::ImageCreateInfo::new(icon_atlas_rect.extent(), br::vk::VK_FORMAT_R8_UNORM)
-                .as_color_attachment()
-                .usage_with(br::ImageUsageFlags::TRANSFER_SRC)
-                .sample_counts(4),
+        let msaa_buffer = RenderTexture::new(
+            base_system,
+            icon_atlas_rect.extent(),
+            PixelFormat::R8,
+            &RenderTextureOptions {
+                msaa_count: Some(4),
+                flags: RenderTextureFlags::ALLOW_TRANSFER_SRC | RenderTextureFlags::NON_SAMPLED,
+            },
         )
-        .unwrap();
-        let msaa_mem = init
-            .base_system
-            .alloc_device_local_memory_for_requirements(&msaa_buffer.requirements());
-        msaa_buffer.bind(&msaa_mem, 0).unwrap();
-        let msaa_buffer = br::ImageViewBuilder::new(
-            msaa_buffer,
-            br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
-        )
-        .create()
         .unwrap();
 
         let rp = br::RenderPassObject::new(
-            init.base_system.subsystem,
+            base_system.subsystem,
             &br::RenderPassCreateInfo2::new(
-                &[br::AttachmentDescription2::new(br::vk::VK_FORMAT_R8_UNORM)
+                &[msaa_buffer
+                    .make_attachment_description()
                     .color_memory_op(br::LoadOp::Clear, br::StoreOp::Store)
-                    .layout_transition(br::ImageLayout::Undefined, br::ImageLayout::TransferSrcOpt)
-                    .samples(4)],
+                    .layout_transition(
+                        br::ImageLayout::Undefined,
+                        br::ImageLayout::TransferSrcOpt,
+                    )],
                 &[const_subpass_description_2_single_color_write_only::<0>()],
                 &[br::SubpassDependency2::new(
                     br::SubpassIndex::Internal(0),
@@ -630,7 +602,7 @@ impl SpriteListToggleButtonView {
         )
         .unwrap();
         let fb = br::FramebufferObject::new(
-            init.base_system.subsystem,
+            base_system.subsystem,
             &br::FramebufferCreateInfo::new(
                 &rp,
                 &[msaa_buffer.as_transparent_ref()],
@@ -639,38 +611,18 @@ impl SpriteListToggleButtonView {
             ),
         )
         .unwrap();
-        let rp_direct = br::RenderPassObject::new(
-            init.base_system.subsystem,
-            &br::RenderPassCreateInfo2::new(
-                &[attachment_description_2_full_pixel_render_to_ro_texture(
-                    br::vk::VK_FORMAT_R8_UNORM,
-                )],
-                &[const_subpass_description_2_single_color_write_only::<0>()],
-                &[br::SubpassDependency2::new(
-                    br::SubpassIndex::Internal(0),
-                    br::SubpassIndex::External,
-                )
-                .of_memory(
-                    br::AccessFlags::COLOR_ATTACHMENT.write,
-                    br::AccessFlags::SHADER.read,
-                )
-                .of_execution(
-                    br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                    br::PipelineStageFlags::FRAGMENT_SHADER,
-                )],
-            ),
-        )
-        .unwrap();
+        let rp_direct = base_system
+            .render_to_mask_atlas_pass(RenderPassOptions::FULL_PIXEL_RENDER)
+            .unwrap();
         let fb_direct = br::FramebufferObject::new(
-            init.base_system.subsystem,
+            base_system.subsystem,
             &br::FramebufferCreateInfo::new(
                 &rp_direct,
-                &[init
-                    .base_system
+                &[base_system
                     .mask_atlas_resource_transparent_ref()
                     .as_transparent_ref()],
-                init.base_system.mask_atlas_size(),
-                init.base_system.mask_atlas_size(),
+                base_system.mask_atlas_size(),
+                base_system.mask_atlas_size(),
             ),
         )
         .unwrap();
@@ -680,17 +632,16 @@ impl SpriteListToggleButtonView {
             #[constant_id = 0]
             pub softness: f32,
         }
-        let [pipeline, pipeline_circle] = init
-            .base_system
+        let [pipeline, pipeline_circle] = base_system
             .create_graphics_pipelines_array(&[
                 br::GraphicsPipelineCreateInfo::new(
-                    init.base_system.require_empty_pipeline_layout(),
+                    base_system.require_empty_pipeline_layout(),
                     rp.subpass(0),
                     &[
-                        init.base_system
+                        base_system
                             .require_shader("resources/notrans.vert")
                             .on_stage(br::ShaderStage::Vertex, c"main"),
-                        init.base_system
+                        base_system
                             .require_shader("resources/fillcolor_r.frag")
                             .on_stage(br::ShaderStage::Fragment, c"main")
                             .with_specialization_info(&br::SpecializationInfo::new(
@@ -713,13 +664,13 @@ impl SpriteListToggleButtonView {
                     &br::PipelineMultisampleStateCreateInfo::new().rasterization_samples(4),
                 ),
                 br::GraphicsPipelineCreateInfo::new(
-                    init.base_system.require_empty_pipeline_layout(),
+                    base_system.require_empty_pipeline_layout(),
                     rp_direct.subpass(0),
                     &[
-                        init.base_system
+                        base_system
                             .require_shader("resources/filltri.vert")
                             .on_stage(br::ShaderStage::Vertex, c"main"),
-                        init.base_system
+                        base_system
                             .require_shader("resources/aa_circle.frag")
                             .on_stage(br::ShaderStage::Fragment, c"main")
                             .with_specialization_info(&br::SpecializationInfo::new(
@@ -739,13 +690,13 @@ impl SpriteListToggleButtonView {
             ])
             .unwrap();
 
-        init.base_system
+        base_system
             .sync_execute_graphics_commands(|rec| {
                 rec.begin_render_pass2(
                     &br::RenderPassBeginInfo::new(
                         &rp,
                         &fb,
-                        icon_atlas_rect.extent().into_rect(br::Offset2D::ZERO),
+                        msaa_buffer.render_region(),
                         &[br::ClearValue::color_f32([0.0; 4])],
                     ),
                     &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
@@ -774,15 +725,14 @@ impl SpriteListToggleButtonView {
                 .pipeline_barrier_2(&br::DependencyInfo::new(
                     &[],
                     &[],
-                    &[init
-                        .base_system
+                    &[base_system
                         .barrier_for_mask_atlas_resource()
                         .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
                 ))
                 .resolve_image(
-                    msaa_buffer.image(),
+                    msaa_buffer.as_image(),
                     br::ImageLayout::TransferSrcOpt,
-                    init.base_system.mask_atlas_image_transparent_ref(),
+                    base_system.mask_atlas_image_transparent_ref(),
                     br::ImageLayout::TransferDestOpt,
                     &[br::vk::VkImageResolve {
                         srcSubresource: br::ImageSubresourceLayers::new(
@@ -803,8 +753,7 @@ impl SpriteListToggleButtonView {
                 .pipeline_barrier_2(&br::DependencyInfo::new(
                     &[],
                     &[],
-                    &[init
-                        .base_system
+                    &[base_system
                         .barrier_for_mask_atlas_resource()
                         .from(
                             br::PipelineStageFlags2::RESOLVE,
@@ -820,27 +769,29 @@ impl SpriteListToggleButtonView {
                 ))
             })
             .unwrap();
-        drop((
-            pipeline,
-            pipeline_circle,
-            fb_direct,
-            rp_direct,
-            fb,
-            rp,
-            msaa_mem,
-            msaa_buffer,
-            mem,
-            buf,
-        ));
+    }
+
+    #[tracing::instrument(name = "SpriteListToggleButtonView::new", skip(init))]
+    fn new(init: &mut ViewInitContext) -> Self {
+        let icon_size_px = (Self::ICON_SIZE * init.ui_scale_factor).ceil() as u32;
+        let icon_atlas_rect = init
+            .base_system
+            .alloc_mask_atlas_rect(icon_size_px, icon_size_px);
+        let circle_atlas_rect = init.base_system.alloc_mask_atlas_rect(
+            (Self::SIZE * init.ui_scale_factor) as _,
+            (Self::SIZE * init.ui_scale_factor) as _,
+        );
+        Self::render_icon_circle(init.base_system, &icon_atlas_rect, &circle_atlas_rect);
 
         let ct_root = init.base_system.register_composite_rect(CompositeRect {
+            base_scale_factor: init.ui_scale_factor,
             size: [
-                AnimatableFloat::Value(Self::SIZE * init.ui_scale_factor),
-                AnimatableFloat::Value(Self::SIZE * init.ui_scale_factor),
+                AnimatableFloat::Value(Self::SIZE),
+                AnimatableFloat::Value(Self::SIZE),
             ],
             offset: [
-                AnimatableFloat::Value((-Self::SIZE - 8.0) * init.ui_scale_factor),
-                AnimatableFloat::Value(8.0 * init.ui_scale_factor),
+                AnimatableFloat::Value(-Self::SIZE - 8.0),
+                AnimatableFloat::Value(8.0),
             ],
             relative_offset_adjustment: [1.0, 0.0],
             has_bitmap: true,
@@ -849,14 +800,15 @@ impl SpriteListToggleButtonView {
             ..Default::default()
         });
         let ct_icon = init.base_system.register_composite_rect(CompositeRect {
+            base_scale_factor: init.ui_scale_factor,
             offset: [
-                AnimatableFloat::Value(-Self::ICON_SIZE * 0.5 * init.ui_scale_factor),
-                AnimatableFloat::Value(-Self::ICON_SIZE * 0.5 * init.ui_scale_factor),
+                AnimatableFloat::Value(-Self::ICON_SIZE * 0.5),
+                AnimatableFloat::Value(-Self::ICON_SIZE * 0.5),
             ],
             relative_offset_adjustment: [0.5, 0.5],
             size: [
-                AnimatableFloat::Value(Self::ICON_SIZE * init.ui_scale_factor),
-                AnimatableFloat::Value(Self::ICON_SIZE * init.ui_scale_factor),
+                AnimatableFloat::Value(Self::ICON_SIZE),
+                AnimatableFloat::Value(Self::ICON_SIZE),
             ],
             has_bitmap: true,
             texatlas_rect: icon_atlas_rect.clone(),
@@ -880,7 +832,6 @@ impl SpriteListToggleButtonView {
             ct_root,
             ct_icon,
             ht_root,
-            ui_scale_factor: Cell::new(init.ui_scale_factor),
             hovering: Cell::new(false),
             pressing: Cell::new(false),
             is_dirty: Cell::new(false),
@@ -888,7 +839,7 @@ impl SpriteListToggleButtonView {
         }
     }
 
-    pub fn mount(
+    fn mount(
         &self,
         app_system: &mut AppBaseSystem,
         ct_parent: CompositeTreeRef,
@@ -897,15 +848,45 @@ impl SpriteListToggleButtonView {
         app_system.set_tree_parent((self.ct_root, self.ht_root), (ct_parent, ht_parent));
     }
 
-    pub fn update(&self, app_system: &mut AppBaseSystem, current_sec: f32) {
-        let ui_scale_factor = self.ui_scale_factor.get();
+    fn rescale(&self, base_system: &mut AppBaseSystem, ui_scale_factor: SafeF32) {
+        base_system.free_mask_atlas_rect(
+            self.ct_root
+                .entity(&base_system.composite_tree)
+                .texatlas_rect,
+        );
+        base_system.free_mask_atlas_rect(
+            self.ct_icon
+                .entity(&base_system.composite_tree)
+                .texatlas_rect,
+        );
 
+        let icon_size_px = (Self::ICON_SIZE * ui_scale_factor.value()).ceil() as u32;
+        let icon_atlas_rect = base_system.alloc_mask_atlas_rect(icon_size_px, icon_size_px);
+        let circle_atlas_rect = base_system.alloc_mask_atlas_rect(
+            (Self::SIZE * ui_scale_factor.value()) as _,
+            (Self::SIZE * ui_scale_factor.value()) as _,
+        );
+        Self::render_icon_circle(base_system, &icon_atlas_rect, &circle_atlas_rect);
+
+        let cr = self
+            .ct_root
+            .entity_mut_dirtified(&mut base_system.composite_tree);
+        cr.texatlas_rect = circle_atlas_rect;
+        cr.base_scale_factor = ui_scale_factor.value();
+        let cr = self
+            .ct_icon
+            .entity_mut_dirtified(&mut base_system.composite_tree);
+        cr.texatlas_rect = icon_atlas_rect;
+        cr.base_scale_factor = ui_scale_factor.value();
+    }
+
+    fn update(&self, app_system: &mut AppBaseSystem, current_sec: f32) {
         if let Some(place_inner) = self.place_inner.get_if_triggered() {
             if place_inner {
                 app_system.composite_tree.get_mut(self.ct_root).offset[0] =
                     AnimatableFloat::Animated {
-                        from_value: 8.0 * ui_scale_factor,
-                        to_value: (-Self::SIZE - 8.0) * ui_scale_factor,
+                        from_value: 8.0,
+                        to_value: -Self::SIZE - 8.0,
                         start_sec: current_sec,
                         end_sec: current_sec + 0.25,
                         curve: AnimationCurve::CubicBezier {
@@ -919,8 +900,8 @@ impl SpriteListToggleButtonView {
             } else {
                 app_system.composite_tree.get_mut(self.ct_root).offset[0] =
                     AnimatableFloat::Animated {
-                        from_value: (-Self::SIZE - 8.0) * ui_scale_factor,
-                        to_value: 8.0 * ui_scale_factor,
+                        from_value: -Self::SIZE - 8.0,
+                        to_value: 8.0,
                         start_sec: current_sec,
                         end_sec: current_sec + 0.25,
                         curve: AnimationCurve::CubicBezier {
@@ -1017,13 +998,13 @@ pub struct SpriteListCellView {
     ct_bg_selected: CompositeTreeRef,
     ct_label: CompositeTreeRef,
     ht_root: HitTestTreeRef,
+    label: RefCell<String>,
     top: Cell<f32>,
-    ui_scale: Cell<f32>,
     hovering: TriggerCell<bool>,
     bound_sprite_index: Cell<usize>,
 }
 impl SpriteListCellView {
-    const CORNER_RADIUS: f32 = 8.0;
+    const CORNER_RADIUS: SafeF32 = unsafe { SafeF32::new_unchecked(8.0) };
     const MARGIN_H: f32 = 16.0;
     const HEIGHT: f32 = 24.0;
     const LABEL_MARGIN_LEFT: f32 = 8.0;
@@ -1043,31 +1024,35 @@ impl SpriteListCellView {
             .base_system
             .rounded_fill_rect_mask(
                 unsafe { SafeF32::new_unchecked(init.ui_scale_factor) },
-                unsafe { SafeF32::new_unchecked(Self::CORNER_RADIUS) },
+                Self::CORNER_RADIUS,
             )
             .unwrap();
 
         let ct_root = init.base_system.register_composite_rect(CompositeRect {
+            base_scale_factor: init.ui_scale_factor,
             offset: [
-                AnimatableFloat::Value(Self::MARGIN_H * init.ui_scale_factor),
-                AnimatableFloat::Value(init_top * init.ui_scale_factor),
+                AnimatableFloat::Value(Self::MARGIN_H),
+                AnimatableFloat::Value(init_top),
             ],
             relative_size_adjustment: [1.0, 0.0],
             size: [
-                AnimatableFloat::Value(-Self::MARGIN_H * 2.0 * init.ui_scale_factor),
-                AnimatableFloat::Value(Self::HEIGHT * init.ui_scale_factor),
+                AnimatableFloat::Value(-Self::MARGIN_H * 2.0),
+                AnimatableFloat::Value(Self::HEIGHT),
             ],
             ..Default::default()
         });
         let ct_label = init.base_system.register_composite_rect(CompositeRect {
+            base_scale_factor: init.ui_scale_factor,
             offset: [
-                AnimatableFloat::Value(Self::LABEL_MARGIN_LEFT * init.ui_scale_factor),
-                AnimatableFloat::Value(-(label_atlas_rect.height() as f32) * 0.5),
+                AnimatableFloat::Value(Self::LABEL_MARGIN_LEFT),
+                AnimatableFloat::Value(
+                    -(label_atlas_rect.height() as f32 / init.ui_scale_factor) * 0.5,
+                ),
             ],
             relative_offset_adjustment: [0.0, 0.5],
             size: [
-                AnimatableFloat::Value(label_atlas_rect.width() as f32),
-                AnimatableFloat::Value(label_atlas_rect.height() as f32),
+                AnimatableFloat::Value(label_atlas_rect.width() as f32 / init.ui_scale_factor),
+                AnimatableFloat::Value(label_atlas_rect.height() as f32 / init.ui_scale_factor),
             ],
             has_bitmap: true,
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
@@ -1080,8 +1065,8 @@ impl SpriteListCellView {
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([
                 1.0, 1.0, 1.0, 0.125,
             ])),
-            texatlas_rect: bg_atlas_rect.clone(),
-            slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
+            texatlas_rect: bg_atlas_rect,
+            slice_borders: [Self::CORNER_RADIUS.value() * init.ui_scale_factor; 4],
             opacity: AnimatableFloat::Value(0.0),
             ..Default::default()
         });
@@ -1090,7 +1075,7 @@ impl SpriteListCellView {
             has_bitmap: true,
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.6, 0.8, 1.0, 0.25])),
             texatlas_rect: bg_atlas_rect,
-            slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
+            slice_borders: [Self::CORNER_RADIUS.value() * init.ui_scale_factor; 4],
             opacity: AnimatableFloat::Value(0.0),
             ..Default::default()
         });
@@ -1116,8 +1101,8 @@ impl SpriteListCellView {
             ct_bg,
             ct_bg_selected,
             ht_root,
+            label: RefCell::new(init_label.into()),
             top: Cell::new(init_top),
-            ui_scale: Cell::new(init.ui_scale_factor),
             hovering: TriggerCell::new(false),
             bound_sprite_index: Cell::new(init_sprite_index),
         }
@@ -1130,6 +1115,48 @@ impl SpriteListCellView {
         base_system: &mut AppBaseSystem,
     ) {
         base_system.set_tree_parent((self.ct_root, self.ht_root), (ct_parent, ht_parent));
+    }
+
+    fn rescale(
+        &self,
+        base_system: &mut AppBaseSystem,
+        staging_scratch_buffer: &mut StagingScratchBufferManager,
+        ui_scale_factor: SafeF32,
+    ) {
+        base_system
+            .free_mask_atlas_rect(self.ct_bg.entity(&base_system.composite_tree).texatlas_rect);
+        base_system.free_mask_atlas_rect(
+            self.ct_label
+                .entity(&base_system.composite_tree)
+                .texatlas_rect,
+        );
+
+        let label_atlas_rect = base_system
+            .text_mask(staging_scratch_buffer, FontType::UI, &self.label.borrow())
+            .unwrap();
+        let bg_atlas_rect = base_system
+            .rounded_fill_rect_mask(ui_scale_factor, Self::CORNER_RADIUS)
+            .unwrap();
+
+        let cr = self
+            .ct_root
+            .entity_mut_dirtified(&mut base_system.composite_tree);
+        cr.base_scale_factor = ui_scale_factor.value();
+        let cr = self
+            .ct_label
+            .entity_mut_dirtified(&mut base_system.composite_tree);
+        cr.texatlas_rect = label_atlas_rect;
+        cr.base_scale_factor = ui_scale_factor.value();
+        let cr = self
+            .ct_bg
+            .entity_mut_dirtified(&mut base_system.composite_tree);
+        cr.texatlas_rect = bg_atlas_rect;
+        cr.slice_borders = [Self::CORNER_RADIUS.value() * ui_scale_factor.value(); 4];
+        let cr = self
+            .ct_bg_selected
+            .entity_mut_dirtified(&mut base_system.composite_tree);
+        cr.texatlas_rect = bg_atlas_rect;
+        cr.slice_borders = [Self::CORNER_RADIUS.value() * ui_scale_factor.value(); 4];
     }
 
     pub fn update(&self, base_system: &mut AppBaseSystem, current_sec: f32) {
@@ -1178,16 +1205,40 @@ impl SpriteListCellView {
     }
 
     pub fn set_top(&self, top: f32, base_system: &mut AppBaseSystem) {
-        let ui_scale_factor = self.ui_scale.get();
-
-        base_system.composite_tree.get_mut(self.ct_root).offset[1] =
-            AnimatableFloat::Value(top * ui_scale_factor);
+        self.ct_root
+            .entity_mut_dirtified(&mut base_system.composite_tree)
+            .offset[1] = AnimatableFloat::Value(top);
         base_system.hit_tree.get_data_mut(self.ht_root).top = top;
         self.top.set(top);
     }
 
-    pub fn set_name(&self, name: &str, subsystem: &Subsystem) {
-        // TODO
+    pub fn set_label(
+        &self,
+        label: &str,
+        base_system: &mut AppBaseSystem,
+        staging_scratch_buffer: &mut StagingScratchBufferManager,
+    ) {
+        if label == &self.label.borrow() as &str {
+            // no changes
+            return;
+        }
+
+        base_system.free_mask_atlas_rect(
+            self.ct_label
+                .entity(&base_system.composite_tree)
+                .texatlas_rect,
+        );
+
+        let label_atlas_rect = base_system
+            .text_mask(staging_scratch_buffer, FontType::UI, label)
+            .unwrap();
+
+        let cr = self
+            .ct_label
+            .entity_mut_dirtified(&mut base_system.composite_tree);
+        cr.texatlas_rect = label_atlas_rect;
+
+        self.label.replace(label.into());
     }
 
     pub fn bind_sprite_index(&self, index: usize) {
@@ -1200,6 +1251,8 @@ pub struct SpriteListPaneView {
     pub title_atlas_rect: AtlasRect,
     pub title_blurred_atlas_rect: AtlasRect,
     ct_root: CompositeTreeRef,
+    ct_title: CompositeTreeRef,
+    ct_title_blurred: CompositeTreeRef,
     ht_frame: HitTestTreeRef,
     ht_resize_area: HitTestTreeRef,
     width: Cell<f32>,
@@ -1208,93 +1261,54 @@ pub struct SpriteListPaneView {
     is_dirty: Cell<bool>,
 }
 impl SpriteListPaneView {
-    const CORNER_RADIUS: f32 = 24.0;
+    const CORNER_RADIUS: SafeF32 = unsafe { SafeF32::new_unchecked(24.0) };
     const BLUR_AMOUNT_ONEDIR: u32 = 8;
     const FLOATING_MARGIN: f32 = 8.0;
     const INIT_WIDTH: f32 = 320.0;
     const RESIZE_AREA_WIDTH: f32 = 8.0;
 
-    #[tracing::instrument(name = "SpriteListPaneView::new", skip(init))]
-    pub fn new(init: &mut ViewInitContext, header_height: f32) -> Self {
-        let frame_image_atlas_rect = init
-            .base_system
-            .rounded_fill_rect_mask(
-                unsafe { SafeF32::new_unchecked(init.ui_scale_factor) },
-                unsafe { SafeF32::new_unchecked(Self::CORNER_RADIUS) },
-            )
-            .unwrap();
-
-        let title_blur_pixels =
-            (Self::BLUR_AMOUNT_ONEDIR as f32 * init.ui_scale_factor).ceil() as _;
-        let title_layout =
-            TextLayout::build_simple("Sprites", &mut init.base_system.fonts.ui_default);
-        let title_atlas_rect = init
-            .base_system
-            .alloc_mask_atlas_rect(title_layout.width_px(), title_layout.height_px());
-        let title_blurred_atlas_rect = init.base_system.alloc_mask_atlas_rect(
-            title_layout.width_px() + (title_blur_pixels * 2 + 1),
-            title_layout.height_px() + (title_blur_pixels * 2 + 1),
-        );
-        let title_stg_image_pixels =
-            title_layout.build_stg_image_pixel_buffer(init.staging_scratch_buffer);
-
-        let mut title_blurred_work_image = br::ImageObject::new(
-            init.base_system.subsystem,
-            &br::ImageCreateInfo::new(
-                title_blurred_atlas_rect.extent(),
-                br::vk::VK_FORMAT_R8_UNORM,
-            )
-            .as_color_attachment()
-            .sampled(),
+    fn gen_blurry_title(
+        base_system: &mut AppBaseSystem,
+        title_atlas_rect: &AtlasRect,
+        blurred_atlas_rect: &AtlasRect,
+        blur_pixels: u32,
+    ) {
+        let work_rt = RenderTexture::new(
+            base_system,
+            blurred_atlas_rect.extent(),
+            PixelFormat::R8,
+            &Default::default(),
         )
         .unwrap();
-        let title_blurred_work_image_mem = init
-            .base_system
-            .alloc_device_local_memory_for_requirements(&title_blurred_work_image.requirements());
-        title_blurred_work_image
-            .bind(&title_blurred_work_image_mem, 0)
-            .unwrap();
-        let title_blurred_work_image_view = br::ImageViewBuilder::new(
-            title_blurred_work_image,
-            br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
-        )
-        .create()
-        .unwrap();
 
-        let render_pass = init
-            .base_system
+        let render_pass = base_system
             .render_to_mask_atlas_pass(RenderPassOptions::FULL_PIXEL_RENDER)
             .unwrap();
         let framebuffer = br::FramebufferObject::new(
-            init.base_system.subsystem,
+            base_system.subsystem,
             &br::FramebufferCreateInfo::new(
                 &render_pass,
-                &[init
-                    .base_system
+                &[base_system
                     .mask_atlas_resource_transparent_ref()
                     .as_transparent_ref()],
-                init.base_system.mask_atlas_size(),
-                init.base_system.mask_atlas_size(),
+                base_system.mask_atlas_size(),
+                base_system.mask_atlas_size(),
             ),
         )
         .unwrap();
         let title_blurred_work_framebuffer = br::FramebufferObject::new(
-            init.base_system.subsystem,
+            base_system.subsystem,
             &br::FramebufferCreateInfo::new(
                 &render_pass,
-                &[title_blurred_work_image_view.as_transparent_ref()],
-                title_blurred_atlas_rect.width(),
-                title_blurred_atlas_rect.height(),
+                &[work_rt.as_transparent_ref()],
+                blurred_atlas_rect.width(),
+                blurred_atlas_rect.height(),
             ),
         )
         .unwrap();
 
-        let vsh_blur = init
-            .base_system
-            .require_shader("resources/filltri_uvmod.vert");
-        let fsh_blur = init
-            .base_system
-            .require_shader("resources/blit_axis_convolved.frag");
+        let vsh_blur = base_system.require_shader("resources/filltri_uvmod.vert");
+        let fsh_blur = base_system.require_shader("resources/blit_axis_convolved.frag");
         #[derive(br::SpecializationConstants)]
         struct ConvolutionFragmentShaderParams {
             #[constant_id = 0]
@@ -1302,17 +1316,16 @@ impl SpriteListPaneView {
         }
 
         let smp =
-            br::SamplerObject::new(&init.base_system.subsystem, &br::SamplerCreateInfo::new())
-                .unwrap();
+            br::SamplerObject::new(base_system.subsystem, &br::SamplerCreateInfo::new()).unwrap();
         let dsl_tex1 = br::DescriptorSetLayoutObject::new(
-            init.base_system.subsystem,
+            base_system.subsystem,
             &br::DescriptorSetLayoutCreateInfo::new(&[br::DescriptorType::CombinedImageSampler
                 .make_binding(0, 1)
                 .with_immutable_samplers(&[smp.as_transparent_ref()])]),
         )
         .unwrap();
         let mut dp = br::DescriptorPoolObject::new(
-            init.base_system.subsystem,
+            base_system.subsystem,
             &br::DescriptorPoolCreateInfo::new(
                 2,
                 &[br::DescriptorType::CombinedImageSampler.make_size(2)],
@@ -1322,30 +1335,27 @@ impl SpriteListPaneView {
         let [ds_title, ds_title2] = dp
             .alloc_array(&[dsl_tex1.as_transparent_ref(), dsl_tex1.as_transparent_ref()])
             .unwrap();
-        init.base_system.subsystem.update_descriptor_sets(
+        base_system.subsystem.update_descriptor_sets(
             &[
                 ds_title
                     .binding_at(0)
                     .write(br::DescriptorContents::CombinedImageSampler(vec![
                         br::DescriptorImageInfo::new(
-                            &init.base_system.mask_atlas_resource_transparent_ref(),
+                            &base_system.mask_atlas_resource_transparent_ref(),
                             br::ImageLayout::ShaderReadOnlyOpt,
                         ),
                     ])),
                 ds_title2
                     .binding_at(0)
                     .write(br::DescriptorContents::CombinedImageSampler(vec![
-                        br::DescriptorImageInfo::new(
-                            &title_blurred_work_image_view.as_transparent_ref(),
-                            br::ImageLayout::ShaderReadOnlyOpt,
-                        ),
+                        br::DescriptorImageInfo::new(&work_rt, br::ImageLayout::ShaderReadOnlyOpt),
                     ])),
             ],
             &[],
         );
 
         let blur_pipeline_layout = br::PipelineLayoutObject::new(
-            init.base_system.subsystem,
+            base_system.subsystem,
             &br::PipelineLayoutCreateInfo::new(
                 &[dsl_tex1.as_transparent_ref()],
                 &[
@@ -1359,15 +1369,14 @@ impl SpriteListPaneView {
                             ..(core::mem::size_of::<[f32; 4]>()
                                 + core::mem::size_of::<[f32; 4]>()
                                 + core::mem::size_of::<[f32; 2]>()
-                                + (core::mem::size_of::<f32>() * title_blur_pixels as usize))
+                                + (core::mem::size_of::<f32>() * blur_pixels as usize))
                                 as _,
                     ),
                 ],
             ),
         )
         .unwrap();
-        let [pipeline_blur1, pipeline_blur] = init
-            .base_system
+        let [pipeline_blur1, pipeline_blur] = base_system
             .create_graphics_pipelines_array(&[
                 br::GraphicsPipelineCreateInfo::new(
                     &blur_pipeline_layout,
@@ -1378,20 +1387,18 @@ impl SpriteListPaneView {
                             .on_stage(br::ShaderStage::Fragment, c"main")
                             .with_specialization_info(&br::SpecializationInfo::new(
                                 &ConvolutionFragmentShaderParams {
-                                    max_count: title_blur_pixels,
+                                    max_count: blur_pixels,
                                 },
                             )),
                     ],
                     VI_STATE_EMPTY,
                     IA_STATE_TRILIST,
                     &br::PipelineViewportStateCreateInfo::new(
-                        &[title_blurred_atlas_rect
+                        &[blurred_atlas_rect
                             .extent()
                             .into_rect(br::Offset2D::ZERO)
                             .make_viewport(0.0..1.0)],
-                        &[title_blurred_atlas_rect
-                            .extent()
-                            .into_rect(br::Offset2D::ZERO)],
+                        &[blurred_atlas_rect.extent().into_rect(br::Offset2D::ZERO)],
                     ),
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
                     BLEND_STATE_SINGLE_NONE,
@@ -1406,15 +1413,15 @@ impl SpriteListPaneView {
                             .on_stage(br::ShaderStage::Fragment, c"main")
                             .with_specialization_info(&br::SpecializationInfo::new(
                                 &ConvolutionFragmentShaderParams {
-                                    max_count: title_blur_pixels,
+                                    max_count: blur_pixels,
                                 },
                             )),
                     ],
                     VI_STATE_EMPTY,
                     IA_STATE_TRILIST,
                     &br::PipelineViewportStateCreateInfo::new(
-                        &[title_blurred_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
-                        &[title_blurred_atlas_rect.vk_rect()],
+                        &[blurred_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
+                        &[blurred_atlas_rect.vk_rect()],
                     ),
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
                     BLEND_STATE_SINGLE_NONE,
@@ -1427,100 +1434,43 @@ impl SpriteListPaneView {
             (core::f32::consts::TAU * p.powi(2)).sqrt().recip()
                 * (-x.powi(2) / (2.0 * p.powi(2))).exp()
         }
-        let mut fsh_h_params = vec![0.0f32; title_blur_pixels as usize + 6];
-        let mut fsh_v_params = vec![0.0f32; title_blur_pixels as usize + 6];
+        let mut fsh_h_params = vec![0.0f32; blur_pixels as usize + 6];
+        let mut fsh_v_params = vec![0.0f32; blur_pixels as usize + 6];
         // uv_limit
-        fsh_h_params[0] = init
-            .base_system
-            .atlas
-            .uv_from_pixels(title_atlas_rect.left as _);
-        fsh_h_params[1] = init
-            .base_system
-            .atlas
-            .uv_from_pixels(title_atlas_rect.top as _);
-        fsh_h_params[2] = init
-            .base_system
+        fsh_h_params[0] = base_system.atlas.uv_from_pixels(title_atlas_rect.left as _);
+        fsh_h_params[1] = base_system.atlas.uv_from_pixels(title_atlas_rect.top as _);
+        fsh_h_params[2] = base_system
             .atlas
             .uv_from_pixels(title_atlas_rect.right as _);
-        fsh_h_params[3] = init
-            .base_system
+        fsh_h_params[3] = base_system
             .atlas
             .uv_from_pixels(title_atlas_rect.bottom as _);
         fsh_v_params[2] = 1.0;
         fsh_v_params[3] = 1.0;
         // uv_step
-        fsh_h_params[4] = 1.0 / init.base_system.mask_atlas_size() as f32;
-        fsh_v_params[5] = 1.0 / title_blurred_atlas_rect.height() as f32;
+        fsh_h_params[4] = 1.0 / base_system.mask_atlas_size() as f32;
+        fsh_v_params[5] = 1.0 / blurred_atlas_rect.height() as f32;
         // factors
         let mut t = 0.0;
-        for n in 0..title_blur_pixels as usize {
-            let v = gauss_distrib(n as f32, title_blur_pixels as f32 / 3.0);
+        for n in 0..blur_pixels as usize {
+            let v = gauss_distrib(n as f32, blur_pixels as f32 / 3.0);
             fsh_h_params[n + 6] = v;
             fsh_v_params[n + 6] = v;
 
             t += v;
         }
-        for n in 0..title_blur_pixels as usize {
+        for n in 0..blur_pixels as usize {
             fsh_h_params[n + 6] /= t;
             fsh_v_params[n + 6] /= t;
         }
 
-        init.base_system
+        base_system
             .sync_execute_graphics_commands(|rec| {
-                rec.pipeline_barrier_2(&br::DependencyInfo::new(
-                    &[],
-                    &[],
-                    &[init
-                        .base_system
-                        .barrier_for_mask_atlas_resource()
-                        .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
-                ))
-                .inject(|r| {
-                    let (b, o) = init.staging_scratch_buffer.of(&title_stg_image_pixels);
-
-                    r.copy_buffer_to_image(
-                        b,
-                        init.base_system.mask_atlas_image_transparent_ref(),
-                        br::ImageLayout::TransferDestOpt,
-                        &[br::vk::VkBufferImageCopy {
-                            bufferOffset: o,
-                            bufferRowLength: title_layout.width_px(),
-                            bufferImageHeight: title_layout.height_px(),
-                            imageSubresource: br::ImageSubresourceLayers::new(
-                                br::AspectMask::COLOR,
-                                0,
-                                0..1,
-                            ),
-                            imageOffset: title_atlas_rect.lt_offset().with_z(0),
-                            imageExtent: title_atlas_rect.extent().with_depth(1),
-                        }],
-                    )
-                })
-                .pipeline_barrier_2(&br::DependencyInfo::new(
-                    &[],
-                    &[],
-                    &[init
-                        .base_system
-                        .barrier_for_mask_atlas_resource()
-                        .from(
-                            br::PipelineStageFlags2::COPY,
-                            br::AccessFlags2::TRANSFER.write,
-                        )
-                        .to(
-                            br::PipelineStageFlags2::FRAGMENT_SHADER,
-                            br::AccessFlags2::SHADER_SAMPLED_READ,
-                        )
-                        .transit_from(
-                            br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt),
-                        )],
-                ))
-                .begin_render_pass2(
+                rec.begin_render_pass2(
                     &br::RenderPassBeginInfo::new(
                         &render_pass,
                         &title_blurred_work_framebuffer,
-                        title_blurred_atlas_rect
-                            .extent()
-                            .into_rect(br::Offset2D::ZERO),
+                        work_rt.render_region(),
                         &[br::ClearValue::color_f32([0.0; 4])],
                     ),
                     &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
@@ -1538,18 +1488,18 @@ impl SpriteListPaneView {
                     br::vk::VK_SHADER_STAGE_VERTEX_BIT,
                     0,
                     &[
-                        init.base_system.atlas.uv_from_pixels(
-                            (title_atlas_rect.width() + title_blur_pixels * 2 + 1) as _,
-                        ),
-                        init.base_system.atlas.uv_from_pixels(
-                            (title_atlas_rect.height() + title_blur_pixels * 2 + 1) as _,
-                        ),
-                        init.base_system.atlas.uv_from_pixels(
-                            title_atlas_rect.left as f32 - title_blur_pixels as f32,
-                        ),
-                        init.base_system
+                        base_system
                             .atlas
-                            .uv_from_pixels(title_atlas_rect.top as f32 - title_blur_pixels as f32),
+                            .uv_from_pixels((title_atlas_rect.width() + blur_pixels * 2 + 1) as _),
+                        base_system
+                            .atlas
+                            .uv_from_pixels((title_atlas_rect.height() + blur_pixels * 2 + 1) as _),
+                        base_system
+                            .atlas
+                            .uv_from_pixels(title_atlas_rect.left as f32 - blur_pixels as f32),
+                        base_system
+                            .atlas
+                            .uv_from_pixels(title_atlas_rect.top as f32 - blur_pixels as f32),
                     ],
                 )
                 .push_constant_slice(
@@ -1564,7 +1514,7 @@ impl SpriteListPaneView {
                     &br::RenderPassBeginInfo::new(
                         &render_pass,
                         &framebuffer,
-                        title_blurred_atlas_rect.vk_rect(),
+                        blurred_atlas_rect.vk_rect(),
                         &[br::ClearValue::color_f32([0.0; 4])],
                     ),
                     &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
@@ -1593,39 +1543,49 @@ impl SpriteListPaneView {
                 .end_render_pass2(&br::SubpassEndInfo::new())
             })
             .unwrap();
-        drop((
-            pipeline_blur1,
-            pipeline_blur,
-            blur_pipeline_layout,
-            ds_title,
-            ds_title2,
-            dp,
-            dsl_tex1,
-            smp,
-            fsh_blur,
-            vsh_blur,
-            title_blurred_work_framebuffer,
-            framebuffer,
-            render_pass,
-            title_blurred_work_image_view,
-            title_blurred_work_image_mem,
-        ));
+    }
+
+    #[tracing::instrument(name = "SpriteListPaneView::new", skip(init))]
+    pub fn new(init: &mut ViewInitContext, header_height: f32) -> Self {
+        let frame_image_atlas_rect = init
+            .base_system
+            .rounded_fill_rect_mask(
+                unsafe { SafeF32::new_unchecked(init.ui_scale_factor) },
+                Self::CORNER_RADIUS,
+            )
+            .unwrap();
+        let title_atlas_rect = init
+            .base_system
+            .text_mask(init.staging_scratch_buffer, FontType::UI, "Sprites")
+            .unwrap();
+
+        let title_blur_pixels =
+            (Self::BLUR_AMOUNT_ONEDIR as f32 * init.ui_scale_factor).ceil() as _;
+        let title_blurred_atlas_rect = init.base_system.alloc_mask_atlas_rect(
+            title_atlas_rect.width() + (title_blur_pixels * 2 + 1),
+            title_atlas_rect.height() + (title_blur_pixels * 2 + 1),
+        );
+        Self::gen_blurry_title(
+            init.base_system,
+            &title_atlas_rect,
+            &title_blurred_atlas_rect,
+            title_blur_pixels,
+        );
 
         let ct_root = init.base_system.register_composite_rect(CompositeRect {
+            base_scale_factor: init.ui_scale_factor,
             offset: [
-                AnimatableFloat::Value(Self::FLOATING_MARGIN * init.ui_scale_factor),
-                AnimatableFloat::Value(header_height * init.ui_scale_factor),
+                AnimatableFloat::Value(Self::FLOATING_MARGIN),
+                AnimatableFloat::Value(header_height),
             ],
             size: [
-                AnimatableFloat::Value(Self::INIT_WIDTH * init.ui_scale_factor),
-                AnimatableFloat::Value(
-                    -(header_height + Self::FLOATING_MARGIN) * init.ui_scale_factor,
-                ),
+                AnimatableFloat::Value(Self::INIT_WIDTH),
+                AnimatableFloat::Value(-(header_height + Self::FLOATING_MARGIN)),
             ],
             relative_size_adjustment: [0.0, 1.0],
             has_bitmap: true,
-            texatlas_rect: frame_image_atlas_rect.clone(),
-            slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor; 4],
+            texatlas_rect: frame_image_atlas_rect,
+            slice_borders: [Self::CORNER_RADIUS.value() * init.ui_scale_factor; 4],
             composite_mode: CompositeMode::ColorTintBackdropBlur(
                 AnimatableColor::Value([1.0, 1.0, 1.0, 0.0625]),
                 AnimatableFloat::Value(3.0),
@@ -1633,34 +1593,42 @@ impl SpriteListPaneView {
             ..Default::default()
         });
         let ct_title_blurred = init.base_system.register_composite_rect(CompositeRect {
+            base_scale_factor: init.ui_scale_factor,
             has_bitmap: true,
             offset: [
-                AnimatableFloat::Value(-(title_blurred_atlas_rect.width() as f32 * 0.5)),
                 AnimatableFloat::Value(
-                    (12.0 - Self::BLUR_AMOUNT_ONEDIR as f32) * init.ui_scale_factor,
+                    -(title_blurred_atlas_rect.width() as f32 / init.ui_scale_factor * 0.5),
                 ),
+                AnimatableFloat::Value(12.0 - Self::BLUR_AMOUNT_ONEDIR as f32),
             ],
             relative_offset_adjustment: [0.5, 0.0],
             size: [
-                AnimatableFloat::Value(title_blurred_atlas_rect.width() as f32),
-                AnimatableFloat::Value(title_blurred_atlas_rect.height() as f32),
+                AnimatableFloat::Value(
+                    title_blurred_atlas_rect.width() as f32 / init.ui_scale_factor,
+                ),
+                AnimatableFloat::Value(
+                    title_blurred_atlas_rect.height() as f32 / init.ui_scale_factor,
+                ),
             ],
-            texatlas_rect: title_blurred_atlas_rect.clone(),
-            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.1, 0.1, 0.1, 1.0])),
+            texatlas_rect: title_blurred_atlas_rect,
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.7, 0.7, 0.7, 1.0])),
             ..Default::default()
         });
         let ct_title = init.base_system.register_composite_rect(CompositeRect {
+            base_scale_factor: init.ui_scale_factor,
             has_bitmap: true,
             offset: [
-                AnimatableFloat::Value(-(title_atlas_rect.width() as f32 * 0.5)),
-                AnimatableFloat::Value(12.0 * init.ui_scale_factor),
+                AnimatableFloat::Value(
+                    -(title_atlas_rect.width() as f32 / init.ui_scale_factor * 0.5),
+                ),
+                AnimatableFloat::Value(12.0),
             ],
             relative_offset_adjustment: [0.5, 0.0],
             size: [
-                AnimatableFloat::Value(title_atlas_rect.width() as f32),
-                AnimatableFloat::Value(title_atlas_rect.height() as f32),
+                AnimatableFloat::Value(title_atlas_rect.width() as f32 / init.ui_scale_factor),
+                AnimatableFloat::Value(title_atlas_rect.height() as f32 / init.ui_scale_factor),
             ],
-            texatlas_rect: title_atlas_rect.clone(),
+            texatlas_rect: title_atlas_rect,
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
             ..Default::default()
         });
@@ -1694,6 +1662,8 @@ impl SpriteListPaneView {
             title_atlas_rect,
             title_blurred_atlas_rect,
             ct_root,
+            ct_title,
+            ct_title_blurred,
             ht_frame,
             ht_resize_area,
             width: Cell::new(Self::INIT_WIDTH),
@@ -1710,6 +1680,65 @@ impl SpriteListPaneView {
         ht_parent: HitTestTreeRef,
     ) {
         app_system.set_tree_parent((self.ct_root, self.ht_frame), (ct_parent, ht_parent));
+    }
+
+    fn rescale(
+        &self,
+        base_system: &mut AppBaseSystem,
+        staging_scratch_buffer: &mut StagingScratchBufferManager,
+        ui_scale_factor: SafeF32,
+    ) {
+        base_system.free_mask_atlas_rect(
+            self.ct_root
+                .entity(&base_system.composite_tree)
+                .texatlas_rect,
+        );
+        base_system.free_mask_atlas_rect(
+            self.ct_title
+                .entity(&base_system.composite_tree)
+                .texatlas_rect,
+        );
+        base_system.free_mask_atlas_rect(
+            self.ct_title_blurred
+                .entity(&base_system.composite_tree)
+                .texatlas_rect,
+        );
+
+        let frame_atlas_rect = base_system
+            .rounded_fill_rect_mask(ui_scale_factor, Self::CORNER_RADIUS)
+            .unwrap();
+        let title_atlas_rect = base_system
+            .text_mask(staging_scratch_buffer, FontType::UI, "Sprites")
+            .unwrap();
+        let title_blur_pixels =
+            (Self::BLUR_AMOUNT_ONEDIR as f32 * ui_scale_factor.value()).ceil() as _;
+        let title_blurred_atlas_rect = base_system.alloc_mask_atlas_rect(
+            title_atlas_rect.width() + (title_blur_pixels * 2 + 1),
+            title_atlas_rect.height() + (title_blur_pixels * 2 + 1),
+        );
+        Self::gen_blurry_title(
+            base_system,
+            &title_atlas_rect,
+            &title_blurred_atlas_rect,
+            title_blur_pixels,
+        );
+
+        let cr = self
+            .ct_root
+            .entity_mut_dirtified(&mut base_system.composite_tree);
+        cr.texatlas_rect = frame_atlas_rect;
+        cr.slice_borders = [Self::CORNER_RADIUS.value() * ui_scale_factor.value(); 4];
+        cr.base_scale_factor = ui_scale_factor.value();
+        let cr = self
+            .ct_title
+            .entity_mut_dirtified(&mut base_system.composite_tree);
+        cr.texatlas_rect = title_atlas_rect;
+        cr.base_scale_factor = ui_scale_factor.value();
+        let cr = self
+            .ct_title_blurred
+            .entity_mut_dirtified(&mut base_system.composite_tree);
+        cr.texatlas_rect = title_blurred_atlas_rect;
+        cr.base_scale_factor = ui_scale_factor.value();
     }
 
     pub fn update(&self, app_system: &mut AppBaseSystem, current_sec: f32) {
@@ -2038,6 +2067,24 @@ impl SpriteListPanePresenter {
         self.view.mount(app_system, ct_parent, ht_parent);
     }
 
+    pub fn rescale(
+        &mut self,
+        base_system: &mut AppBaseSystem,
+        staging_scratch_buffer: &mut StagingScratchBufferManager,
+        ui_scale_factor: SafeF32,
+    ) {
+        self.ui_scale_factor = ui_scale_factor.value();
+
+        self.view
+            .rescale(base_system, staging_scratch_buffer, ui_scale_factor);
+        self.ht_action_handler
+            .toggle_button_view
+            .rescale(base_system, ui_scale_factor);
+        for v in self.ht_action_handler.cell_views.borrow().iter() {
+            v.rescale(base_system, staging_scratch_buffer, ui_scale_factor);
+        }
+    }
+
     pub fn update<'r, 'base_system, 'subsystem>(
         &mut self,
         app_system: &'base_system mut AppBaseSystem<'subsystem>,
@@ -2084,7 +2131,7 @@ impl SpriteListPanePresenter {
 
                 // reuse existing
                 cell_views[n].set_top(32.0 + n as f32 * SpriteListCellView::HEIGHT, app_system);
-                cell_views[n].set_name(c, app_system.subsystem);
+                cell_views[n].set_label(c, app_system, staging_scratch_buffer);
                 cell_views[n].bind_sprite_index(n);
                 if sel {
                     cell_views[n].on_select(&mut app_system.composite_tree);
@@ -4193,6 +4240,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     // initial post event
     events.push(AppEvent::ToplevelWindowFrameTiming);
 
+    let mut active_ui_scale = app_shell.ui_scale_factor();
     let mut newsize_request = None;
     let t = std::time::Instant::now();
     let mut last_pointer_pos = (0.0f32, 0.0f32);
@@ -4338,6 +4386,43 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                 // timeout
                 events.push(AppEvent::ToplevelWindowFrameTiming);
             }
+        }
+
+        let current_ui_scale = app_shell.ui_scale_factor();
+        if active_ui_scale != current_ui_scale {
+            tracing::info!(
+                from = active_ui_scale,
+                to = current_ui_scale,
+                "UI Rescaling"
+            );
+            active_ui_scale = current_ui_scale;
+            app_system.rescale_fonts(active_ui_scale);
+
+            let mut staging_scratch_buffer_locked =
+                parking_lot::RwLockWriteGuard::map(staging_scratch_buffers.write(), |x| {
+                    x.active_buffer_mut()
+                });
+
+            app_header.rescale(
+                app_system,
+                &mut staging_scratch_buffer_locked,
+                active_ui_scale,
+            );
+            app_menu.rescale(
+                app_system,
+                &mut staging_scratch_buffer_locked,
+                active_ui_scale,
+            );
+            current_selected_sprite_marker_view.rescale(app_system, active_ui_scale);
+            sprite_list_pane.rescale(app_system, &mut staging_scratch_buffer_locked, unsafe {
+                SafeF32::new_unchecked(active_ui_scale)
+            });
+
+            tracing::debug!(
+                byte_size = staging_scratch_buffer_locked.total_reserved_amount(),
+                "Reserved Staging Buffers during Popup UI",
+            );
+            staging_scratch_buffer_locked.reset();
         }
 
         task_worker.try_tick();

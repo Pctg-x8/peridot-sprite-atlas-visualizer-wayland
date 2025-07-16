@@ -20,6 +20,7 @@ mod trigger_cell;
 mod uikit;
 
 use helper_types::SafeF32;
+use shared_perflog_proto::{ProfileMarker, ProfileMarkerCategory};
 #[cfg(unix)]
 use wayland as wl;
 
@@ -2522,7 +2523,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     // initial post event
     events.push(AppEvent::ToplevelWindowFrameTiming);
 
-    let mut _profiler = ProfilingContext::init("./profile");
+    let mut _profiler = ProfilingContext::init("./local/profile");
     let mut active_ui_scale = app_shell.ui_scale_factor();
     let mut newsize_request = None;
     let t = std::time::Instant::now();
@@ -3498,6 +3499,10 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         last_updating = true;
                     }
 
+                    _pf.record(
+                        ProfileMarker::MainCommandBufferPopulation,
+                        ProfileMarkerCategory::Begin,
+                    );
                     if main_cb_invalid {
                         if last_composite_render_instructions.render_passes[0]
                             != editing_atlas_current_bound_pipeline
@@ -3674,7 +3679,15 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
 
                         main_cb_invalid = false;
                     }
+                    _pf.record(
+                        ProfileMarker::MainCommandBufferPopulation,
+                        ProfileMarkerCategory::End,
+                    );
 
+                    _pf.record(
+                        ProfileMarker::RenderWorkSubmission,
+                        ProfileMarkerCategory::Begin,
+                    );
                     let next = match sc.acquire_next(
                         None,
                         br::CompletionHandlerMut::Queue(
@@ -3728,6 +3741,10 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                             std::process::abort();
                         }
                     }
+                    _pf.record(
+                        ProfileMarker::RenderWorkSubmission,
+                        ProfileMarkerCategory::End,
+                    );
 
                     app_shell.request_next_frame();
                     drop(_pf);

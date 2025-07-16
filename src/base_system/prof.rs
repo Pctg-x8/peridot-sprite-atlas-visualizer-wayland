@@ -37,6 +37,11 @@ impl<'p> ProfilingFrameContext<'p> {
     }
 
     #[inline(always)]
+    pub fn record(&mut self, marker: ProfileMarker, cat: ProfileMarkerCategory) {
+        self.ctx.append_now(marker, cat);
+    }
+
+    #[inline(always)]
     pub fn begin_resize(&mut self) {
         self.ctx
             .append_now(ProfileMarker::Resize, ProfileMarkerCategory::Begin);

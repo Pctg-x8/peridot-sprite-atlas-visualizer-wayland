@@ -13,17 +13,18 @@ use image::EncodableLayout;
 use parking_lot::RwLock;
 
 use crate::{
-    BLEND_STATE_SINGLE_NONE, BLEND_STATE_SINGLE_PREMULTIPLIED, BufferedStagingScratchBuffer,
-    IA_STATE_TRILIST, IA_STATE_TRISTRIP, MS_STATE_EMPTY, RASTER_STATE_DEFAULT_FILL_NOCULL,
-    VI_STATE_EMPTY, VI_STATE_FLOAT4_ONLY,
+    BLEND_STATE_SINGLE_NONE, BLEND_STATE_SINGLE_PREMULTIPLIED, IA_STATE_TRILIST, IA_STATE_TRISTRIP,
+    MS_STATE_EMPTY, RASTER_STATE_DEFAULT_FILL_NOCULL, VI_STATE_EMPTY, VI_STATE_FLOAT4_ONLY,
     app_state::SpriteInfo,
-    base_system::AppBaseSystem,
+    base_system::{
+        AppBaseSystem,
+        scratch_buffer::{
+            BufferedStagingScratchBuffer, StagingScratchBufferManager, StagingScratchBufferMapMode,
+        },
+    },
     bg_worker::{BackgroundWork, BackgroundWorkerEnqueueAccess},
     coordinate::SizePixels,
-    subsystem::{
-        StagingScratchBufferManager, StagingScratchBufferMapMode, Subsystem,
-        SubsystemShaderModuleRef,
-    },
+    subsystem::Subsystem,
 };
 
 #[repr(C)]
@@ -250,10 +251,6 @@ pub struct EditingAtlasRenderer<'d> {
     bg_vertex_buffer_is_dirty: bool,
     pub bg_vertex_buffer: br::BufferObject<&'d Subsystem>,
     _bg_vertex_buffer_memory: br::DeviceMemoryObject<&'d Subsystem>,
-    grid_vsh: SubsystemShaderModuleRef<'d>,
-    grid_fsh: SubsystemShaderModuleRef<'d>,
-    bg_vsh: SubsystemShaderModuleRef<'d>,
-    bg_fsh: SubsystemShaderModuleRef<'d>,
     pub render_pipeline_layout: br::PipelineLayoutObject<&'d Subsystem>,
     pub render_pipeline: br::PipelineObject<&'d Subsystem>,
     pub bg_render_pipeline: br::PipelineObject<&'d Subsystem>,
@@ -265,8 +262,6 @@ pub struct EditingAtlasRenderer<'d> {
     loaded_sprite_source_atlas: RefCell<LoadedSpriteSourceAtlas<'d>>,
     sprite_instance_buffers: RefCell<SpriteInstanceBuffers<'d>>,
     sprite_atlas_rect_by_path: RefCell<HashMap<PathBuf, (u32, u32, u32, u32)>>,
-    sprite_instance_vsh: SubsystemShaderModuleRef<'d>,
-    sprite_instance_fsh: SubsystemShaderModuleRef<'d>,
     sprite_instance_render_pipeline_layout: br::PipelineLayoutObject<&'d Subsystem>,
     sprite_instance_render_pipeline: br::PipelineObject<&'d Subsystem>,
     sprite_count: Cell<usize>,
@@ -274,15 +269,12 @@ pub struct EditingAtlasRenderer<'d> {
 }
 impl<'d> EditingAtlasRenderer<'d> {
     #[tracing::instrument(skip(app_system, rendered_pass))]
-    pub fn new<'app_system>(
-        app_system: &'app_system AppBaseSystem<'d>,
+    pub fn new(
+        app_system: &AppBaseSystem<'d>,
         rendered_pass: br::SubpassRef<impl br::RenderPass>,
         main_buffer_size: br::Extent2D,
         init_atlas_size: SizePixels,
-    ) -> Self
-    where
-        'd: 'app_system,
-    {
+    ) -> Self {
         let sprite_sampler =
             br::SamplerObject::new(app_system.subsystem, &br::SamplerCreateInfo::new()).unwrap();
 
@@ -565,18 +557,12 @@ impl<'d> EditingAtlasRenderer<'d> {
             _dp: dp,
             ds_param,
             ds_sprite_instance,
-            grid_vsh: vsh,
-            grid_fsh: fsh,
-            bg_vsh,
-            bg_fsh,
             render_pipeline_layout,
             render_pipeline,
             bg_render_pipeline,
             loaded_sprite_source_atlas: RefCell::new(loaded_sprite_source_atlas),
             sprite_instance_buffers: RefCell::new(sprite_instance_buffers),
             sprite_atlas_rect_by_path: RefCell::new(HashMap::new()),
-            sprite_instance_vsh,
-            sprite_instance_fsh,
             sprite_instance_render_pipeline_layout,
             sprite_instance_render_pipeline,
             sprite_count: Cell::new(0),
@@ -899,22 +885,29 @@ impl<'d> EditingAtlasRenderer<'d> {
 
     pub fn recreate(
         &mut self,
-        device: &'d Subsystem,
+        app_system: &AppBaseSystem<'d>,
         rendered_pass: br::SubpassRef<impl br::RenderPass>,
         main_buffer_size: br::Extent2D,
     ) {
+        let grid_vsh = app_system.require_shader("resources/filltri.vert");
+        let grid_fsh = app_system.require_shader("resources/grid.frag");
+        let bg_vsh = app_system.require_shader("resources/atlas_bg.vert");
+        let bg_fsh = app_system.require_shader("resources/atlas_bg.frag");
+        let sprite_instance_vsh = app_system.require_shader("resources/sprite_instance.vert");
+        let sprite_instance_fsh = app_system.require_shader("resources/sprite_instance.frag");
+
         let [
             render_pipeline,
             bg_render_pipeline,
             sprite_instance_render_pipeline,
-        ] = device
+        ] = app_system
             .create_graphics_pipelines_array(&[
                 br::GraphicsPipelineCreateInfo::new(
                     &self.render_pipeline_layout,
                     rendered_pass,
                     &[
-                        self.grid_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
-                        self.grid_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
+                        grid_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+                        grid_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
                     ],
                     VI_STATE_EMPTY,
                     IA_STATE_TRILIST,
@@ -932,8 +925,8 @@ impl<'d> EditingAtlasRenderer<'d> {
                     &self.render_pipeline_layout,
                     rendered_pass,
                     &[
-                        self.bg_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
-                        self.bg_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
+                        bg_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+                        bg_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
                     ],
                     VI_STATE_FLOAT4_ONLY,
                     IA_STATE_TRISTRIP,
@@ -951,10 +944,8 @@ impl<'d> EditingAtlasRenderer<'d> {
                     &self.sprite_instance_render_pipeline_layout,
                     rendered_pass,
                     &[
-                        self.sprite_instance_vsh
-                            .on_stage(br::ShaderStage::Vertex, c"main"),
-                        self.sprite_instance_fsh
-                            .on_stage(br::ShaderStage::Fragment, c"main"),
+                        sprite_instance_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+                        sprite_instance_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
                     ],
                     &br::PipelineVertexInputStateCreateInfo::new(
                         &[br::VertexInputBindingDescription::per_instance_typed::<

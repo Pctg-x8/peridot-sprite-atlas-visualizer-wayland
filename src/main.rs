@@ -34,7 +34,10 @@ use std::{
 
 use crate::{composite::FloatParameter, quadtree::QuadTree};
 use app_state::{AppState, SpriteInfo};
-use base_system::{AppBaseSystem, RenderPassOptions};
+use base_system::{
+    AppBaseSystem, RenderPassOptions,
+    scratch_buffer::{BufferedStagingScratchBuffer, StagingScratchBufferManager},
+};
 use bedrock::{
     self as br, CommandBufferMut, CommandPoolMut, DescriptorPoolMut, Device, Fence, FenceMut,
     ImageChild, InstanceChild, MemoryBound, PhysicalDevice, RenderPass, ShaderModule, Swapchain,
@@ -54,7 +57,7 @@ use hittest::{HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, Hit
 use input::EventContinueControl;
 use parking_lot::RwLock;
 use shell::AppShell;
-use subsystem::{StagingScratchBufferManager, Subsystem};
+use subsystem::Subsystem;
 
 pub enum AppEvent {
     ToplevelWindowNewSize {
@@ -238,44 +241,6 @@ pub struct AppUpdateContext<'d, 'subsystem> {
     pub event_queue: &'d AppEventBus,
     pub state: &'d RefCell<AppState<'subsystem>>,
     pub ui_scale_factor: f32,
-}
-
-pub struct BufferedStagingScratchBuffer<'subsystem> {
-    buffers: Vec<RwLock<StagingScratchBufferManager<'subsystem>>>,
-    active_index: usize,
-}
-impl<'subsystem> BufferedStagingScratchBuffer<'subsystem> {
-    pub fn new(subsystem: &'subsystem Subsystem, count: usize) -> Self {
-        Self {
-            buffers: core::iter::repeat_with(|| {
-                RwLock::new(StagingScratchBufferManager::new(subsystem))
-            })
-            .take(count)
-            .collect(),
-            active_index: 0,
-        }
-    }
-
-    pub fn flip_next_and_ready(&mut self) {
-        self.active_index = (self.active_index + 1) % self.buffers.len();
-        self.buffers[self.active_index].get_mut().reset();
-    }
-
-    pub fn active_buffer<'s>(
-        &'s self,
-    ) -> parking_lot::RwLockReadGuard<'s, StagingScratchBufferManager<'subsystem>> {
-        self.buffers[self.active_index].read()
-    }
-
-    pub fn active_buffer_mut<'s>(&'s mut self) -> &'s mut StagingScratchBufferManager<'subsystem> {
-        self.buffers[self.active_index].get_mut()
-    }
-
-    pub fn active_buffer_locked<'s>(
-        &'s self,
-    ) -> parking_lot::RwLockWriteGuard<'s, StagingScratchBufferManager<'subsystem>> {
-        self.buffers[self.active_index].write()
-    }
 }
 
 const fn const_subpass_description_2_single_color_write_only<const ATTACHMENT_INDEX: u32>()
@@ -2967,6 +2932,33 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                             &[],
                         );
 
+                        let composite_vsh = app_system.require_shader("resources/composite.vert");
+                        let composite_fsh = app_system.require_shader("resources/composite.frag");
+                        let composite_shader_stages = [
+                            composite_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+                            composite_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
+                        ];
+                        let composite_backdrop_blur_downsample_vsh = app_system
+                            .require_shader("resources/dual_kawase_filter/downsample.vert");
+                        let composite_backdrop_blur_downsample_fsh = app_system
+                            .require_shader("resources/dual_kawase_filter/downsample.frag");
+                        let composite_backdrop_blur_upsample_vsh =
+                            app_system.require_shader("resources/dual_kawase_filter/upsample.vert");
+                        let composite_backdrop_blur_upsample_fsh =
+                            app_system.require_shader("resources/dual_kawase_filter/upsample.frag");
+                        let composite_backdrop_blur_downsample_stages = [
+                            composite_backdrop_blur_downsample_vsh
+                                .on_stage(br::ShaderStage::Vertex, c"main"),
+                            composite_backdrop_blur_downsample_fsh
+                                .on_stage(br::ShaderStage::Fragment, c"main"),
+                        ];
+                        let composite_backdrop_blur_upsample_stages = [
+                            composite_backdrop_blur_upsample_vsh
+                                .on_stage(br::ShaderStage::Vertex, c"main"),
+                            composite_backdrop_blur_upsample_fsh
+                                .on_stage(br::ShaderStage::Fragment, c"main"),
+                        ];
+
                         let screen_viewport = [sc
                             .size
                             .into_rect(br::Offset2D::ZERO)
@@ -3161,7 +3153,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         }
 
                         editing_atlas_renderer.borrow_mut().recreate(
-                            &app_system.subsystem,
+                            app_system,
                             match editing_atlas_current_bound_pipeline {
                                 RenderPassRequirements {
                                     continued: false,
@@ -3508,7 +3500,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                             editing_atlas_current_bound_pipeline =
                                 last_composite_render_instructions.render_passes[0];
                             editing_atlas_renderer.borrow_mut().recreate(
-                                &app_system.subsystem,
+                                app_system,
                                 match (
                                     editing_atlas_current_bound_pipeline.after_operation,
                                     editing_atlas_current_bound_pipeline.continued,

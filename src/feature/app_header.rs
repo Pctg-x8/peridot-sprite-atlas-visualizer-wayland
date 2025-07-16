@@ -8,6 +8,7 @@ use crate::{
     base_system::{
         AppBaseSystem, BufferMapMode, FontType, MemoryBoundBuffer, PixelFormat, RenderPassOptions,
         RenderTexture, RenderTextureFlags, RenderTextureOptions,
+        scratch_buffer::{StagingScratchBufferManager, StagingScratchBufferMapMode},
     },
     composite::{
         AnimatableColor, AnimatableFloat, AnimationCurve, AtlasRect, CompositeMode, CompositeRect,
@@ -15,7 +16,6 @@ use crate::{
     },
     hittest::{HitTestTreeActionHandler, HitTestTreeData, HitTestTreeRef, PointerActionArgs, Role},
     input::EventContinueControl,
-    subsystem::{StagingScratchBufferManager, StagingScratchBufferMapMode},
 };
 
 #[derive(Debug, Clone, Copy)]

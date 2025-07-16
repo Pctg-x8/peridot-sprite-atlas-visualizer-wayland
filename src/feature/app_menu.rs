@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     AppEvent, AppUpdateContext, PresenterInitContext, ViewInitContext,
-    base_system::{AppBaseSystem, FontType},
+    base_system::{AppBaseSystem, FontType, scratch_buffer::StagingScratchBufferManager},
     composite::{
         AnimatableColor, AnimatableFloat, AnimationCurve, CompositeMode, CompositeRect,
         CompositeTreeFloatParameterRef, CompositeTreeRef, FloatParameter,
@@ -14,7 +14,6 @@ use crate::{
     helper_types::SafeF32,
     hittest::{self, HitTestTreeActionHandler, HitTestTreeData, HitTestTreeRef},
     input::EventContinueControl,
-    subsystem::StagingScratchBufferManager,
     trigger_cell::TriggerCell,
 };
 

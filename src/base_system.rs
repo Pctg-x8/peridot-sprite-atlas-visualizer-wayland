@@ -1,4 +1,10 @@
-use std::{cell::RefCell, collections::HashMap, path::Path, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    io::Read,
+    path::{Path, PathBuf},
+    rc::Rc,
+};
 
 use crate::{
     BLEND_STATE_SINGLE_NONE, FillcolorRConstants, IA_STATE_TRIFAN, IA_STATE_TRILIST,
@@ -11,7 +17,7 @@ use crate::{
     },
     helper_types::SafeF32,
     hittest::{HitTestTreeData, HitTestTreeManager, HitTestTreeRef},
-    subsystem::{StagingScratchBufferManager, Subsystem, SubsystemShaderModuleRef},
+    subsystem::Subsystem,
     text::TextLayout,
 };
 
@@ -20,6 +26,10 @@ use bedrock::{
     MemoryBound, RenderPass, ShaderModule, VkHandle,
 };
 use bitflags::bitflags;
+use parking_lot::RwLock;
+use scratch_buffer::StagingScratchBufferManager;
+
+pub mod scratch_buffer;
 
 pub struct FontSet {
     pub ui_default: freetype::Owned<freetype::Face>,
@@ -49,6 +59,7 @@ pub struct AppBaseSystem<'subsystem> {
     text_cache: HashMap<FontType, HashMap<String, AtlasRect>>,
     render_to_mask_atlas_pass_cache:
         RefCell<HashMap<RenderPassOptions, Rc<br::RenderPassObject<&'subsystem Subsystem>>>>,
+    loaded_shader_modules: RwLock<HashMap<PathBuf, br::vk::VkShaderModule>>,
 }
 impl Drop for AppBaseSystem<'_> {
     fn drop(&mut self) {
@@ -56,6 +67,10 @@ impl Drop for AppBaseSystem<'_> {
             self.composite_instance_manager
                 .drop_with_gfx_device(&self.subsystem);
             self.atlas.drop_with_gfx_device(&self.subsystem);
+
+            for (_, v) in self.loaded_shader_modules.get_mut().drain() {
+                br::vkfn::destroy_shader_module(self.subsystem.native_ptr(), v, core::ptr::null());
+            }
         }
     }
 }
@@ -136,6 +151,7 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
             rounded_rect_cache: HashMap::new(),
             text_cache: HashMap::new(),
             render_to_mask_atlas_pass_cache: RefCell::new(HashMap::new()),
+            loaded_shader_modules: RwLock::new(HashMap::new()),
         }
     }
 
@@ -1284,9 +1300,36 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         self.subsystem.is_coherent_memory_type(index)
     }
 
-    #[inline(always)]
-    pub fn require_shader(&self, path: impl AsRef<Path>) -> SubsystemShaderModuleRef<'subsystem> {
-        self.subsystem.require_shader(path)
+    #[tracing::instrument(name = "AppBaseSystem::load_shader", skip(self), fields(path = %path.as_ref().display()), err(Display))]
+    pub fn load_shader<'d>(
+        &'d self,
+        path: impl AsRef<Path>,
+    ) -> Result<ShaderModuleRef<'d>, LoadShaderError> {
+        if let Some(&loaded) = self.loaded_shader_modules.read().get(path.as_ref()) {
+            return Ok(ShaderModuleRef(unsafe {
+                br::VkHandleRef::dangling(loaded)
+            }));
+        }
+
+        tracing::info!("Loading fresh shader");
+        let obj = br::ShaderModuleObject::new(
+            self.subsystem,
+            &br::ShaderModuleCreateInfo::new(&load_spv_file(&path)?),
+        )?
+        .unmanage()
+        .0;
+        self.loaded_shader_modules
+            .write()
+            .insert(path.as_ref().to_owned(), obj);
+        Ok(ShaderModuleRef(unsafe { br::VkHandleRef::dangling(obj) }))
+    }
+
+    #[tracing::instrument(name = "AppBaseSystem::require_shader", skip(self), fields(path = %path.as_ref().display()))]
+    pub fn require_shader<'d>(&'d self, path: impl AsRef<Path>) -> ShaderModuleRef<'d> {
+        match self.load_shader(path) {
+            Ok(x) => x,
+            Err(_) => panic!("could not load required shader"),
+        }
     }
 
     #[inline(always)]
@@ -1370,6 +1413,38 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         self.alloc_device_local_memory(req.size, req.memoryTypeBits)
     }
 }
+
+#[derive(Debug, thiserror::Error)]
+pub enum LoadShaderError {
+    #[error(transparent)]
+    Vk(#[from] br::vk::VkResult),
+    #[error(transparent)]
+    IO(#[from] std::io::Error),
+}
+
+fn load_spv_file(path: impl AsRef<Path>) -> std::io::Result<Vec<u32>> {
+    let mut f = std::fs::File::open(path)?;
+    let byte_length = f.metadata()?.len();
+    assert!((byte_length & 0x03) == 0);
+    let mut words = vec![0u32; byte_length as usize >> 2];
+    f.read_exact(unsafe {
+        core::slice::from_raw_parts_mut(words.as_mut_ptr() as *mut u8, words.len() << 2)
+    })?;
+
+    Ok(words)
+}
+
+#[repr(transparent)]
+pub struct ShaderModuleRef<'a>(br::VkHandleRef<'a, br::vk::VkShaderModule>);
+impl br::VkHandle for ShaderModuleRef<'_> {
+    type Handle = br::vk::VkShaderModule;
+
+    #[inline]
+    fn native_ptr(&self) -> Self::Handle {
+        self.0.native_ptr()
+    }
+}
+impl br::ShaderModule for ShaderModuleRef<'_> {}
 
 bitflags! {
     #[derive(Debug, Clone, Copy)]

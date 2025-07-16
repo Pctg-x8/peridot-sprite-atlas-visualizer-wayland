@@ -11,6 +11,7 @@ use crate::{
     base_system::{
         AppBaseSystem, BufferMapMode, FontType, MemoryBoundBuffer, PixelFormat, RenderPassOptions,
         RenderTexture, RenderTextureFlags, RenderTextureOptions,
+        scratch_buffer::StagingScratchBufferManager,
     },
     composite::{
         AnimatableColor, AnimatableFloat, AnimationCurve, AtlasRect, ClipConfig, CompositeMode,
@@ -22,7 +23,6 @@ use crate::{
         CursorShape, HitTestTreeActionHandler, HitTestTreeData, HitTestTreeRef, PointerActionArgs,
     },
     input::EventContinueControl,
-    subsystem::StagingScratchBufferManager,
     trigger_cell::TriggerCell,
 };
 

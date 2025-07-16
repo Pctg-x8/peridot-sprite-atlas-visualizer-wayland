@@ -1,15 +1,13 @@
 use std::rc::Rc;
 
-use bedrock::{self as br, RenderPass, ShaderModule, VkHandle};
-
 use crate::{
-    AppEvent, BLEND_STATE_SINGLE_NONE, IA_STATE_TRILIST, MS_STATE_EMPTY,
-    RASTER_STATE_DEFAULT_FILL_NOCULL, RoundedRectConstants, VI_STATE_EMPTY, ViewInitContext,
+    AppEvent, ViewInitContext,
     base_system::AppBaseSystem,
     composite::{
         AnimatableColor, AnimatableFloat, AnimationCurve, CompositeMode, CompositeRect,
         CompositeTree, CompositeTreeRef,
     },
+    helper_types::SafeF32,
     hittest::{HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef},
 };
 
@@ -136,146 +134,24 @@ pub struct CommonFrameView {
     ui_scale_factor: f32,
 }
 impl CommonFrameView {
-    const CORNER_RADIUS: f32 = 16.0;
+    const CORNER_RADIUS: SafeF32 = unsafe { SafeF32::new_unchecked(16.0) };
 
     pub fn new(init: &mut ViewInitContext, width: f32, height: f32) -> Self {
-        let render_size_px =
-            ((Self::CORNER_RADIUS * 2.0 + 1.0) * init.ui_scale_factor.ceil()) as u32;
         let frame_image_atlas_rect = init
             .base_system
-            .alloc_mask_atlas_rect(render_size_px, render_size_px);
+            .rounded_fill_rect_mask(
+                unsafe { SafeF32::new_unchecked(init.ui_scale_factor.ceil()) },
+                Self::CORNER_RADIUS,
+            )
+            .unwrap();
         let frame_border_image_atlas_rect = init
             .base_system
-            .alloc_mask_atlas_rect(render_size_px, render_size_px);
-
-        let render_pass = br::RenderPassObject::new(
-            &init.base_system.subsystem,
-            &br::RenderPassCreateInfo2::new(
-                &[
-                    br::AttachmentDescription2::new(init.base_system.mask_atlas_format())
-                        .with_layout_to(br::ImageLayout::ShaderReadOnlyOpt.from_undefined())
-                        .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store),
-                ],
-                &[br::SubpassDescription2::new()
-                    .colors(&[br::AttachmentReference2::color_attachment_opt(0)])],
-                &[br::SubpassDependency2::new(
-                    br::SubpassIndex::Internal(0),
-                    br::SubpassIndex::External,
-                )
-                .of_memory(
-                    br::AccessFlags::COLOR_ATTACHMENT.write,
-                    br::AccessFlags::SHADER.read,
-                )
-                .of_execution(
-                    br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                    br::PipelineStageFlags::FRAGMENT_SHADER,
-                )],
-            ),
-        )
-        .unwrap();
-        let framebuffer = br::FramebufferObject::new(
-            &init.base_system.subsystem,
-            &br::FramebufferCreateInfo::new(
-                &render_pass,
-                &[init
-                    .base_system
-                    .mask_atlas_resource_transparent_ref()
-                    .as_transparent_ref()],
-                init.base_system.mask_atlas_size(),
-                init.base_system.mask_atlas_size(),
-            ),
-        )
-        .unwrap();
-
-        let [pipeline, pipeline_border] = init
-            .base_system
-            .create_graphics_pipelines_array(&[
-                br::GraphicsPipelineCreateInfo::new(
-                    init.base_system.require_empty_pipeline_layout(),
-                    render_pass.subpass(0),
-                    &[
-                        init.base_system
-                            .require_shader("resources/filltri.vert")
-                            .on_stage(br::ShaderStage::Vertex, c"main"),
-                        init.base_system
-                            .require_shader("resources/rounded_rect.frag")
-                            .on_stage(br::ShaderStage::Fragment, c"main")
-                            .with_specialization_info(&br::SpecializationInfo::new(
-                                &RoundedRectConstants {
-                                    corner_radius: Self::CORNER_RADIUS,
-                                },
-                            )),
-                    ],
-                    VI_STATE_EMPTY,
-                    IA_STATE_TRILIST,
-                    &br::PipelineViewportStateCreateInfo::new(
-                        &[frame_image_atlas_rect.vk_rect().make_viewport(0.0..1.0)],
-                        &[frame_image_atlas_rect.vk_rect()],
-                    ),
-                    RASTER_STATE_DEFAULT_FILL_NOCULL,
-                    BLEND_STATE_SINGLE_NONE,
-                )
-                .set_multisample_state(MS_STATE_EMPTY),
-                br::GraphicsPipelineCreateInfo::new(
-                    init.base_system.require_empty_pipeline_layout(),
-                    render_pass.subpass(0),
-                    &[
-                        init.base_system
-                            .require_shader("resources/filltri.vert")
-                            .on_stage(br::ShaderStage::Vertex, c"main"),
-                        init.base_system
-                            .require_shader("resources/rounded_rect_border.frag")
-                            .on_stage(br::ShaderStage::Fragment, c"main")
-                            .with_specialization_info(&br::SpecializationInfo::new(
-                                &RoundedRectConstants {
-                                    corner_radius: Self::CORNER_RADIUS,
-                                },
-                            )),
-                    ],
-                    VI_STATE_EMPTY,
-                    IA_STATE_TRILIST,
-                    &br::PipelineViewportStateCreateInfo::new(
-                        &[frame_border_image_atlas_rect
-                            .vk_rect()
-                            .make_viewport(0.0..1.0)],
-                        &[frame_border_image_atlas_rect.vk_rect()],
-                    ),
-                    RASTER_STATE_DEFAULT_FILL_NOCULL,
-                    BLEND_STATE_SINGLE_NONE,
-                )
-                .set_multisample_state(MS_STATE_EMPTY),
-            ])
+            .rounded_rect_mask(
+                unsafe { SafeF32::new_unchecked(init.ui_scale_factor.ceil()) },
+                Self::CORNER_RADIUS,
+                unsafe { SafeF32::new_unchecked(1.0) },
+            )
             .unwrap();
-
-        init.base_system
-            .sync_execute_graphics_commands(|rec| {
-                rec.begin_render_pass2(
-                    &br::RenderPassBeginInfo::new(
-                        &render_pass,
-                        &framebuffer,
-                        frame_image_atlas_rect.vk_rect(),
-                        &[br::ClearValue::color_f32([0.0; 4])],
-                    ),
-                    &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-                )
-                .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline)
-                .draw(3, 1, 0, 0)
-                .end_render_pass2(&br::SubpassEndInfo::new())
-                .begin_render_pass2(
-                    &br::RenderPassBeginInfo::new(
-                        &render_pass,
-                        &framebuffer,
-                        frame_border_image_atlas_rect.vk_rect(),
-                        &[br::ClearValue::color_f32([0.0; 4])],
-                    ),
-                    &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-                )
-                .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline_border)
-                .draw(3, 1, 0, 0)
-                .end_render_pass2(&br::SubpassEndInfo::new())
-            })
-            .unwrap();
-        drop((pipeline, pipeline_border, framebuffer, render_pass));
 
         let ct_root = init.base_system.register_composite_rect(CompositeRect {
             offset: [
@@ -289,7 +165,7 @@ impl CommonFrameView {
             ],
             has_bitmap: true,
             texatlas_rect: frame_image_atlas_rect,
-            slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor.ceil(); 4],
+            slice_borders: [Self::CORNER_RADIUS.value() * init.ui_scale_factor.ceil(); 4],
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.0, 0.0, 0.0, 1.0])),
             opacity: AnimatableFloat::Value(0.0),
             ..Default::default()
@@ -306,7 +182,7 @@ impl CommonFrameView {
             ],
             has_bitmap: true,
             texatlas_rect: frame_border_image_atlas_rect,
-            slice_borders: [Self::CORNER_RADIUS * init.ui_scale_factor.ceil(); 4],
+            slice_borders: [Self::CORNER_RADIUS.value() * init.ui_scale_factor.ceil(); 4],
             composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([
                 0.25, 0.25, 0.25, 1.0,
             ])),

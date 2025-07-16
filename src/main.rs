@@ -35,8 +35,8 @@ use std::{
 use crate::{composite::FloatParameter, quadtree::QuadTree};
 use app_state::{AppState, SpriteInfo};
 use base_system::{
-    AppBaseSystem, BufferMapMode, FontType, PixelFormat, RenderPassOptions, RenderTexture,
-    RenderTextureFlags, RenderTextureOptions,
+    AppBaseSystem, BufferMapMode, FontType, MemoryBoundBuffer, PixelFormat, RenderPassOptions,
+    RenderTexture, RenderTextureFlags, RenderTextureOptions,
 };
 use bedrock::{
     self as br, CommandBufferMut, CommandPoolMut, DescriptorPoolMut, Device, Fence, FenceMut,
@@ -199,6 +199,8 @@ pub struct FillcolorRConstants {
 pub struct RoundedRectConstants {
     #[constant_id = 0]
     pub corner_radius: f32,
+    #[constant_id = 1]
+    pub thickness: f32,
 }
 
 #[derive(br::SpecializationConstants)]
@@ -313,7 +315,7 @@ pub struct CurrentSelectedSpriteMarkerView {
 }
 impl CurrentSelectedSpriteMarkerView {
     const CORNER_RADIUS: SafeF32 = unsafe { SafeF32::new_unchecked(4.0) };
-    const THICKNESS: f32 = 2.0;
+    const THICKNESS: SafeF32 = unsafe { SafeF32::new_unchecked(2.0) };
     const COLOR: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
 
     pub fn new(init: &mut ViewInitContext) -> Self {
@@ -322,6 +324,7 @@ impl CurrentSelectedSpriteMarkerView {
             .rounded_rect_mask(
                 unsafe { SafeF32::new_unchecked(init.ui_scale_factor) },
                 Self::CORNER_RADIUS,
+                Self::THICKNESS,
             )
             .unwrap();
 
@@ -389,6 +392,7 @@ impl CurrentSelectedSpriteMarkerView {
             .rounded_rect_mask(
                 unsafe { SafeF32::new_unchecked(ui_scale_factor) },
                 Self::CORNER_RADIUS,
+                Self::THICKNESS,
             )
             .unwrap();
 
@@ -549,12 +553,12 @@ impl SpriteListToggleButtonView {
     ) {
         let bufsize = Self::ICON_VERTICES.len() * core::mem::size_of::<[f32; 2]>()
             + Self::ICON_INDICES.len() * core::mem::size_of::<u16>();
-        let mut buf = base_system
-            .new_writable_buffer(
-                bufsize,
-                br::BufferUsage::VERTEX_BUFFER | br::BufferUsage::INDEX_BUFFER,
-            )
-            .unwrap();
+        let mut buf = MemoryBoundBuffer::new_writable(
+            base_system,
+            bufsize,
+            br::BufferUsage::VERTEX_BUFFER | br::BufferUsage::INDEX_BUFFER,
+        )
+        .unwrap();
         let ptr = buf.map(0..bufsize, BufferMapMode::Write).unwrap();
         unsafe {
             ptr.addr_of_mut::<[f32; 2]>(0)

@@ -1,6 +1,7 @@
 #version 450
 
 layout(constant_id = 0) const float CornerRadius = 24.0;
+layout(constant_id = 1) const float Thickness = 1.0;
 
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 col_out;
@@ -9,7 +10,7 @@ float d_circle_border(vec2 p, vec2 center, float radius) {
     const float d = length(center - p);
 
     const float d_large = 1.0 - smoothstep(radius - 0.25, radius - 0.0, d);
-    const float d_small = smoothstep(radius - 1.0, radius - 0.75, d);
+    const float d_small = smoothstep(radius - (Thickness - 1.0) - 1.0, radius - (Thickness - 1.0) - 0.75, d);
 
     return d_large * d_small;
 }

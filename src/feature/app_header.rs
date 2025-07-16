@@ -6,8 +6,8 @@ use crate::{
     MS_STATE_EMPTY, PresenterInitContext, RASTER_STATE_DEFAULT_FILL_NOCULL, VI_STATE_FLOAT2_ONLY,
     ViewInitContext,
     base_system::{
-        AppBaseSystem, BufferMapMode, FontType, PixelFormat, RenderPassOptions, RenderTexture,
-        RenderTextureFlags, RenderTextureOptions,
+        AppBaseSystem, BufferMapMode, FontType, MemoryBoundBuffer, PixelFormat, RenderPassOptions,
+        RenderTexture, RenderTextureFlags, RenderTextureOptions,
     },
     composite::{
         AnimatableColor, AnimatableFloat, AnimationCurve, AtlasRect, CompositeMode, CompositeRect,
@@ -88,12 +88,12 @@ impl SystemCommandButtonView {
         let (vertices, indices) = Self::select_vertices_indices(cmd);
         let indices_offset = core::mem::size_of::<[f32; 2]>() * vertices.len();
         let bufsize = indices_offset + core::mem::size_of::<u16>() * indices.len();
-        let mut buf = base_system
-            .new_writable_buffer(
-                bufsize,
-                br::BufferUsage::VERTEX_BUFFER | br::BufferUsage::INDEX_BUFFER,
-            )
-            .unwrap();
+        let mut buf = MemoryBoundBuffer::new_writable(
+            base_system,
+            bufsize,
+            br::BufferUsage::VERTEX_BUFFER | br::BufferUsage::INDEX_BUFFER,
+        )
+        .unwrap();
         let p = buf.map(0..bufsize, BufferMapMode::Write).unwrap();
         unsafe {
             p.addr_of_mut::<[f32; 2]>(0)
@@ -422,12 +422,12 @@ impl MenuButtonView {
     fn render_icon(base_system: &AppBaseSystem, atlas_rect: &AtlasRect) {
         let size = core::mem::size_of::<[f32; 2]>() * Self::ICON_VERTICES.len()
             + core::mem::size_of::<u16>() * Self::ICON_INDICES.len();
-        let mut vbuf = base_system
-            .new_writable_buffer(
-                size,
-                br::BufferUsage::VERTEX_BUFFER | br::BufferUsage::INDEX_BUFFER,
-            )
-            .unwrap();
+        let mut vbuf = MemoryBoundBuffer::new_writable(
+            base_system,
+            size,
+            br::BufferUsage::VERTEX_BUFFER | br::BufferUsage::INDEX_BUFFER,
+        )
+        .unwrap();
         let ptr = vbuf.map(0..size, BufferMapMode::Write).unwrap();
         unsafe {
             ptr.addr_of_mut::<[f32; 2]>(0)

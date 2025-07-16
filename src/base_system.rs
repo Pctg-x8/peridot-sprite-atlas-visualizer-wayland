@@ -45,7 +45,7 @@ pub struct AppBaseSystem<'subsystem> {
     pub hit_tree: HitTestTreeManager<'subsystem>,
     pub fonts: FontSet,
     rounded_fill_rect_cache: HashMap<(SafeF32, SafeF32), AtlasRect>,
-    rounded_rect_cache: HashMap<(SafeF32, SafeF32), AtlasRect>,
+    rounded_rect_cache: HashMap<(SafeF32, SafeF32, SafeF32), AtlasRect>,
     text_cache: HashMap<FontType, HashMap<String, AtlasRect>>,
 }
 impl Drop for AppBaseSystem<'_> {
@@ -307,8 +307,12 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         &mut self,
         render_scale: SafeF32,
         radius: SafeF32,
+        thickness: SafeF32,
     ) -> br::Result<AtlasRect> {
-        if let Some(&r) = self.rounded_rect_cache.get(&(render_scale, radius)) {
+        if let Some(&r) = self
+            .rounded_rect_cache
+            .get(&(render_scale, radius, thickness))
+        {
             // found in cache
             return Ok(r);
         }
@@ -343,6 +347,7 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
                         .with_specialization_info(&br::SpecializationInfo::new(
                             &RoundedRectConstants {
                                 corner_radius: radius.value(),
+                                thickness: thickness.value(),
                             },
                         )),
                 ],
@@ -373,7 +378,7 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         })?;
 
         self.rounded_rect_cache
-            .insert((render_scale, radius), atlas_rect);
+            .insert((render_scale, radius, thickness), atlas_rect);
         Ok(atlas_rect)
     }
 
@@ -1260,36 +1265,6 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         self.subsystem.is_coherent_memory_type(index)
     }
 
-    #[tracing::instrument(name = "AppBaseSystem::new_writable_buffer", skip(self), err(Display))]
-    pub fn new_writable_buffer(
-        &self,
-        size: usize,
-        usage: br::BufferUsage,
-    ) -> br::Result<MemoryBoundBuffer<'subsystem>> {
-        // TODO: direct memoryにするかはサイズとかみて判断する
-        let mut b = br::BufferObject::new(self.subsystem, &br::BufferCreateInfo::new(size, usage))?;
-        let req = b.requirements();
-        let Some(memindex) = self.find_direct_memory_index(req.memoryTypeBits) else {
-            // TODO: return error
-            panic!("no suitable memory");
-        };
-        let mem = br::DeviceMemoryObject::new(
-            self.subsystem,
-            &br::MemoryAllocateInfo::new(req.size, memindex),
-        )?;
-        b.bind(&mem, 0)?;
-
-        Ok(MemoryBoundBuffer {
-            buffer: b,
-            memory: mem,
-            memory_characteristics: if self.is_coherent_memory_type(memindex) {
-                MemoryCharacteristics::COHERENT
-            } else {
-                MemoryCharacteristics::empty()
-            },
-        })
-    }
-
     #[inline(always)]
     pub fn require_shader(&self, path: impl AsRef<Path>) -> SubsystemShaderModuleRef<'subsystem> {
         self.subsystem.require_shader(path)
@@ -1400,6 +1375,14 @@ impl BufferMapMode {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum BufferCreationError {
+    #[error(transparent)]
+    Vulkan(#[from] br::vk::VkResult),
+    #[error("no suitable memory")]
+    NoSuitableMemory,
+}
+
 pub struct MemoryBoundBuffer<'subsystem> {
     buffer: br::BufferObject<&'subsystem Subsystem>,
     memory: br::DeviceMemoryObject<&'subsystem Subsystem>,
@@ -1435,6 +1418,42 @@ impl<'subsystem> br::DeviceChild for MemoryBoundBuffer<'subsystem> {
 }
 impl<'subsystem> br::Buffer for MemoryBoundBuffer<'subsystem> {}
 impl<'subsystem> MemoryBoundBuffer<'subsystem> {
+    #[tracing::instrument(
+        name = "MemoryBoundBuffer::new_writable",
+        skip(base_system),
+        err(Display)
+    )]
+    pub fn new_writable(
+        base_system: &AppBaseSystem<'subsystem>,
+        size: usize,
+        usage: br::BufferUsage,
+    ) -> Result<MemoryBoundBuffer<'subsystem>, BufferCreationError> {
+        // TODO: direct memoryにするかはサイズとかみて判断する
+        let mut b = br::BufferObject::new(
+            base_system.subsystem,
+            &br::BufferCreateInfo::new(size, usage),
+        )?;
+        let req = b.requirements();
+        let Some(memindex) = base_system.find_direct_memory_index(req.memoryTypeBits) else {
+            return Err(BufferCreationError::NoSuitableMemory);
+        };
+        let mem = br::DeviceMemoryObject::new(
+            base_system.subsystem,
+            &br::MemoryAllocateInfo::new(req.size, memindex),
+        )?;
+        b.bind(&mem, 0)?;
+
+        Ok(Self {
+            buffer: b,
+            memory: mem,
+            memory_characteristics: if base_system.is_coherent_memory_type(memindex) {
+                MemoryCharacteristics::COHERENT
+            } else {
+                MemoryCharacteristics::empty()
+            },
+        })
+    }
+
     pub fn map<'b>(
         &'b mut self,
         range: core::ops::Range<usize>,
@@ -1614,7 +1633,7 @@ impl<'subsystem> RenderTexture<'subsystem> {
         let mem = base_sys.alloc_device_local_memory_for_requirements(&img.requirements());
         img.bind(&mem, 0)?;
 
-        Ok(RenderTexture {
+        Ok(Self {
             res: br::ImageViewBuilder::new(
                 img,
                 br::ImageSubresourceRange::new(format.aspect_mask(), 0..1, 0..1),

@@ -45,6 +45,7 @@ impl CommonButtonView {
             .rounded_rect_mask(
                 unsafe { SafeF32::new_unchecked(init.ui_scale_factor.ceil()) },
                 Self::CORNER_RADIUS,
+                unsafe { SafeF32::new_unchecked(1.0) },
             )
             .unwrap();
 

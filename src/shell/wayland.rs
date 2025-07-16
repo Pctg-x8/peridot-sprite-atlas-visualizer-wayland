@@ -150,7 +150,6 @@ impl wl::SurfaceEventListener for WaylandShellEventHandler<'_, '_> {
         }
 
         self.ui_scale_factor = factor as _;
-        // TODO: notify ui scale changes
     }
 
     fn preferred_buffer_transform(&mut self, _surface: &mut wl::Surface, transform: u32) {
@@ -366,7 +365,6 @@ impl wl::CallbackEventListener for WaylandShellEventHandler<'_, '_> {
 impl wl::WpFractionalScaleV1EventListener for WaylandShellEventHandler<'_, '_> {
     fn preferred_scale(&mut self, _object: &mut wl::WpFractionalScaleV1, scale: u32) {
         self.ui_scale_factor = scale as f32 / 120.0;
-        // TODO: notify ui scale changes
     }
 }
 impl wl::GtkShell1EventListener for WaylandShellEventHandler<'_, '_> {

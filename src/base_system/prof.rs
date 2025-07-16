@@ -1,16 +1,15 @@
 //! mini profiler
 
-use std::{
-    io::{IoSlice, Write},
-    path::Path,
-};
+use std::{io::Write, path::Path};
 
 use shared_perflog_proto::{ProfileMarker, ProfileMarkerCategory};
 
+#[cfg(feature = "profiling")]
 pub struct ScopedMarker<'p, 'f> {
     ctx: &'f mut ProfilingFrameContext<'p>,
     marker: ProfileMarker,
 }
+#[cfg(feature = "profiling")]
 impl Drop for ScopedMarker<'_, '_> {
     #[inline(always)]
     fn drop(&mut self) {
@@ -20,15 +19,20 @@ impl Drop for ScopedMarker<'_, '_> {
     }
 }
 
+#[cfg(feature = "profiling")]
 pub struct ProfilingFrameContext<'p> {
     ctx: &'p mut ProfilingContext,
 }
+#[cfg(not(feature = "profiling"))]
+pub struct ProfilingFrameContext {}
+#[cfg(feature = "profiling")]
 impl Drop for ProfilingFrameContext<'_> {
     fn drop(&mut self) {
         self.ctx
             .append_now(ProfileMarker::Frame, ProfileMarkerCategory::End);
     }
 }
+#[cfg(feature = "profiling")]
 impl<'p> ProfilingFrameContext<'p> {
     #[inline(always)]
     pub fn scoped<'f>(&'f mut self, marker: ProfileMarker) -> ScopedMarker<'p, 'f> {
@@ -69,6 +73,26 @@ impl<'p> ProfilingFrameContext<'p> {
         );
     }
 }
+#[cfg(not(feature = "profiling"))]
+impl ProfilingFrameContext {
+    #[inline(always)]
+    pub fn scoped<'f>(&'f mut self, _marker: ProfileMarker) -> () {}
+
+    #[inline(always)]
+    pub fn record(&mut self, _marker: ProfileMarker, _cat: ProfileMarkerCategory) {}
+
+    #[inline(always)]
+    pub fn begin_resize(&mut self) {}
+
+    #[inline(always)]
+    pub fn end_resize(&mut self) {}
+
+    #[inline(always)]
+    pub fn begin_populate_composite_instances(&mut self) {}
+
+    #[inline(always)]
+    pub fn end_populate_composite_instances(&mut self) {}
+}
 
 pub struct ProfilingContext {
     #[cfg(feature = "profiling")]
@@ -101,22 +125,26 @@ impl ProfilingContext {
         Self {}
     }
 
+    #[cfg(feature = "profiling")]
     #[inline]
     pub fn begin_frame<'p>(&'p mut self) -> ProfilingFrameContext<'p> {
-        #[cfg(feature = "profiling")]
-        {
-            let ts = Self::timestamp();
-            self.last_frame_index += 1;
-            let fx = self.last_frame_index;
-            let ctx = ProfilingFrameContext { ctx: self };
+        let ts = Self::timestamp();
+        self.last_frame_index += 1;
+        let fx = self.last_frame_index;
+        let ctx = ProfilingFrameContext { ctx: self };
 
-            // write begin frame sample
-            if let Err(e) = shared_perflog_proto::serialize_begin_frame(&mut ctx.ctx.fp, ts, fx) {
-                tracing::warn!(reason = ?e, "write begin frame failed");
-            }
-
-            ctx
+        // write begin frame sample
+        if let Err(e) = shared_perflog_proto::serialize_begin_frame(&mut ctx.ctx.fp, ts, fx) {
+            tracing::warn!(reason = ?e, "write begin frame failed");
         }
+
+        ctx
+    }
+
+    #[cfg(not(feature = "profiling"))]
+    #[inline(always)]
+    pub fn begin_frame<'p>(&'p mut self) -> ProfilingFrameContext {
+        ProfilingFrameContext {}
     }
 
     #[inline(always)]
@@ -130,6 +158,7 @@ impl ProfilingContext {
     }
 
     pub fn flush(&mut self) {
+        #[cfg(feature = "profiling")]
         if let Err(e) = self.fp.flush() {
             tracing::warn!(reason = ?e, "flush perflog failed");
         }

@@ -1884,7 +1884,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         corner_cutout_render_descriptors,
     ) = if !app_shell.server_side_decoration_provided() {
         // window decorations must be rendered by client side
-        let corner_cutout_atlas_rect = app_system.alloc_mask_atlas_rect(16, 16);
+        let corner_cutout_atlas_rect = app_system.alloc_mask_atlas_rect(32, 32);
 
         let rp = app_system
             .render_to_mask_atlas_pass(RenderPassOptions::FULL_PIXEL_RENDER)

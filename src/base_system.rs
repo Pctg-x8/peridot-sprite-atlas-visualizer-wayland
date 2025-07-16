@@ -4,6 +4,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     rc::Rc,
+    sync::OnceLock,
 };
 
 use crate::{
@@ -26,9 +27,11 @@ use bedrock::{
     MemoryBound, RenderPass, ShaderModule, VkHandle,
 };
 use bitflags::bitflags;
+use cache::Cache;
 use parking_lot::RwLock;
 use scratch_buffer::StagingScratchBufferManager;
 
+mod cache;
 pub mod scratch_buffer;
 
 pub struct FontSet {
@@ -54,16 +57,66 @@ pub struct AppBaseSystem<'subsystem> {
     pub composite_instance_manager: UnboundedCompositeInstanceManager,
     pub hit_tree: HitTestTreeManager<'subsystem>,
     pub fonts: FontSet,
+    fs_cache: Cache,
+    pipeline_cache: br::vk::VkPipelineCache,
     rounded_fill_rect_cache: HashMap<(SafeF32, SafeF32), AtlasRect>,
     rounded_rect_cache: HashMap<(SafeF32, SafeF32, SafeF32), AtlasRect>,
     text_cache: HashMap<FontType, HashMap<String, AtlasRect>>,
     render_to_mask_atlas_pass_cache:
         RefCell<HashMap<RenderPassOptions, Rc<br::RenderPassObject<&'subsystem Subsystem>>>>,
     loaded_shader_modules: RwLock<HashMap<PathBuf, br::vk::VkShaderModule>>,
+    empty_pipeline_layout: OnceLock<br::VkHandleRef<'static, br::vk::VkPipelineLayout>>,
 }
 impl Drop for AppBaseSystem<'_> {
     fn drop(&mut self) {
+        'try_save_pipeline_cache: {
+            let dl = match unsafe {
+                br::vkfn_wrapper::get_pipeline_cache_data_byte_length(
+                    self.subsystem.native_ptr(),
+                    self.pipeline_cache,
+                )
+            } {
+                Ok(x) => x,
+                Err(e) => {
+                    tracing::warn!(reason = ?e, "get pipeline cache data size failed");
+                    break 'try_save_pipeline_cache;
+                }
+            };
+
+            let mut sink = Vec::with_capacity(dl);
+            unsafe {
+                sink.set_len(dl);
+            }
+            if let Err(e) = unsafe {
+                br::vkfn_wrapper::get_pipeline_cache_data(
+                    self.subsystem.native_ptr(),
+                    self.pipeline_cache,
+                    &mut sink,
+                )
+            } {
+                tracing::warn!(reason = ?e, "get pipeline cache data failed");
+                break 'try_save_pipeline_cache;
+            }
+
+            if let Err(e) = std::fs::write(self.fs_cache.new_path(".vk-pipeline-cache"), &sink) {
+                tracing::warn!(reason = ?e, "persist pipeline cache failed");
+                break 'try_save_pipeline_cache;
+            }
+        }
+
         unsafe {
+            br::vkfn::destroy_pipeline_cache(
+                self.subsystem.native_ptr(),
+                self.pipeline_cache,
+                core::ptr::null(),
+            );
+            if let Some(x) = self.empty_pipeline_layout.take() {
+                br::vkfn::destroy_pipeline_layout(
+                    self.subsystem.native_ptr(),
+                    x.native_ptr(),
+                    core::ptr::null(),
+                );
+            }
             self.composite_instance_manager
                 .drop_with_gfx_device(&self.subsystem);
             self.atlas.drop_with_gfx_device(&self.subsystem);
@@ -75,7 +128,73 @@ impl Drop for AppBaseSystem<'_> {
     }
 }
 impl<'subsystem> AppBaseSystem<'subsystem> {
+    #[tracing::instrument(
+        name = "AppBaseSystem::load_or_create_pipeline_cache",
+        skip(subsystem, fs_cache),
+        fields(path)
+    )]
+    fn load_or_create_pipeline_cache(
+        subsystem: &'subsystem Subsystem,
+        fs_cache: &Cache,
+    ) -> br::PipelineCacheObject<&'subsystem Subsystem> {
+        let path = fs_cache.new_path(".vk-pipeline-cache");
+        tracing::Span::current().record("path", tracing::field::display(path.display()));
+
+        'try_restore: {
+            let cache_exists = match path.try_exists() {
+                Ok(x) => x,
+                Err(e) => {
+                    tracing::warn!(reason = ?e, "querying fs failed");
+                    break 'try_restore;
+                }
+            };
+
+            if !cache_exists {
+                // no persisted file found
+                break 'try_restore;
+            }
+
+            // try load from persistent
+            tracing::info!("Recovering previous pipeline cache from file");
+            let blob = match std::fs::read(&path) {
+                Ok(x) => x,
+                Err(e) => {
+                    tracing::warn!(reason = ?e, "loading pipeline cache failed");
+                    break 'try_restore;
+                }
+            };
+
+            let x = match br::PipelineCacheObject::new(
+                subsystem,
+                &br::PipelineCacheCreateInfo::new(&blob),
+            ) {
+                Ok(x) => x,
+                Err(e) => {
+                    tracing::warn!(reason = ?e, "pipeline cache object creation failed");
+                    break 'try_restore;
+                }
+            };
+
+            // success!
+            return x;
+        }
+
+        // fallback: create new one
+        tracing::info!("No previous pipeline cache found");
+        match br::PipelineCacheObject::new(subsystem, &br::PipelineCacheCreateInfo::new(&[])) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to create pipeline cachec object");
+                std::process::abort();
+            }
+        }
+    }
+
     pub fn new(subsystem: &'subsystem Subsystem) -> Self {
+        // restore cache
+        let fs_cache = Cache::new();
+        let pipeline_cache = Self::load_or_create_pipeline_cache(subsystem, &fs_cache);
+
         // initialize font systems
         #[cfg(unix)]
         fontconfig::init();
@@ -146,12 +265,15 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
             fonts: FontSet {
                 ui_default: ft_face,
             },
+            fs_cache,
+            pipeline_cache: pipeline_cache.unmanage().0,
             subsystem,
             rounded_fill_rect_cache: HashMap::new(),
             rounded_rect_cache: HashMap::new(),
             text_cache: HashMap::new(),
             render_to_mask_atlas_pass_cache: RefCell::new(HashMap::new()),
             loaded_shader_modules: RwLock::new(HashMap::new()),
+            empty_pipeline_layout: OnceLock::new(),
         }
     }
 
@@ -1332,20 +1454,46 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         }
     }
 
-    #[inline(always)]
-    pub fn require_empty_pipeline_layout(
-        &self,
-    ) -> &impl br::VkHandle<Handle = br::vk::VkPipelineLayout> {
-        self.subsystem.require_empty_pipeline_layout()
+    #[tracing::instrument(skip(self))]
+    pub fn require_empty_pipeline_layout<'d>(
+        &'d self,
+    ) -> &'d impl br::VkHandle<Handle = br::vk::VkPipelineLayout> {
+        self.empty_pipeline_layout.get_or_init(|| {
+            match br::PipelineLayoutObject::new(
+                self.subsystem,
+                &br::PipelineLayoutCreateInfo::new(&[], &[]),
+            ) {
+                Ok(x) => unsafe { br::VkHandleRef::dangling(x.unmanage().0) },
+                Err(e) => {
+                    tracing::error!(reason = ?e, "Failed to create required empty pipeline layout");
+                    std::process::abort();
+                }
+            }
+        })
     }
 
-    #[inline(always)]
+    #[tracing::instrument(skip(self, create_info_array), err(Display))]
+    pub fn create_graphics_pipelines(
+        &self,
+        create_info_array: &[br::GraphicsPipelineCreateInfo],
+    ) -> br::Result<Vec<br::PipelineObject<&'subsystem Subsystem>>> {
+        br::Device::new_graphics_pipelines(
+            self.subsystem,
+            create_info_array,
+            Some(&unsafe { br::VkHandleRef::dangling(self.pipeline_cache) }),
+        )
+    }
+
+    #[tracing::instrument(skip(self, create_info_array), err(Display))]
     pub fn create_graphics_pipelines_array<const N: usize>(
         &self,
         create_info_array: &[br::GraphicsPipelineCreateInfo; N],
     ) -> br::Result<[br::PipelineObject<&'subsystem Subsystem>; N]> {
-        self.subsystem
-            .create_graphics_pipelines_array(create_info_array)
+        br::Device::new_graphics_pipeline_array(
+            self.subsystem,
+            create_info_array,
+            Some(&unsafe { br::VkHandleRef::dangling(self.pipeline_cache) }),
+        )
     }
 
     #[inline(always)]

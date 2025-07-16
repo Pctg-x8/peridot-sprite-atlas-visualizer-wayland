@@ -1796,7 +1796,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         .map(|(vp, sc)| br::PipelineViewportStateCreateInfo::new(vp, sc))
         .collect::<Vec<_>>();
     let mut blur_downsample_pipelines = app_system
-        .subsystem
         .create_graphics_pipelines(
             &blur_sample_viewport_states
                 .iter()
@@ -1818,7 +1817,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         )
         .unwrap();
     let mut blur_upsample_pipelines = app_system
-        .subsystem
         .create_graphics_pipelines(
             &blur_sample_viewport_states
                 .iter()
@@ -3046,7 +3044,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                             .map(|(vp, sc)| br::PipelineViewportStateCreateInfo::new(vp, sc))
                             .collect::<Vec<_>>();
                         blur_downsample_pipelines = app_system
-                            .subsystem
                             .create_graphics_pipelines(
                                 &blur_sample_viewport_states
                                     .iter()
@@ -3068,7 +3065,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                             )
                             .unwrap();
                         blur_upsample_pipelines = app_system
-                            .subsystem
                             .create_graphics_pipelines(
                                 &blur_sample_viewport_states
                                     .iter()

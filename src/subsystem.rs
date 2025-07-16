@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::OnceLock,
-};
+use std::collections::{HashMap, HashSet};
 
 use bedrock::{self as br, Instance, PhysicalDevice, ResolverInterface, VkHandle};
 use freetype::FreeType;
@@ -86,8 +83,6 @@ pub struct Subsystem {
     pub adapter_properties: br::PhysicalDeviceProperties,
     pub graphics_queue_family_index: u32,
     graphics_queue: br::vk::VkQueue,
-    pipeline_cache: br::vk::VkPipelineCache,
-    empty_pipeline_layout: OnceLock<br::VkHandleRef<'static, br::vk::VkPipelineLayout>>,
     pub ft: RwLock<FreeType>,
 }
 unsafe impl Sync for Subsystem {}
@@ -95,38 +90,6 @@ unsafe impl Send for Subsystem {}
 impl Drop for Subsystem {
     fn drop(&mut self) {
         unsafe {
-            match br::vkfn_wrapper::get_pipeline_cache_data_byte_length(
-                self.device,
-                self.pipeline_cache,
-            ) {
-                Ok(dl) => {
-                    let mut sink = Vec::with_capacity(dl);
-                    sink.set_len(dl);
-                    match br::vkfn_wrapper::get_pipeline_cache_data(
-                        self.device,
-                        self.pipeline_cache,
-                        &mut sink,
-                    ) {
-                        Ok(_) => match std::fs::write(".vk-pipeline-cache", &sink) {
-                            Ok(_) => (),
-                            Err(e) => {
-                                eprintln!("persist pipeline cache failed: {e:?}");
-                            }
-                        },
-                        Err(e) => {
-                            eprintln!("get pipeline cache data failed: {e:?}");
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("get pipeline cache data length failed: {e:?}");
-                }
-            }
-
-            if let Some(x) = self.empty_pipeline_layout.take() {
-                br::vkfn::destroy_pipeline_layout(self.device, x.native_ptr(), core::ptr::null());
-            }
-            br::vkfn::destroy_pipeline_cache(self.device, self.pipeline_cache, core::ptr::null());
             br::vkfn::destroy_device(self.device, core::ptr::null());
             br::vkfn::destroy_instance(self.instance, core::ptr::null());
         }
@@ -351,48 +314,6 @@ impl Subsystem {
         )
         .unwrap();
 
-        let pipeline_cache_path = std::path::Path::new(".vk-pipeline-cache");
-        let pipeline_cache = if pipeline_cache_path.try_exists().is_ok_and(|x| x) {
-            // try load from persistent
-            match std::fs::read(&pipeline_cache_path) {
-                Ok(blob) => {
-                    tracing::info!("Recovering previous pipeline cache from file");
-                    match br::PipelineCacheObject::new(
-                        &device,
-                        &br::PipelineCacheCreateInfo::new(&blob),
-                    ) {
-                        Ok(x) => x,
-                        Err(e) => {
-                            tracing::error!(reason = ?e, "Failed to create pipeline cachec object");
-                            std::process::abort();
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(reason = ?e, "Failed to load pipeline cache");
-                    match br::PipelineCacheObject::new(
-                        &device,
-                        &br::PipelineCacheCreateInfo::new(&[]),
-                    ) {
-                        Ok(x) => x,
-                        Err(e) => {
-                            tracing::error!(reason = ?e, "Failed to create pipeline cachec object");
-                            std::process::abort();
-                        }
-                    }
-                }
-            }
-        } else {
-            tracing::info!("No previous pipeline cache file found");
-            match br::PipelineCacheObject::new(&device, &br::PipelineCacheCreateInfo::new(&[])) {
-                Ok(x) => x,
-                Err(e) => {
-                    tracing::error!(reason = ?e, "Failed to create pipeline cachec object");
-                    std::process::abort();
-                }
-            }
-        };
-
         let mut ft = match FreeType::new() {
             Ok(x) => x,
             Err(e) => {
@@ -411,7 +332,6 @@ impl Subsystem {
                 .unwrap();
         }
 
-        let (pipeline_cache, _) = pipeline_cache.unmanage();
         let (device, _) = device.unmanage();
         let (adapter, _) = adapter.unmanage();
         let instance = instance.unmanage();
@@ -426,8 +346,6 @@ impl Subsystem {
             instance,
             adapter_memory_info,
             adapter_properties,
-            pipeline_cache,
-            empty_pipeline_layout: OnceLock::new(),
             ft: RwLock::new(ft),
         }
     }
@@ -465,46 +383,6 @@ impl Subsystem {
     #[inline]
     pub fn is_coherent_memory_type(&self, index: u32) -> bool {
         self.adapter_memory_info.is_coherent(index)
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn require_empty_pipeline_layout<'d>(
-        &'d self,
-    ) -> &'d impl br::VkHandle<Handle = br::vk::VkPipelineLayout> {
-        self.empty_pipeline_layout.get_or_init(|| {
-            match br::PipelineLayoutObject::new(self, &br::PipelineLayoutCreateInfo::new(&[], &[]))
-            {
-                Ok(x) => unsafe { br::VkHandleRef::dangling(x.unmanage().0) },
-                Err(e) => {
-                    tracing::error!(reason = ?e, "Failed to create required empty pipeline layout");
-                    std::process::abort();
-                }
-            }
-        })
-    }
-
-    #[tracing::instrument(skip(self, create_info_array), err(Display))]
-    pub fn create_graphics_pipelines(
-        &self,
-        create_info_array: &[br::GraphicsPipelineCreateInfo],
-    ) -> br::Result<Vec<br::PipelineObject<&Self>>> {
-        br::Device::new_graphics_pipelines(
-            self,
-            create_info_array,
-            Some(&unsafe { br::VkHandleRef::dangling(self.pipeline_cache) }),
-        )
-    }
-
-    #[tracing::instrument(skip(self, create_info_array), err(Display))]
-    pub fn create_graphics_pipelines_array<const N: usize>(
-        &self,
-        create_info_array: &[br::GraphicsPipelineCreateInfo; N],
-    ) -> br::Result<[br::PipelineObject<&Self>; N]> {
-        br::Device::new_graphics_pipeline_array(
-            self,
-            create_info_array,
-            Some(&unsafe { br::VkHandleRef::dangling(self.pipeline_cache) }),
-        )
     }
 
     #[tracing::instrument(skip(self), err(Display))]

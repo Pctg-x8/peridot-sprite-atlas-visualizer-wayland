@@ -4,7 +4,7 @@
       "initialization_options": {
         "cargo": {
           "features": [
-            "platform-linux-wayland"
+            "platform-linux-wayland","profiling"
           ]
         }
       }

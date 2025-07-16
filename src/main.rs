@@ -32,10 +32,11 @@ use std::{
     sync::Arc,
 };
 
-use crate::{composite::FloatParameter, quadtree::QuadTree};
+use crate::{base_system::prof, composite::FloatParameter, quadtree::QuadTree};
 use app_state::{AppState, SpriteInfo};
 use base_system::{
     AppBaseSystem, RenderPassOptions,
+    prof::ProfilingContext,
     scratch_buffer::{BufferedStagingScratchBuffer, StagingScratchBufferManager},
 };
 use bedrock::{
@@ -2521,6 +2522,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     // initial post event
     events.push(AppEvent::ToplevelWindowFrameTiming);
 
+    let mut _profiler = ProfilingContext::init("./profile");
     let mut active_ui_scale = app_shell.ui_scale_factor();
     let mut newsize_request = None;
     let t = std::time::Instant::now();
@@ -2721,6 +2723,8 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     app_shell.toggle_maximize_restore();
                 }
                 AppEvent::ToplevelWindowFrameTiming => {
+                    let mut _pf = _profiler.begin_frame();
+
                     let current_t = t.elapsed();
                     let current_sec = current_t.as_secs_f32();
 
@@ -2730,6 +2734,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         last_rendering = false;
                     }
 
+                    _pf.begin_resize();
                     if let Some((width, height)) = newsize_request.take() {
                         let w_dip = width as f32 / app_shell.ui_scale_factor();
                         let h_dip = height as f32 / app_shell.ui_scale_factor();
@@ -3170,6 +3175,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                             sc.size,
                         );
                     }
+                    _pf.end_resize();
 
                     current_selected_sprite_marker_view
                         .update(&mut app_system.composite_tree, current_sec);
@@ -3185,6 +3191,8 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     }
 
                     {
+                        _pf.begin_populate_composite_instances();
+
                         // もろもろの判定がめんどいのでいったん毎回updateする
                         let n = app_system
                             .composite_instance_manager
@@ -3286,6 +3294,8 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         }
 
                         composite_instance_buffer_dirty = true;
+
+                        _pf.end_populate_composite_instances();
                     }
 
                     let composite_instance_buffer_dirty =
@@ -3720,6 +3730,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     }
 
                     app_shell.request_next_frame();
+                    drop(_pf);
                 }
                 AppEvent::ToplevelWindowNewSize {
                     width_px,
@@ -3877,6 +3888,8 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
             app_update_context.event_queue.notify_clear().unwrap();
         }
     }
+
+    _profiler.flush();
 
     if let Err(e) = unsafe { app_system.subsystem.wait() } {
         tracing::warn!(reason = ?e, "Error in waiting pending works before shutdown");

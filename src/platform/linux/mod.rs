@@ -1,6 +1,7 @@
 mod epoll;
 mod eventfd;
 pub mod input_event_codes;
+pub mod time;
 
 use core::ptr::NonNull;
 

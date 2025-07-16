@@ -32,6 +32,8 @@ use parking_lot::RwLock;
 use scratch_buffer::StagingScratchBufferManager;
 
 mod cache;
+#[macro_use]
+pub mod prof;
 pub mod scratch_buffer;
 
 pub struct FontSet {

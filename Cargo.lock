@@ -995,6 +995,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
+name = "perflog-printer"
+version = "0.1.0"
+dependencies = [
+ "shared-perflog-proto",
+]
+
+[[package]]
 name = "peridot-sprite-atlas-visualizer-wayland"
 version = "0.1.0"
 dependencies = [
@@ -1010,6 +1017,7 @@ dependencies = [
  "lyon_geom",
  "parking_lot",
  "quick-xml",
+ "shared-perflog-proto",
  "smol",
  "thiserror 2.0.12",
  "tracing",
@@ -1379,6 +1387,10 @@ checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
 ]
+
+[[package]]
+name = "shared-perflog-proto"
+version = "0.1.0"
 
 [[package]]
 name = "shlex"

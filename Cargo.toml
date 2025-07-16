@@ -1,5 +1,7 @@
 [workspace]
 members = [
+    "devtools/perflog-printer",
+    "shared/perflog-proto",
     "thirdparty/dbus",
     "thirdparty/fontconfig",
     "thirdparty/freetype",
@@ -16,6 +18,7 @@ build = "build.rs"
 [features]
 platform-linux-wayland = ["bedrock/VK_KHR_wayland_surface", "dep:wayland"]
 platform-windows = ["bedrock/VK_KHR_win32_surface"]
+profiling = []
 
 [workspace.dependencies]
 tracing = "0.1.41"
@@ -46,6 +49,7 @@ walkdir = "2.5.0"
 parking_lot = "0.12.4"
 freetype = { path = "./thirdparty/freetype" }
 harfbuzz = { path = "./thirdparty/harfbuzz" }
+shared-perflog-proto.path = "./shared/perflog-proto"
 
 [target.'cfg(unix)'.dependencies]
 wayland = { path = "./thirdparty/wayland", optional = true }

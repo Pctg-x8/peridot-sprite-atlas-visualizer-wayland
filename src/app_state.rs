@@ -1,8 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::CString,
+    path::{Path, PathBuf},
+};
 
 use uuid::Uuid;
 
-use crate::{coordinate::SizePixels, peridot};
+use crate::{coordinate::SizePixels, peridot, source_reader};
 
 #[derive(Debug)]
 pub struct SpriteInfo {
@@ -76,6 +79,69 @@ impl<'subsystem> AppState<'subsystem> {
             current_open_path: None,
             current_open_path_view_feedbacks: Vec::new(),
         }
+    }
+
+    pub fn add_sprites_by_uri_list(&mut self, uris: Vec<CString>) {
+        let mut added_sprites = Vec::with_capacity(uris.len());
+        for x in uris {
+            let path = std::path::PathBuf::from(match x.to_str() {
+                Ok(x) => match x.strip_prefix("file://") {
+                    Some(x) => x,
+                    None => {
+                        tracing::warn!(?x, "not started by file://");
+                        x
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(reason = ?e, "invalid path");
+                    continue;
+                }
+            });
+            if path.is_dir() {
+                // process all files in directory(rec)
+                for entry in walkdir::WalkDir::new(&path)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                {
+                    let path = entry.path();
+                    if !path.is_file() {
+                        // 自分自身を含むみたいなのでその場合は見逃す
+                        continue;
+                    }
+
+                    let mut fs = std::fs::File::open(&path).unwrap();
+                    let Some(png_meta) = source_reader::png::Metadata::try_read(&mut fs) else {
+                        // PNGじゃないのは一旦見逃す
+                        continue;
+                    };
+
+                    added_sprites.push(SpriteInfo::new(
+                        path.file_stem().unwrap().to_str().unwrap().into(),
+                        path.to_path_buf(),
+                        png_meta.width,
+                        png_meta.height,
+                    ));
+                }
+            } else {
+                let mut fs = std::fs::File::open(&path).unwrap();
+                let png_meta = match source_reader::png::Metadata::try_read(&mut fs) {
+                    Some(x) => x,
+                    None => {
+                        tracing::warn!(?path, "not a png?");
+                        continue;
+                    }
+                };
+
+                added_sprites.push(SpriteInfo::new(
+                    path.file_stem().unwrap().to_str().unwrap().into(),
+                    path.to_path_buf(),
+                    png_meta.width,
+                    png_meta.height,
+                ));
+            }
+        }
+
+        self.add_sprites(added_sprites);
     }
 
     pub fn add_sprites(&mut self, sprites: impl IntoIterator<Item = SpriteInfo>) {

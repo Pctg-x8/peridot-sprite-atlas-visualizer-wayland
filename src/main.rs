@@ -34,8 +34,8 @@ use std::{
 
 #[cfg(feature = "profiling")]
 use crate::base_system::prof;
-use crate::{composite::FloatParameter, quadtree::QuadTree};
-use app_state::{AppState, SpriteInfo};
+use crate::{base_system::FontType, composite::FloatParameter, quadtree::QuadTree};
+use app_state::AppState;
 use base_system::{
     AppBaseSystem, RenderPassOptions,
     prof::ProfilingContext,
@@ -104,6 +104,9 @@ pub enum AppEvent {
         index: usize,
     },
     DeselectSprite,
+    AddSpritesByUriList(Vec<std::ffi::CString>),
+    UIShowDragAndDropOverlay,
+    UIHideDragAndDropOverlay,
 }
 
 pub struct AppEventBus {
@@ -458,6 +461,150 @@ impl CurrentSelectedSpriteMarkerView {
     pub fn set_view_offset(&self, offset_x_pixels: f32, offset_y_pixels: f32) {
         self.view_offset_x.set(offset_x_pixels);
         self.view_offset_y.set(offset_y_pixels);
+    }
+}
+
+pub struct DragAndDropOverlayView {
+    ct_root: CompositeTreeRef,
+    ct_text: CompositeTreeRef,
+}
+impl DragAndDropOverlayView {
+    const BG_COLOR: AnimatableColor = AnimatableColor::Value([1.0, 1.0, 1.0, 0.125]);
+
+    #[tracing::instrument(name = "DragAndDropOverlayView::new", skip(init))]
+    pub fn new(init: &mut ViewInitContext) -> Self {
+        let text_atlas_rect = init
+            .base_system
+            .text_mask(
+                init.staging_scratch_buffer,
+                FontType::UIExtraLarge,
+                "Drop to add",
+            )
+            .unwrap();
+
+        let ct_root = init.base_system.register_composite_rect(CompositeRect {
+            relative_size_adjustment: [1.0, 1.0],
+            has_bitmap: true,
+            composite_mode: CompositeMode::FillColorBackdropBlur(
+                Self::BG_COLOR,
+                AnimatableFloat::Value(0.0),
+            ),
+            opacity: AnimatableFloat::Value(0.0),
+            ..Default::default()
+        });
+        let ct_text = init.base_system.register_composite_rect(CompositeRect {
+            base_scale_factor: init.ui_scale_factor,
+            size: [
+                AnimatableFloat::Value(text_atlas_rect.width() as f32 / init.ui_scale_factor),
+                AnimatableFloat::Value(text_atlas_rect.height() as f32 / init.ui_scale_factor),
+            ],
+            offset: [
+                AnimatableFloat::Value(
+                    -0.5 * text_atlas_rect.width() as f32 / init.ui_scale_factor,
+                ),
+                AnimatableFloat::Value(
+                    -0.5 * text_atlas_rect.height() as f32 / init.ui_scale_factor,
+                ),
+            ],
+            relative_offset_adjustment: [0.5, 0.5],
+            has_bitmap: true,
+            texatlas_rect: text_atlas_rect,
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.5, 0.5, 0.5, 0.75])),
+            ..Default::default()
+        });
+
+        init.base_system.set_composite_tree_parent(ct_text, ct_root);
+
+        Self { ct_root, ct_text }
+    }
+
+    pub fn mount(&self, base_system: &mut AppBaseSystem, ct_parent: CompositeTreeRef) {
+        base_system.set_composite_tree_parent(self.ct_root, ct_parent);
+    }
+
+    pub fn rescale(
+        &self,
+        base_system: &mut AppBaseSystem,
+        staging_scratch_buffer: &mut StagingScratchBufferManager,
+        ui_scale_factor: f32,
+    ) {
+        base_system.free_mask_atlas_rect(
+            self.ct_text
+                .entity(&base_system.composite_tree)
+                .texatlas_rect,
+        );
+
+        let text_atlas_rect = base_system
+            .text_mask(
+                staging_scratch_buffer,
+                FontType::UIExtraLarge,
+                "Drop to add",
+            )
+            .unwrap();
+
+        let cr = self
+            .ct_text
+            .entity_mut_dirtified(&mut base_system.composite_tree);
+        cr.texatlas_rect = text_atlas_rect;
+        cr.base_scale_factor = ui_scale_factor;
+    }
+
+    pub fn show(&self, base_system: &mut AppBaseSystem, current_sec: f32) {
+        self.ct_root
+            .entity_mut_dirtified(&mut base_system.composite_tree)
+            .opacity = AnimatableFloat::Animated {
+            from_value: 0.0,
+            to_value: 1.0,
+            start_sec: current_sec,
+            end_sec: current_sec + 0.25,
+            curve: AnimationCurve::Linear,
+            event_on_complete: None,
+        };
+        self.ct_root
+            .entity_mut_dirtified(&mut base_system.composite_tree)
+            .composite_mode = CompositeMode::FillColorBackdropBlur(
+            Self::BG_COLOR,
+            AnimatableFloat::Animated {
+                from_value: 0.0,
+                to_value: 9.0,
+                start_sec: current_sec,
+                end_sec: current_sec + 0.125,
+                curve: AnimationCurve::CubicBezier {
+                    p1: (0.5, 0.5),
+                    p2: (0.5, 1.0),
+                },
+                event_on_complete: None,
+            },
+        );
+    }
+
+    pub fn hide(&self, base_system: &mut AppBaseSystem, current_sec: f32) {
+        self.ct_root
+            .entity_mut_dirtified(&mut base_system.composite_tree)
+            .opacity = AnimatableFloat::Animated {
+            from_value: 1.0,
+            to_value: 0.0,
+            start_sec: current_sec,
+            end_sec: current_sec + 0.125,
+            curve: AnimationCurve::Linear,
+            event_on_complete: None,
+        };
+        self.ct_root
+            .entity_mut_dirtified(&mut base_system.composite_tree)
+            .composite_mode = CompositeMode::FillColorBackdropBlur(
+            Self::BG_COLOR,
+            AnimatableFloat::Animated {
+                from_value: 9.0,
+                to_value: 0.0,
+                start_sec: current_sec,
+                end_sec: current_sec + 0.25,
+                curve: AnimationCurve::CubicBezier {
+                    p1: (0.5, 0.5),
+                    p2: (0.5, 1.0),
+                },
+                event_on_complete: None,
+            },
+        );
     }
 }
 
@@ -2093,6 +2240,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     let current_selected_sprite_marker_view = Rc::new(CurrentSelectedSpriteMarkerView::new(
         &mut init_context.for_view,
     ));
+    let dnd_overlay = DragAndDropOverlayView::new(&mut init_context.for_view);
 
     drop(init_context);
     drop(staging_scratch_buffer_locked);
@@ -2101,7 +2249,9 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     sprite_list_pane.mount(app_system, CompositeTree::ROOT, HitTestTreeManager::ROOT);
     app_menu.mount(app_system, CompositeTree::ROOT, HitTestTreeManager::ROOT);
     app_header.mount(app_system, CompositeTree::ROOT, HitTestTreeManager::ROOT);
+    dnd_overlay.mount(app_system, CompositeTree::ROOT);
 
+    // reordering hit for popups
     let popup_hit_layer = app_system.create_hit_tree(HitTestTreeData {
         width_adjustment_factor: 1.0,
         height_adjustment_factor: 1.0,
@@ -2702,6 +2852,11 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
             sprite_list_pane.rescale(app_system, &mut staging_scratch_buffer_locked, unsafe {
                 SafeF32::new_unchecked(active_ui_scale)
             });
+            dnd_overlay.rescale(
+                app_system,
+                &mut staging_scratch_buffer_locked,
+                active_ui_scale,
+            );
 
             tracing::debug!(
                 byte_size = staging_scratch_buffer_locked.total_reserved_amount(),
@@ -3902,6 +4057,15 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                 AppEvent::DeselectSprite => {
                     app_state.borrow_mut().deselect_sprite();
                 }
+                AppEvent::AddSpritesByUriList(uris) => {
+                    app_state.borrow_mut().add_sprites_by_uri_list(uris);
+                }
+                AppEvent::UIShowDragAndDropOverlay => {
+                    dnd_overlay.show(app_system, t.elapsed().as_secs_f32());
+                }
+                AppEvent::UIHideDragAndDropOverlay => {
+                    dnd_overlay.hide(app_system, t.elapsed().as_secs_f32());
+                }
             }
             app_update_context.event_queue.notify_clear().unwrap();
         }
@@ -4265,62 +4429,7 @@ async fn app_menu_on_add_sprite<'subsystem>(
         resp_results_iter.next();
     }
 
-    println!("selected: {uris:?}");
-
-    let mut added_sprites = Vec::with_capacity(uris.len());
-    for x in uris {
-        let path = std::path::PathBuf::from(match x.to_str() {
-            Ok(x) => x.strip_prefix("file://").unwrap(),
-            Err(e) => {
-                tracing::warn!(reason = ?e, "invalid path");
-                continue;
-            }
-        });
-        if path.is_dir() {
-            // process all files in directory(rec)
-            for entry in walkdir::WalkDir::new(&path)
-                .into_iter()
-                .filter_map(|e| e.ok())
-            {
-                let path = entry.path();
-                if !path.is_file() {
-                    // 自分自身を含むみたいなのでその場合は見逃す
-                    continue;
-                }
-
-                let mut fs = std::fs::File::open(&path).unwrap();
-                let Some(png_meta) = source_reader::png::Metadata::try_read(&mut fs) else {
-                    // PNGじゃないのは一旦見逃す
-                    continue;
-                };
-
-                added_sprites.push(SpriteInfo::new(
-                    path.file_stem().unwrap().to_str().unwrap().into(),
-                    path.to_path_buf(),
-                    png_meta.width,
-                    png_meta.height,
-                ));
-            }
-        } else {
-            let mut fs = std::fs::File::open(&path).unwrap();
-            let png_meta = match source_reader::png::Metadata::try_read(&mut fs) {
-                Some(x) => x,
-                None => {
-                    tracing::warn!(?path, "not a png?");
-                    continue;
-                }
-            };
-
-            added_sprites.push(SpriteInfo::new(
-                path.file_stem().unwrap().to_str().unwrap().into(),
-                path.to_path_buf(),
-                png_meta.width,
-                png_meta.height,
-            ));
-        }
-    }
-
-    app_state.borrow_mut().add_sprites(added_sprites);
+    app_state.borrow_mut().add_sprites_by_uri_list(uris);
 }
 
 #[cfg(target_os = "linux")]

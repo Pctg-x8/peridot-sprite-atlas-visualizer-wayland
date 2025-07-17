@@ -40,6 +40,7 @@ pub mod svg;
 
 pub struct FontSet {
     pub ui_default: freetype::Owned<freetype::Face>,
+    pub ui_extra_large: freetype::Owned<freetype::Face>,
 }
 
 bitflags! {
@@ -52,6 +53,7 @@ bitflags! {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FontType {
     UI,
+    UIExtraLarge,
 }
 
 pub struct AppBaseSystem<'subsystem> {
@@ -254,6 +256,18 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
             }
         };
 
+        let ft_face_extra_large = match subsystem
+            .ft
+            .write()
+            .new_face(&primary_face_path, primary_face_index as _)
+        {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to create ft face");
+                std::process::exit(1);
+            }
+        };
+
         let composite_instance_buffer = CompositeInstanceManager::new(subsystem);
         let composition_alphamask_surface_atlas = CompositionSurfaceAtlas::new(
             subsystem,
@@ -268,6 +282,7 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
             hit_tree: HitTestTreeManager::new(),
             fonts: FontSet {
                 ui_default: ft_face,
+                ui_extra_large: ft_face_extra_large,
             },
             fs_cache,
             pipeline_cache: pipeline_cache.unmanage().0,
@@ -286,6 +301,14 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
             self.fonts
                 .ui_default
                 .set_char_size((10.0 * 64.0) as _, 0, (96.0 * scale) as _, 0)
+        {
+            tracing::warn!(reason = ?e, "Failed to set char size");
+        }
+
+        if let Err(e) =
+            self.fonts
+                .ui_extra_large
+                .set_char_size((80.0 * 64.0) as _, 0, (96.0 * scale) as _, 0)
         {
             tracing::warn!(reason = ?e, "Failed to set char size");
         }
@@ -402,6 +425,7 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
             text,
             match font_type {
                 FontType::UI => &mut self.fonts.ui_default,
+                FontType::UIExtraLarge => &mut self.fonts.ui_extra_large,
             },
         );
         let atlas_rect = self.alloc_mask_atlas_rect(layout.width_px(), layout.height_px());

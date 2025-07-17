@@ -472,18 +472,24 @@ impl wl::DataDeviceEventListener for WaylandShellEventHandler<'_, '_> {
 
     #[tracing::instrument(
         name = "<WaylandShellEventHandler as DataDeviceEventListener>::enter",
-        skip(self, _sender, _surface, id)
+        skip(self, _sender, surface, id)
     )]
     fn enter(
         &mut self,
         _sender: &mut wl::DataDevice,
         serial: u32,
-        _surface: &wl::Surface,
+        surface: &wl::Surface,
         x: wl::Fixed,
         y: wl::Fixed,
         id: Option<&wl::DataOffer>,
     ) {
         tracing::trace!("enter");
+
+        if !core::ptr::addr_eq(self.main_surface_proxy_ptr, surface) {
+            // not entering to main surface
+            self.active_data_offer = None;
+            return;
+        }
 
         let Some(ref offer_session) = self.active_data_offer else {
             // no data_offer session
@@ -528,6 +534,8 @@ impl wl::DataDeviceEventListener for WaylandShellEventHandler<'_, '_> {
             self.active_data_offer = None;
             return;
         }
+
+        self.app_event_bus.push(AppEvent::UIShowDragAndDropOverlay);
     }
 
     #[tracing::instrument(
@@ -539,6 +547,7 @@ impl wl::DataDeviceEventListener for WaylandShellEventHandler<'_, '_> {
 
         // drop active offer session
         self.active_data_offer = None;
+        self.app_event_bus.push(AppEvent::UIHideDragAndDropOverlay);
     }
 
     #[tracing::instrument(
@@ -617,6 +626,16 @@ impl wl::DataDeviceEventListener for WaylandShellEventHandler<'_, '_> {
             tracing::warn!(reason = ?e, "Failed to emit finish");
             return;
         }
+
+        self.app_event_bus
+            .push(AppEvent::AddSpritesByUriList(unsafe {
+                str::from_utf8_unchecked(&received)
+                    .split("\r\n")
+                    .filter(|x| !x.starts_with("#"))
+                    .filter(|x| !x.is_empty())
+                    .map(|x| std::ffi::CString::new(x).unwrap())
+                    .collect::<Vec<_>>()
+            }));
     }
 
     #[tracing::instrument(

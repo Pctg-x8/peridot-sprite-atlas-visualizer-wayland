@@ -18,6 +18,50 @@ use crate::{
     },
 };
 
+struct DataOfferSession {
+    obj: wl::Owned<wl::DataOffer>,
+    offered_mime_types: Vec<std::ffi::CString>,
+    allowed_source_actions: wl::DataDeviceManagerDndAction,
+}
+impl wl::DataOfferEventListener for DataOfferSession {
+    #[tracing::instrument(
+        name = "<WaylandShellEventHandler as DataOfferEventListener>::offer",
+        skip(self, sender)
+    )]
+    fn offer(&mut self, sender: &mut wl::DataOffer, mime_type: &core::ffi::CStr) {
+        assert!(self.obj.ref_eq(sender), "different offer?");
+
+        self.offered_mime_types.push(mime_type.into());
+    }
+
+    #[tracing::instrument(
+        name = "<WaylandShellEventHandler as DataOfferEventListener>::source_action",
+        skip(self, sender)
+    )]
+    fn source_actions(
+        &mut self,
+        sender: &mut wl::DataOffer,
+        source_actions: wl::DataDeviceManagerDndAction,
+    ) {
+        assert!(self.obj.ref_eq(sender), "different offer?");
+
+        self.allowed_source_actions = source_actions;
+    }
+
+    #[tracing::instrument(
+        name = "<WaylandShellEventHandler as DataOfferEventListener>::action",
+        skip(self, _sender)
+    )]
+    fn action(&mut self, _sender: &mut wl::DataOffer, dnd_action: wl::DataDeviceManagerDndAction) {
+        tracing::trace!("action");
+    }
+}
+impl DataOfferSession {
+    fn is_offer(&self, other: &wl::DataOffer) -> bool {
+        self.obj.ref_eq(other)
+    }
+}
+
 enum PointerOnSurface {
     None,
     Main { serial: u32 },
@@ -40,6 +84,7 @@ struct WaylandShellEventHandler<'a, 'subsystem> {
     pointer_last_surface_pos: (wl::Fixed, wl::Fixed),
     tiled: bool,
     title_bar_last_click: Option<std::time::Instant>,
+    active_data_offer: Option<Pin<Box<DataOfferSession>>>,
 }
 impl wl::XdgWmBaseEventListener for WaylandShellEventHandler<'_, '_> {
     fn ping(&mut self, wm_base: &mut wl::XdgWmBase, serial: u32) {
@@ -400,6 +445,844 @@ impl wl::ZxdgToplevelDecorationV1EventListener for WaylandShellEventHandler<'_, 
         }
 
         todo!("non server side decoration support");
+    }
+}
+impl wl::DataDeviceEventListener for WaylandShellEventHandler<'_, '_> {
+    #[tracing::instrument(
+        name = "<WaylandShellEventHandler as DataDeviceEventListener>::data_offer",
+        skip(self, _sender, id)
+    )]
+    fn data_offer(&mut self, _sender: &mut wl::DataDevice, id: wl::Owned<wl::DataOffer>) {
+        let mut session = Box::pin(DataOfferSession {
+            obj: id,
+            offered_mime_types: Vec::new(),
+            allowed_source_actions: wl::DataDeviceManagerDndAction::NONE,
+        });
+        if let Err(_) = unsafe {
+            session
+                .obj
+                .copy_ptr()
+                .as_mut()
+                .add_listener(session.as_mut().get_mut())
+        } {
+            tracing::warn!("Failed to set wl_data_offer listener");
+        }
+        self.active_data_offer = Some(session);
+    }
+
+    #[tracing::instrument(
+        name = "<WaylandShellEventHandler as DataDeviceEventListener>::enter",
+        skip(self, _sender, _surface, id)
+    )]
+    fn enter(
+        &mut self,
+        _sender: &mut wl::DataDevice,
+        serial: u32,
+        _surface: &wl::Surface,
+        x: wl::Fixed,
+        y: wl::Fixed,
+        id: Option<&wl::DataOffer>,
+    ) {
+        tracing::trace!("enter");
+
+        let Some(ref offer_session) = self.active_data_offer else {
+            // no data_offer session
+            return;
+        };
+
+        if id.is_none_or(|id| !offer_session.is_offer(id)) {
+            // different offer or null offer
+            return;
+        }
+
+        let Some(accepted_mime) = offer_session
+            .offered_mime_types
+            .iter()
+            .find(|x| x.as_c_str() == c"text/uri-list")
+        else {
+            tracing::warn!(offered_mime_types = ?offer_session.offered_mime_types, "cannot accept any of offerred mime types");
+            self.active_data_offer = None;
+            return;
+        };
+
+        if let Err(e) = offer_session.obj.accept(serial, Some(accepted_mime)) {
+            tracing::warn!(reason = ?e, ?accepted_mime, "Failed to accept the mime");
+            self.active_data_offer = None;
+            return;
+        }
+
+        if !offer_session
+            .allowed_source_actions
+            .contains(wl::DataDeviceManagerDndAction::COPY)
+        {
+            tracing::warn!(allowed_source_actions = ?offer_session.allowed_source_actions, "copy operation is not allowed for this source");
+            self.active_data_offer = None;
+            return;
+        }
+
+        if let Err(e) = offer_session.obj.set_actions(
+            offer_session.allowed_source_actions,
+            wl::DataDeviceManagerDndAction::COPY,
+        ) {
+            tracing::warn!(reason = ?e, "Failed to set dnd action");
+            self.active_data_offer = None;
+            return;
+        }
+    }
+
+    #[tracing::instrument(
+        name = "<WaylandShellEventHandler as DataDeviceEventListener>::leave",
+        skip(self, _sender)
+    )]
+    fn leave(&mut self, _sender: &mut wl::DataDevice) {
+        tracing::trace!("leave");
+
+        // drop active offer session
+        self.active_data_offer = None;
+    }
+
+    #[tracing::instrument(
+        name = "<WaylandShellEventHandler as DataDeviceEventListener>::motion",
+        skip(self, _sender)
+    )]
+    fn motion(&mut self, _sender: &mut wl::DataDevice, time: u32, x: wl::Fixed, y: wl::Fixed) {
+        tracing::trace!("motion");
+    }
+
+    #[tracing::instrument(
+        name = "<WaylandShellEventHandler as DataDeviceEventListener>::drop",
+        skip(self, sender)
+    )]
+    fn drop(&mut self, sender: &mut wl::DataDevice) {
+        tracing::trace!("drop");
+
+        let Some(offer_session) = self.active_data_offer.take() else {
+            // not in an offer session
+            return;
+        };
+
+        let Some(accepted_mime) = offer_session
+            .offered_mime_types
+            .iter()
+            .find(|x| x.as_c_str() == c"text/uri-list")
+        else {
+            tracing::warn!(offered_mime_types = ?offer_session.offered_mime_types, "cannot accept any of offerred mime types");
+            self.active_data_offer = None;
+            return;
+        };
+
+        let mut pipefd = [0 as core::ffi::c_int; 2];
+        let r = unsafe { libc::pipe(pipefd.as_mut_ptr()) };
+        if r < 0 {
+            tracing::warn!(reason = ?std::io::Error::last_os_error(), "Failed to create pipe");
+            return;
+        }
+        let [readfd, writefd] = pipefd;
+
+        if let Err(e) = offer_session.obj.receive(accepted_mime, &writefd) {
+            tracing::warn!(reason = ?e, "Failed to request receive");
+            unsafe {
+                libc::close(readfd);
+                libc::close(writefd);
+            }
+            return;
+        }
+        unsafe {
+            libc::close(writefd);
+        }
+
+        let r = unsafe { wl::ffi::wl_display_roundtrip(sender.display()) };
+        println!("rt {r}");
+
+        let mut received = Vec::<u8>::new();
+        let mut readbuf = vec![0u8; 8192];
+        loop {
+            let b = unsafe { libc::read(readfd, readbuf.as_mut_ptr() as *mut _, readbuf.len()) };
+            if b <= 0 {
+                break;
+            }
+
+            received.extend(&readbuf[..b as usize]);
+        }
+
+        println!("dnd receive: {}", unsafe {
+            str::from_utf8_unchecked(&received)
+        });
+
+        unsafe {
+            libc::close(readfd);
+        }
+
+        if let Err(e) = offer_session.obj.finish() {
+            tracing::warn!(reason = ?e, "Failed to emit finish");
+            return;
+        }
+    }
+
+    #[tracing::instrument(
+        name = "<WaylandShellEventHandler as DataDeviceEventListener>::selection",
+        skip(self, _sender, id)
+    )]
+    fn selection(&mut self, _sender: &mut wl::DataDevice, id: Option<&wl::DataOffer>) {
+        tracing::trace!("selection");
+
+        if let (Some(offer), Some(active_offer)) = (id, self.active_data_offer.as_ref())
+            && active_offer.is_offer(offer)
+        {
+            // drop active offer
+            self.active_data_offer = None;
+        }
+    }
+}
+
+pub struct AppShell<'a, 'subsystem> {
+    shell_event_handler: Box<UnsafeCell<WaylandShellEventHandler<'a, 'subsystem>>>,
+    display: wl::Display,
+    content_surface: core::ptr::NonNull<wl::Surface>,
+    xdg_surface: core::ptr::NonNull<wl::XdgSurface>,
+    xdg_toplevel: core::ptr::NonNull<wl::XdgToplevel>,
+    zxdg_exporter_v2: Option<core::ptr::NonNull<wl::ZxdgExporterV2>>,
+    cursor_shape_device: core::ptr::NonNull<wl::WpCursorShapeDeviceV1>,
+    frame_callback: Cell<core::ptr::NonNull<wl::Callback>>,
+    _gtk_surface: Option<core::ptr::NonNull<wl::GtkSurface1>>,
+    data_device: Option<core::ptr::NonNull<wl::DataDevice>>,
+    has_server_side_decoration: bool,
+}
+impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
+    #[tracing::instrument(skip(events, base_sys))]
+    pub fn new(events: &'a AppEventBus, base_sys: *mut AppBaseSystem<'subsystem>) -> Self {
+        let dp = wl::Display::connect().unwrap();
+        let mut registry = dp.get_registry().unwrap();
+        struct RegistryListener {
+            compositor: Option<wl::Owned<wl::Compositor>>,
+            subcompositor: Option<wl::Owned<wl::Subcompositor>>,
+            xdg_wm_base: Option<wl::Owned<wl::XdgWmBase>>,
+            seat: Option<wl::Owned<wl::Seat>>,
+            cursor_shape_manager: Option<wl::Owned<WpCursorShapeManagerV1>>,
+            zxdg_exporter_v2: Option<wl::Owned<wl::ZxdgExporterV2>>,
+            fractional_scale_manager_v1: Option<wl::Owned<wl::WpFractionalScaleManagerV1>>,
+            gtk_shell1: Option<wl::Owned<wl::GtkShell1>>,
+            shm: Option<wl::Owned<wl::Shm>>,
+            viewporter: Option<wl::Owned<wl::WpViewporter>>,
+            zxdg_decoration_manager_v1: Option<wl::Owned<wl::ZxdgDecorationManagerV1>>,
+            data_device_manager: Option<wl::Owned<wl::DataDeviceManager>>,
+        }
+        impl wl::RegistryListener for RegistryListener {
+            #[tracing::instrument(name = "RegistryListener::global", skip(self, registry))]
+            fn global(
+                &mut self,
+                registry: &mut wl::Registry,
+                name: u32,
+                interface: &core::ffi::CStr,
+                version: u32,
+            ) {
+                tracing::debug!("wl global");
+
+                #[inline]
+                fn try_bind<T: wl::Interface>(
+                    registry: &mut wl::Registry,
+                    name: u32,
+                    version: u32,
+                ) -> Option<wl::Owned<T>> {
+                    match registry.bind(name, version) {
+                        Ok(x) => Some(x),
+                        Err(e) => {
+                            tracing::warn!(reason = ?e, "Failed to bind");
+                            None
+                        }
+                    }
+                }
+
+                if interface == c"wl_compositor" {
+                    self.compositor = try_bind(registry, name, version);
+                } else if interface == c"wl_subcompositor" {
+                    self.subcompositor = try_bind(registry, name, version);
+                } else if interface == c"xdg_wm_base" {
+                    self.xdg_wm_base = try_bind(registry, name, version);
+                } else if interface == c"wl_seat" {
+                    self.seat = try_bind(registry, name, version);
+                } else if interface == c"wp_cursor_shape_manager_v1" {
+                    self.cursor_shape_manager = try_bind(registry, name, version);
+                } else if interface == c"zxdg_exporter_v2" {
+                    self.zxdg_exporter_v2 = try_bind(registry, name, version);
+                } else if interface == c"wp_fractional_scale_manager_v1" {
+                    self.fractional_scale_manager_v1 = try_bind(registry, name, version);
+                } else if interface == c"gtk_shell1" {
+                    self.gtk_shell1 = try_bind(registry, name, version);
+                } else if interface == c"wl_shm" {
+                    self.shm = try_bind(registry, name, version);
+                } else if interface == c"wp_viewporter" {
+                    self.viewporter = try_bind(registry, name, version);
+                } else if interface == c"zxdg_decoration_manager_v1" {
+                    self.zxdg_decoration_manager_v1 = try_bind(registry, name, version);
+                } else if interface == c"wl_data_device_manager" {
+                    self.data_device_manager = try_bind(registry, name, version);
+                }
+            }
+
+            fn global_remove(&mut self, _registry: &mut wl::Registry, name: u32) {
+                tracing::warn!(name, "unimplemented: wl global remove");
+            }
+        }
+        let mut rl = RegistryListener {
+            compositor: None,
+            subcompositor: None,
+            xdg_wm_base: None,
+            seat: None,
+            cursor_shape_manager: None,
+            zxdg_exporter_v2: None,
+            fractional_scale_manager_v1: None,
+            gtk_shell1: None,
+            shm: None,
+            viewporter: None,
+            zxdg_decoration_manager_v1: None,
+            data_device_manager: None,
+        };
+        if let Err(e) = registry.add_listener(&mut rl) {
+            tracing::warn!(target = "registry", reason = ?e, "Failed to set listener");
+        }
+        if let Err(e) = dp.roundtrip() {
+            tracing::warn!(reason = ?e, "Failed to roundtrip");
+        }
+        drop(registry);
+
+        let (
+            compositor,
+            subcompositor,
+            mut xdg_wm_base,
+            mut seat,
+            cursor_shape_manager,
+            zxdg_exporter_v2,
+            fractional_scale_manager_v1,
+            mut gtk_shell1,
+            shm,
+            viewporter,
+            zxdg_decoration_manager_v1,
+            data_device_manager,
+        );
+        match rl {
+            RegistryListener {
+                compositor: Some(compositor1),
+                subcompositor: Some(subcompositor1),
+                xdg_wm_base: Some(xdg_wm_base1),
+                seat: Some(seat1),
+                cursor_shape_manager: Some(cursor_shape_manager1),
+                zxdg_exporter_v2: zxdg_exporter_v21,
+                fractional_scale_manager_v1: fractional_scale_manager_v11,
+                gtk_shell1: gtk_shell11,
+                shm: Some(shm1),
+                viewporter: Some(viewporter1),
+                zxdg_decoration_manager_v1: zxdg_decoration_manager_v11,
+                data_device_manager: data_device_manager1,
+            } => {
+                compositor = compositor1;
+                subcompositor = subcompositor1;
+                xdg_wm_base = xdg_wm_base1;
+                seat = seat1;
+                cursor_shape_manager = cursor_shape_manager1;
+                zxdg_exporter_v2 = zxdg_exporter_v21;
+                fractional_scale_manager_v1 = fractional_scale_manager_v11;
+                gtk_shell1 = gtk_shell11;
+                shm = shm1;
+                viewporter = viewporter1;
+                zxdg_decoration_manager_v1 = zxdg_decoration_manager_v11;
+                data_device_manager = data_device_manager1;
+            }
+            rl => {
+                if rl.compositor.is_none() {
+                    tracing::error!(
+                        interface = "wl_compositor",
+                        "Missing required wayland interface"
+                    );
+                }
+                if rl.subcompositor.is_none() {
+                    tracing::error!(
+                        interface = "wl_subcompositor",
+                        "Missing required wayland interface"
+                    );
+                }
+                if rl.xdg_wm_base.is_none() {
+                    tracing::error!(
+                        interface = "xdg_wm_base",
+                        "Missing required wayland interface"
+                    );
+                }
+                if rl.seat.is_none() {
+                    tracing::error!(interface = "wl_seat", "Missing required wayland interface");
+                }
+                if rl.cursor_shape_manager.is_none() {
+                    tracing::error!(
+                        interface = "wp_cursor_shape_manager_v1",
+                        "Missing required wayland interface"
+                    );
+                }
+                if rl.shm.is_none() {
+                    tracing::error!(interface = "wl_shm", "Missing required wayland interface");
+                }
+                if rl.viewporter.is_none() {
+                    tracing::error!(
+                        interface = "wp_viewporter",
+                        "Missing required wayland interface"
+                    );
+                }
+
+                std::process::abort();
+            }
+        }
+
+        struct SeatListener {
+            pointer: Option<wl::Owned<wl::Pointer>>,
+        }
+        impl wl::SeatEventListener for SeatListener {
+            fn capabilities(&mut self, seat: &mut wl::Seat, capabilities: u32) {
+                tracing::debug!(capabilities = format!("0x{capabilities:04x}"), "seat event");
+
+                if (capabilities & 0x01) != 0 {
+                    // pointer
+                    self.pointer = match seat.get_pointer() {
+                        Ok(x) => Some(x),
+                        Err(e) => {
+                            tracing::warn!(reason = ?e, "Failed to get pointer");
+                            None
+                        }
+                    };
+                }
+            }
+
+            fn name(&mut self, _seat: &mut wl::Seat, name: &core::ffi::CStr) {
+                tracing::debug!(?name, "seat event");
+            }
+        }
+        let mut seat_listener = SeatListener { pointer: None };
+        if let Err(e) = seat.add_listener(&mut seat_listener) {
+            tracing::warn!(target = "seat", reason = ?e, "Failed to set listener");
+        }
+        if let Err(e) = dp.roundtrip() {
+            tracing::warn!(reason = ?e, "Failed to roundtrip");
+        }
+
+        let mut pointer = match seat_listener {
+            SeatListener { pointer: Some(p) } => p,
+            _ => {
+                tracing::error!("No pointer from seat");
+                std::process::abort();
+            }
+        };
+        let cursor_shape_device = match cursor_shape_manager.get_pointer(&mut pointer) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to get cursor shape device");
+                std::process::abort();
+            }
+        };
+
+        let mut main_surface = match compositor.create_surface() {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to create main surface");
+                std::process::exit(1);
+            }
+        };
+        let mut xdg_surface = match xdg_wm_base.get_xdg_surface(&main_surface) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to get xdg surface");
+                std::process::abort();
+            }
+        };
+        let mut xdg_toplevel = match xdg_surface.get_toplevel() {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to get xdg toplevel");
+                std::process::abort();
+            }
+        };
+        if let Err(e) = xdg_toplevel.set_app_id(c"io.ct2.peridot.tools.sprite_atlas") {
+            tracing::warn!(reason = ?e, "Failed to set app id");
+        }
+        if let Err(e) = xdg_toplevel.set_title(c"Peridot SpriteAtlas Visualizer/Editor") {
+            tracing::warn!(reason = ?e, "Failed to set app title");
+        }
+        xdg_toplevel.set_min_size(160, 120).unwrap();
+
+        let app_decorator;
+        if zxdg_decoration_manager_v1.is_none() {
+            // client decoration: backdrop shadow
+            let deco = AppShellDecorator::new(
+                &compositor,
+                &subcompositor,
+                shm,
+                &viewporter,
+                &main_surface,
+            );
+            deco.active();
+            app_decorator = Some(deco);
+        } else {
+            app_decorator = None;
+        }
+
+        let mut frame = match main_surface.frame() {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to request next frame");
+                std::process::abort();
+            }
+        };
+
+        let mut gtk_surface = if let Some(ref x) = gtk_shell1 {
+            match x.get_gtk_surface(&main_surface) {
+                Ok(x) => Some(x),
+                Err(e) => {
+                    tracing::warn!(reason = ?e, "Failed to create gtk_surface1");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if let Some(ref x) = gtk_surface {
+            x.present(0).unwrap();
+        }
+
+        let mut data_device = if let Some(ref m) = data_device_manager {
+            match m.get_data_device(&seat) {
+                Ok(x) => Some(x),
+                Err(e) => {
+                    tracing::warn!(reason = ?e, "Failed to get data device");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let pointer_input_manager = Box::pin(UnsafeCell::new(PointerInputManager::new()));
+
+        let mut shell_event_handler = Box::new(UnsafeCell::new(WaylandShellEventHandler {
+            app_event_bus: events,
+            // 現時点ではわからないので適当な値を設定
+            cached_client_size_px: (640, 480),
+            buffer_scale: 1,
+            ui_scale_factor: 1.0,
+            pointer_on_surface: PointerOnSurface::None,
+            main_surface_proxy_ptr: main_surface.as_raw() as _,
+            xdg_surface_proxy_ptr: xdg_surface.as_raw() as _,
+            xdg_toplevel_proxy_ptr: xdg_toplevel.as_raw() as _,
+            primary_seat_ptr: seat.as_raw() as _,
+            client_decoration: app_decorator,
+            pointer_input_manager,
+            base_system_ptr: base_sys,
+            cursor_shape_device: cursor_shape_device.as_raw() as _,
+            pointer_last_surface_pos: (
+                wl::Fixed::from_f32_lossy(0.0),
+                wl::Fixed::from_f32_lossy(0.0),
+            ),
+            tiled: false,
+            title_bar_last_click: None,
+            active_data_offer: None,
+        }));
+
+        if let Err(e) = pointer.add_listener(shell_event_handler.get_mut()) {
+            tracing::warn!(target = "pointer", reason = ?e, "Failed to set listener");
+        }
+        if let Err(e) = xdg_surface.add_listener(shell_event_handler.get_mut()) {
+            tracing::warn!(target = "xdg_surface", reason = ?e, "Failed to set listener");
+        }
+        if let Err(e) = xdg_toplevel.add_listener(shell_event_handler.get_mut()) {
+            tracing::warn!(target = "xdg_toplevel", reason = ?e, "Failed to set listener");
+        }
+        if let Err(e) = xdg_wm_base.add_listener(shell_event_handler.get_mut()) {
+            tracing::warn!(target = "xdg_wm_base", reason = ?e, "Failed to set listener");
+        }
+        if let Err(e) = main_surface.add_listener(shell_event_handler.get_mut()) {
+            tracing::warn!(target = "wl_surface", reason = ?e, "Failed to set listener");
+        }
+        if let Err(e) = frame.add_listener(shell_event_handler.get_mut()) {
+            tracing::warn!(target = "frame", reason = ?e, "Failed to set listener");
+        }
+
+        'optin_fractional_scale: {
+            let Some(ref m) = fractional_scale_manager_v1 else {
+                // no wp_fractional_scale_manager_v1
+                break 'optin_fractional_scale;
+            };
+
+            let Ok(mut fs) = m.get_fractional_scale(&main_surface) else {
+                // errored(logged via tracing::instrument)
+                break 'optin_fractional_scale;
+            };
+
+            if let Err(e) = fs.add_listener(shell_event_handler.get_mut()) {
+                tracing::warn!(target = "fractional_scale", reason = ?e, "Failed to set listener");
+            }
+
+            fs.leak();
+        }
+
+        if let Some(ref mut x) = gtk_shell1
+            && let Err(e) = x.add_listener(shell_event_handler.get_mut())
+        {
+            tracing::warn!(target = "gtk_shell1", reason = ?e, "Failed to set listener");
+        }
+        if let Some(ref mut x) = gtk_surface
+            && let Err(e) = x.add_listener(shell_event_handler.get_mut())
+        {
+            tracing::warn!(target = "gtk_surface1", reason = ?e, "Failed to set listener");
+        }
+        if let Some(ref mut x) = data_device
+            && let Err(e) = x.add_listener(shell_event_handler.get_mut())
+        {
+            tracing::warn!(target = "wl_data_device", reason = ?e, "Failed to set listener");
+        }
+
+        'optin_decoration: {
+            let Some(ref m) = zxdg_decoration_manager_v1 else {
+                // no zxdg_decoration_manager_v1
+                break 'optin_decoration;
+            };
+
+            let Ok(mut x) = m.get_toplevel_decoration(&xdg_toplevel) else {
+                // errored(logged via tracing::instrument)
+                break 'optin_decoration;
+            };
+
+            if let Err(e) = x.add_listener(shell_event_handler.get_mut()) {
+                tracing::warn!(target = "zxdg_toplevel_decoration", reason = ?e, "Failed to set listener");
+            }
+
+            x.leak();
+        }
+
+        if let Err(e) = main_surface.commit() {
+            tracing::warn!(reason = ?e, "Failed to commit wl_surface");
+        }
+
+        if let Err(e) = dp.roundtrip() {
+            tracing::warn!(reason = ?e, "Failed to final roundtrip");
+        }
+
+        compositor.leak();
+        subcompositor.leak();
+        viewporter.leak();
+        xdg_wm_base.leak();
+        seat.leak();
+        cursor_shape_manager.leak();
+        pointer.leak();
+        if let Some(x) = fractional_scale_manager_v1 {
+            x.leak();
+        }
+        if let Some(x) = gtk_shell1 {
+            x.leak();
+        }
+        if let Some(x) = data_device_manager {
+            x.leak();
+        }
+        let has_server_side_decoration = zxdg_decoration_manager_v1.is_some();
+        if let Some(zxdg_decoration_manager_v1) = zxdg_decoration_manager_v1 {
+            zxdg_decoration_manager_v1.leak();
+        }
+
+        Self {
+            shell_event_handler,
+            display: dp,
+            content_surface: main_surface.unwrap(),
+            xdg_surface: xdg_surface.unwrap(),
+            xdg_toplevel: xdg_toplevel.unwrap(),
+            cursor_shape_device: cursor_shape_device.unwrap(),
+            frame_callback: Cell::new(frame.unwrap()),
+            zxdg_exporter_v2: zxdg_exporter_v2.map(|x| x.unwrap()),
+            _gtk_surface: gtk_surface.map(|x| x.unwrap()),
+            data_device: data_device.map(|x| x.unwrap()),
+            has_server_side_decoration,
+        }
+    }
+
+    pub fn sync(&self) {
+        if let Err(e) = self.display.roundtrip() {
+            tracing::warn!(reason = ?e, "wayland display roundtrip failed");
+        }
+    }
+
+    pub const fn is_floating_window(&self) -> bool {
+        // TODO: detect floating/tiling window system
+        false
+    }
+
+    pub const fn server_side_decoration_provided(&self) -> bool {
+        self.has_server_side_decoration
+    }
+
+    pub unsafe fn create_vulkan_surface(
+        &mut self,
+        instance: &impl br::Instance,
+    ) -> br::Result<br::vk::VkSurfaceKHR> {
+        unsafe {
+            br::WaylandSurfaceCreateInfo::new(
+                self.display.as_raw() as _,
+                self.content_surface.as_ptr() as _,
+            )
+            .execute(instance, None)
+        }
+    }
+
+    pub fn client_size(&self) -> (f32, f32) {
+        let ui_scale_factor = unsafe { (*self.shell_event_handler.get()).ui_scale_factor };
+        let (w, h) = unsafe { (*self.shell_event_handler.get()).cached_client_size_px };
+
+        (w as f32 / ui_scale_factor, h as f32 / ui_scale_factor)
+    }
+
+    pub fn client_size_pixels(&self) -> (u32, u32) {
+        let (w, h) = unsafe { (*self.shell_event_handler.get()).cached_client_size_px };
+
+        (w, h)
+    }
+
+    #[tracing::instrument(skip(self))]
+    pub fn flush(&self) {
+        if let Err(e) = self.display.flush() {
+            tracing::warn!(reason = ?e, "Failed to flush display events");
+        }
+    }
+
+    #[tracing::instrument(skip(self))]
+    pub fn prepare_read_events(&self) -> std::io::Result<()> {
+        loop {
+            match self.display.prepare_read() {
+                Ok(_) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if let Err(e) = self.display.dispatch_pending() {
+                        tracing::error!(reason = ?e, "Failed to dispatch pending events");
+                        return Err(e);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(reason = ?e, "Failed to prepare reading events");
+                    return Err(e);
+                }
+            }
+        }
+
+        if let Err(e) = self.display.flush() {
+            tracing::error!(reason = ?e, "Failed to flush outgoing events");
+            return Err(e);
+        }
+
+        Ok(())
+    }
+
+    #[inline(always)]
+    pub fn display_fd(&self) -> RawFd {
+        self.display.as_raw_fd()
+    }
+
+    pub fn cancel_read_events(&self) {
+        self.display.cancel_read();
+    }
+
+    #[tracing::instrument(skip(self))]
+    pub fn read_and_process_events(&self) -> std::io::Result<()> {
+        if let Err(e) = self.display.read_events() {
+            tracing::error!(reason = ?e, "Failed to read events");
+            return Err(e);
+        }
+
+        if let Err(e) = self.display.dispatch_pending() {
+            tracing::warn!(reason = ?e, "Failed to dispatch incoming events");
+        }
+
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self))]
+    pub fn request_next_frame(&self) {
+        let mut next_callback = match unsafe { self.content_surface.as_ref() }.frame() {
+            Ok(cb) => cb,
+            Err(e) => {
+                tracing::warn!(reason = ?e, "Failed to request next frame");
+                return;
+            }
+        };
+        if let Err(e) = next_callback.add_listener(unsafe { &mut *self.shell_event_handler.get() })
+        {
+            tracing::warn!(target = "frame_callback", reason = ?e, "Failed to set listener");
+        }
+
+        self.frame_callback.set(next_callback.unwrap());
+    }
+
+    pub fn capture_pointer(&self) {
+        /* do nothing currently(maybe requires on floating-window system) */
+    }
+
+    pub fn release_pointer(&self) {
+        /* do nothing currently(maybe requires on floating-window system) */
+    }
+
+    pub fn close_safe(&self) {
+        // do nothing for wayland
+    }
+
+    pub fn minimize(&self) {
+        if let Err(e) = unsafe { self.xdg_toplevel.as_ref() }.set_minimized() {
+            tracing::warn!(reason = ?e, "Failed to call set_minimized");
+        }
+    }
+
+    pub fn toggle_maximize_restore(&self) {
+        if self.is_tiled() {
+            if let Err(e) = unsafe { self.xdg_toplevel.as_ref() }.unset_maximized() {
+                tracing::warn!(reason = ?e, "Failed to call unset_maximized");
+            }
+        } else {
+            if let Err(e) = unsafe { self.xdg_toplevel.as_ref() }.set_maximized() {
+                tracing::warn!(reason = ?e, "Failed to call set_maximized");
+            }
+        }
+    }
+
+    pub fn is_tiled(&self) -> bool {
+        unsafe { &*self.shell_event_handler.get() }.tiled
+    }
+
+    #[tracing::instrument(skip(self))]
+    pub fn set_cursor_shape(&self, enter_serial: u32, shape: CursorShape) {
+        if let Err(e) = unsafe { self.cursor_shape_device.as_ref() }.set_shape(
+            enter_serial,
+            match shape {
+                CursorShape::Default => WpCursorShapeDeviceV1Shape::Default,
+                CursorShape::ResizeHorizontal => WpCursorShapeDeviceV1Shape::EwResize,
+            },
+        ) {
+            tracing::warn!(reason = ?e, "Failed to set cursor shape");
+        }
+    }
+
+    // wayland specific functionality
+    pub fn try_export_toplevel(&self) -> Option<wl::Owned<wl::ZxdgExportedV2>> {
+        let Some(ref x) = self.zxdg_exporter_v2 else {
+            tracing::warn!("No zxdg_exporter_v2 found on the system");
+            return None;
+        };
+
+        match unsafe { x.as_ref() }.export_toplevel(unsafe { self.content_surface.as_ref() }) {
+            Ok(x) => Some(x),
+            Err(e) => {
+                tracing::warn!(reason = ?e, "Failed to get exported toplevel");
+                None
+            }
+        }
+    }
+
+    #[inline]
+    pub fn ui_scale_factor(&self) -> f32 {
+        unsafe { (*self.shell_event_handler.get()).ui_scale_factor }
+    }
+
+    #[inline]
+    pub fn pointer_input_manager(&self) -> &UnsafeCell<PointerInputManager> {
+        unsafe { &(*self.shell_event_handler.get()).pointer_input_manager }
     }
 }
 
@@ -1070,626 +1953,5 @@ impl AppShellDecorator {
         }
 
         shm
-    }
-}
-
-pub struct AppShell<'a, 'subsystem> {
-    shell_event_handler: Box<UnsafeCell<WaylandShellEventHandler<'a, 'subsystem>>>,
-    display: wl::Display,
-    content_surface: core::ptr::NonNull<wl::Surface>,
-    xdg_surface: core::ptr::NonNull<wl::XdgSurface>,
-    xdg_toplevel: core::ptr::NonNull<wl::XdgToplevel>,
-    zxdg_exporter_v2: Option<core::ptr::NonNull<wl::ZxdgExporterV2>>,
-    cursor_shape_device: core::ptr::NonNull<wl::WpCursorShapeDeviceV1>,
-    frame_callback: Cell<core::ptr::NonNull<wl::Callback>>,
-    _gtk_surface: Option<core::ptr::NonNull<wl::GtkSurface1>>,
-    has_server_side_decoration: bool,
-}
-impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
-    #[tracing::instrument(skip(events, base_sys))]
-    pub fn new(events: &'a AppEventBus, base_sys: *mut AppBaseSystem<'subsystem>) -> Self {
-        let dp = wl::Display::connect().unwrap();
-        let mut registry = dp.get_registry().unwrap();
-        struct RegistryListener {
-            compositor: Option<wl::Owned<wl::Compositor>>,
-            subcompositor: Option<wl::Owned<wl::Subcompositor>>,
-            xdg_wm_base: Option<wl::Owned<wl::XdgWmBase>>,
-            seat: Option<wl::Owned<wl::Seat>>,
-            cursor_shape_manager: Option<wl::Owned<WpCursorShapeManagerV1>>,
-            zxdg_exporter_v2: Option<wl::Owned<wl::ZxdgExporterV2>>,
-            fractional_scale_manager_v1: Option<wl::Owned<wl::WpFractionalScaleManagerV1>>,
-            gtk_shell1: Option<wl::Owned<wl::GtkShell1>>,
-            shm: Option<wl::Owned<wl::Shm>>,
-            viewporter: Option<wl::Owned<wl::WpViewporter>>,
-            zxdg_decoration_manager_v1: Option<wl::Owned<wl::ZxdgDecorationManagerV1>>,
-        }
-        impl wl::RegistryListener for RegistryListener {
-            #[tracing::instrument(name = "RegistryListener::global", skip(self, registry))]
-            fn global(
-                &mut self,
-                registry: &mut wl::Registry,
-                name: u32,
-                interface: &core::ffi::CStr,
-                version: u32,
-            ) {
-                tracing::debug!("wl global");
-
-                #[inline]
-                fn try_bind<T: wl::Interface>(
-                    registry: &mut wl::Registry,
-                    name: u32,
-                    version: u32,
-                ) -> Option<wl::Owned<T>> {
-                    match registry.bind(name, version) {
-                        Ok(x) => Some(x),
-                        Err(e) => {
-                            tracing::warn!(reason = ?e, "Failed to bind");
-                            None
-                        }
-                    }
-                }
-
-                if interface == c"wl_compositor" {
-                    self.compositor = try_bind(registry, name, version);
-                } else if interface == c"wl_subcompositor" {
-                    self.subcompositor = try_bind(registry, name, version);
-                } else if interface == c"xdg_wm_base" {
-                    self.xdg_wm_base = try_bind(registry, name, version);
-                } else if interface == c"wl_seat" {
-                    self.seat = try_bind(registry, name, version);
-                } else if interface == c"wp_cursor_shape_manager_v1" {
-                    self.cursor_shape_manager = try_bind(registry, name, version);
-                } else if interface == c"zxdg_exporter_v2" {
-                    self.zxdg_exporter_v2 = try_bind(registry, name, version);
-                } else if interface == c"wp_fractional_scale_manager_v1" {
-                    self.fractional_scale_manager_v1 = try_bind(registry, name, version);
-                } else if interface == c"gtk_shell1" {
-                    self.gtk_shell1 = try_bind(registry, name, version);
-                } else if interface == c"wl_shm" {
-                    self.shm = try_bind(registry, name, version);
-                } else if interface == c"wp_viewporter" {
-                    self.viewporter = try_bind(registry, name, version);
-                } else if interface == c"zxdg_decoration_manager_v1" {
-                    self.zxdg_decoration_manager_v1 = try_bind(registry, name, version);
-                }
-            }
-
-            fn global_remove(&mut self, _registry: &mut wl::Registry, name: u32) {
-                tracing::warn!(name, "unimplemented: wl global remove");
-            }
-        }
-        let mut rl = RegistryListener {
-            compositor: None,
-            subcompositor: None,
-            xdg_wm_base: None,
-            seat: None,
-            cursor_shape_manager: None,
-            zxdg_exporter_v2: None,
-            fractional_scale_manager_v1: None,
-            gtk_shell1: None,
-            shm: None,
-            viewporter: None,
-            zxdg_decoration_manager_v1: None,
-        };
-        if let Err(e) = registry.add_listener(&mut rl) {
-            tracing::warn!(target = "registry", reason = ?e, "Failed to set listener");
-        }
-        if let Err(e) = dp.roundtrip() {
-            tracing::warn!(reason = ?e, "Failed to roundtrip");
-        }
-        drop(registry);
-
-        let (
-            compositor,
-            subcompositor,
-            mut xdg_wm_base,
-            mut seat,
-            cursor_shape_manager,
-            zxdg_exporter_v2,
-            fractional_scale_manager_v1,
-            mut gtk_shell1,
-            shm,
-            viewporter,
-            zxdg_decoration_manager_v1,
-        );
-        match rl {
-            RegistryListener {
-                compositor: Some(compositor1),
-                subcompositor: Some(subcompositor1),
-                xdg_wm_base: Some(xdg_wm_base1),
-                seat: Some(seat1),
-                cursor_shape_manager: Some(cursor_shape_manager1),
-                zxdg_exporter_v2: zxdg_exporter_v21,
-                fractional_scale_manager_v1: fractional_scale_manager_v11,
-                gtk_shell1: gtk_shell11,
-                shm: Some(shm1),
-                viewporter: Some(viewporter1),
-                zxdg_decoration_manager_v1: zxdg_decoration_manager_v11,
-            } => {
-                compositor = compositor1;
-                subcompositor = subcompositor1;
-                xdg_wm_base = xdg_wm_base1;
-                seat = seat1;
-                cursor_shape_manager = cursor_shape_manager1;
-                zxdg_exporter_v2 = zxdg_exporter_v21;
-                fractional_scale_manager_v1 = fractional_scale_manager_v11;
-                gtk_shell1 = gtk_shell11;
-                shm = shm1;
-                viewporter = viewporter1;
-                zxdg_decoration_manager_v1 = zxdg_decoration_manager_v11;
-            }
-            rl => {
-                if rl.compositor.is_none() {
-                    tracing::error!(
-                        interface = "wl_compositor",
-                        "Missing required wayland interface"
-                    );
-                }
-                if rl.subcompositor.is_none() {
-                    tracing::error!(
-                        interface = "wl_subcompositor",
-                        "Missing required wayland interface"
-                    );
-                }
-                if rl.xdg_wm_base.is_none() {
-                    tracing::error!(
-                        interface = "xdg_wm_base",
-                        "Missing required wayland interface"
-                    );
-                }
-                if rl.seat.is_none() {
-                    tracing::error!(interface = "wl_seat", "Missing required wayland interface");
-                }
-                if rl.cursor_shape_manager.is_none() {
-                    tracing::error!(
-                        interface = "wp_cursor_shape_manager_v1",
-                        "Missing required wayland interface"
-                    );
-                }
-                if rl.shm.is_none() {
-                    tracing::error!(interface = "wl_shm", "Missing required wayland interface");
-                }
-                if rl.viewporter.is_none() {
-                    tracing::error!(
-                        interface = "wp_viewporter",
-                        "Missing required wayland interface"
-                    );
-                }
-
-                std::process::abort();
-            }
-        }
-
-        struct SeatListener {
-            pointer: Option<wl::Owned<wl::Pointer>>,
-        }
-        impl wl::SeatEventListener for SeatListener {
-            fn capabilities(&mut self, seat: &mut wl::Seat, capabilities: u32) {
-                tracing::debug!(capabilities = format!("0x{capabilities:04x}"), "seat event");
-
-                if (capabilities & 0x01) != 0 {
-                    // pointer
-                    self.pointer = match seat.get_pointer() {
-                        Ok(x) => Some(x),
-                        Err(e) => {
-                            tracing::warn!(reason = ?e, "Failed to get pointer");
-                            None
-                        }
-                    };
-                }
-            }
-
-            fn name(&mut self, _seat: &mut wl::Seat, name: &core::ffi::CStr) {
-                tracing::debug!(?name, "seat event");
-            }
-        }
-        let mut seat_listener = SeatListener { pointer: None };
-        if let Err(e) = seat.add_listener(&mut seat_listener) {
-            tracing::warn!(target = "seat", reason = ?e, "Failed to set listener");
-        }
-        if let Err(e) = dp.roundtrip() {
-            tracing::warn!(reason = ?e, "Failed to roundtrip");
-        }
-
-        let mut pointer = match seat_listener {
-            SeatListener { pointer: Some(p) } => p,
-            _ => {
-                tracing::error!("No pointer from seat");
-                std::process::abort();
-            }
-        };
-        let cursor_shape_device = match cursor_shape_manager.get_pointer(&mut pointer) {
-            Ok(x) => x,
-            Err(e) => {
-                tracing::error!(reason = ?e, "Failed to get cursor shape device");
-                std::process::abort();
-            }
-        };
-
-        let mut main_surface = match compositor.create_surface() {
-            Ok(x) => x,
-            Err(e) => {
-                tracing::error!(reason = ?e, "Failed to create main surface");
-                std::process::exit(1);
-            }
-        };
-        let mut xdg_surface = match xdg_wm_base.get_xdg_surface(&main_surface) {
-            Ok(x) => x,
-            Err(e) => {
-                tracing::error!(reason = ?e, "Failed to get xdg surface");
-                std::process::abort();
-            }
-        };
-        let mut xdg_toplevel = match xdg_surface.get_toplevel() {
-            Ok(x) => x,
-            Err(e) => {
-                tracing::error!(reason = ?e, "Failed to get xdg toplevel");
-                std::process::abort();
-            }
-        };
-        if let Err(e) = xdg_toplevel.set_app_id(c"io.ct2.peridot.tools.sprite_atlas") {
-            tracing::warn!(reason = ?e, "Failed to set app id");
-        }
-        if let Err(e) = xdg_toplevel.set_title(c"Peridot SpriteAtlas Visualizer/Editor") {
-            tracing::warn!(reason = ?e, "Failed to set app title");
-        }
-        xdg_toplevel.set_min_size(160, 120).unwrap();
-
-        let app_decorator;
-        if zxdg_decoration_manager_v1.is_none() {
-            // client decoration: backdrop shadow
-            let deco = AppShellDecorator::new(
-                &compositor,
-                &subcompositor,
-                shm,
-                &viewporter,
-                &main_surface,
-            );
-            deco.active();
-            app_decorator = Some(deco);
-        } else {
-            app_decorator = None;
-        }
-
-        let mut frame = match main_surface.frame() {
-            Ok(x) => x,
-            Err(e) => {
-                tracing::error!(reason = ?e, "Failed to request next frame");
-                std::process::abort();
-            }
-        };
-
-        let mut gtk_surface = if let Some(ref x) = gtk_shell1 {
-            match x.get_gtk_surface(&main_surface) {
-                Ok(x) => Some(x),
-                Err(e) => {
-                    tracing::warn!(reason = ?e, "Failed to create gtk_surface1");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        if let Some(ref x) = gtk_surface {
-            x.present(0).unwrap();
-        }
-
-        let pointer_input_manager = Box::pin(UnsafeCell::new(PointerInputManager::new()));
-
-        let mut shell_event_handler = Box::new(UnsafeCell::new(WaylandShellEventHandler {
-            app_event_bus: events,
-            // 現時点ではわからないので適当な値を設定
-            cached_client_size_px: (640, 480),
-            buffer_scale: 1,
-            ui_scale_factor: 1.0,
-            pointer_on_surface: PointerOnSurface::None,
-            main_surface_proxy_ptr: main_surface.as_raw() as _,
-            xdg_surface_proxy_ptr: xdg_surface.as_raw() as _,
-            xdg_toplevel_proxy_ptr: xdg_toplevel.as_raw() as _,
-            primary_seat_ptr: seat.as_raw() as _,
-            client_decoration: app_decorator,
-            pointer_input_manager,
-            base_system_ptr: base_sys,
-            cursor_shape_device: cursor_shape_device.as_raw() as _,
-            pointer_last_surface_pos: (
-                wl::Fixed::from_f32_lossy(0.0),
-                wl::Fixed::from_f32_lossy(0.0),
-            ),
-            tiled: false,
-            title_bar_last_click: None,
-        }));
-
-        if let Err(e) = pointer.add_listener(shell_event_handler.get_mut()) {
-            tracing::warn!(target = "pointer", reason = ?e, "Failed to set listener");
-        }
-        if let Err(e) = xdg_surface.add_listener(shell_event_handler.get_mut()) {
-            tracing::warn!(target = "xdg_surface", reason = ?e, "Failed to set listener");
-        }
-        if let Err(e) = xdg_toplevel.add_listener(shell_event_handler.get_mut()) {
-            tracing::warn!(target = "xdg_toplevel", reason = ?e, "Failed to set listener");
-        }
-        if let Err(e) = xdg_wm_base.add_listener(shell_event_handler.get_mut()) {
-            tracing::warn!(target = "xdg_wm_base", reason = ?e, "Failed to set listener");
-        }
-        if let Err(e) = main_surface.add_listener(shell_event_handler.get_mut()) {
-            tracing::warn!(target = "wl_surface", reason = ?e, "Failed to set listener");
-        }
-        if let Err(e) = frame.add_listener(shell_event_handler.get_mut()) {
-            tracing::warn!(target = "frame", reason = ?e, "Failed to set listener");
-        }
-
-        'optin_fractional_scale: {
-            let Some(ref m) = fractional_scale_manager_v1 else {
-                // no wp_fractional_scale_manager_v1
-                break 'optin_fractional_scale;
-            };
-
-            let Ok(mut fs) = m.get_fractional_scale(&main_surface) else {
-                // errored(logged via tracing::instrument)
-                break 'optin_fractional_scale;
-            };
-
-            if let Err(e) = fs.add_listener(shell_event_handler.get_mut()) {
-                tracing::warn!(target = "fractional_scale", reason = ?e, "Failed to set listener");
-            }
-
-            fs.leak();
-        }
-
-        if let Some(ref mut x) = gtk_shell1
-            && let Err(e) = x.add_listener(shell_event_handler.get_mut())
-        {
-            tracing::warn!(target = "gtk_shell1", reason = ?e, "Failed to set listener");
-        }
-        if let Some(ref mut x) = gtk_surface
-            && let Err(e) = x.add_listener(shell_event_handler.get_mut())
-        {
-            tracing::warn!(target = "gtk_surface1", reason = ?e, "Failed to set listener");
-        }
-
-        'optin_decoration: {
-            let Some(ref m) = zxdg_decoration_manager_v1 else {
-                // no zxdg_decoration_manager_v1
-                break 'optin_decoration;
-            };
-
-            let Ok(mut x) = m.get_toplevel_decoration(&xdg_toplevel) else {
-                // errored(logged via tracing::instrument)
-                break 'optin_decoration;
-            };
-
-            if let Err(e) = x.add_listener(shell_event_handler.get_mut()) {
-                tracing::warn!(target = "zxdg_toplevel_decoration", reason = ?e, "Failed to set listener");
-            }
-
-            x.leak();
-        }
-
-        if let Err(e) = main_surface.commit() {
-            tracing::warn!(reason = ?e, "Failed to commit wl_surface");
-        }
-
-        if let Err(e) = dp.roundtrip() {
-            tracing::warn!(reason = ?e, "Failed to final roundtrip");
-        }
-
-        compositor.leak();
-        subcompositor.leak();
-        viewporter.leak();
-        xdg_wm_base.leak();
-        seat.leak();
-        cursor_shape_manager.leak();
-        pointer.leak();
-        if let Some(x) = fractional_scale_manager_v1 {
-            x.leak();
-        }
-        if let Some(x) = gtk_shell1 {
-            x.leak();
-        }
-        let has_server_side_decoration = zxdg_decoration_manager_v1.is_some();
-        if let Some(zxdg_decoration_manager_v1) = zxdg_decoration_manager_v1 {
-            zxdg_decoration_manager_v1.leak();
-        }
-
-        Self {
-            shell_event_handler,
-            display: dp,
-            content_surface: main_surface.unwrap(),
-            xdg_surface: xdg_surface.unwrap(),
-            xdg_toplevel: xdg_toplevel.unwrap(),
-            cursor_shape_device: cursor_shape_device.unwrap(),
-            frame_callback: Cell::new(frame.unwrap()),
-            zxdg_exporter_v2: zxdg_exporter_v2.map(|x| x.unwrap()),
-            _gtk_surface: gtk_surface.map(|x| x.unwrap()),
-            has_server_side_decoration,
-        }
-    }
-
-    pub fn sync(&self) {
-        if let Err(e) = self.display.roundtrip() {
-            tracing::warn!(reason = ?e, "wayland display roundtrip failed");
-        }
-    }
-
-    pub const fn is_floating_window(&self) -> bool {
-        // TODO: detect floating/tiling window system
-        false
-    }
-
-    pub const fn server_side_decoration_provided(&self) -> bool {
-        self.has_server_side_decoration
-    }
-
-    pub unsafe fn create_vulkan_surface(
-        &mut self,
-        instance: &impl br::Instance,
-    ) -> br::Result<br::vk::VkSurfaceKHR> {
-        unsafe {
-            br::WaylandSurfaceCreateInfo::new(
-                self.display.as_raw() as _,
-                self.content_surface.as_ptr() as _,
-            )
-            .execute(instance, None)
-        }
-    }
-
-    pub fn client_size(&self) -> (f32, f32) {
-        let ui_scale_factor = unsafe { (*self.shell_event_handler.get()).ui_scale_factor };
-        let (w, h) = unsafe { (*self.shell_event_handler.get()).cached_client_size_px };
-
-        (w as f32 / ui_scale_factor, h as f32 / ui_scale_factor)
-    }
-
-    pub fn client_size_pixels(&self) -> (u32, u32) {
-        let (w, h) = unsafe { (*self.shell_event_handler.get()).cached_client_size_px };
-
-        (w, h)
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn flush(&self) {
-        if let Err(e) = self.display.flush() {
-            tracing::warn!(reason = ?e, "Failed to flush display events");
-        }
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn prepare_read_events(&self) -> std::io::Result<()> {
-        loop {
-            match self.display.prepare_read() {
-                Ok(_) => break,
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    if let Err(e) = self.display.dispatch_pending() {
-                        tracing::error!(reason = ?e, "Failed to dispatch pending events");
-                        return Err(e);
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(reason = ?e, "Failed to prepare reading events");
-                    return Err(e);
-                }
-            }
-        }
-
-        if let Err(e) = self.display.flush() {
-            tracing::error!(reason = ?e, "Failed to flush outgoing events");
-            return Err(e);
-        }
-
-        Ok(())
-    }
-
-    #[inline(always)]
-    pub fn display_fd(&self) -> RawFd {
-        self.display.as_raw_fd()
-    }
-
-    pub fn cancel_read_events(&self) {
-        self.display.cancel_read();
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn read_and_process_events(&self) -> std::io::Result<()> {
-        if let Err(e) = self.display.read_events() {
-            tracing::error!(reason = ?e, "Failed to read events");
-            return Err(e);
-        }
-
-        if let Err(e) = self.display.dispatch_pending() {
-            tracing::warn!(reason = ?e, "Failed to dispatch incoming events");
-        }
-
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn request_next_frame(&self) {
-        let mut next_callback = match unsafe { self.content_surface.as_ref() }.frame() {
-            Ok(cb) => cb,
-            Err(e) => {
-                tracing::warn!(reason = ?e, "Failed to request next frame");
-                return;
-            }
-        };
-        if let Err(e) = next_callback.add_listener(unsafe { &mut *self.shell_event_handler.get() })
-        {
-            tracing::warn!(target = "frame_callback", reason = ?e, "Failed to set listener");
-        }
-
-        self.frame_callback.set(next_callback.unwrap());
-    }
-
-    pub fn capture_pointer(&self) {
-        /* do nothing currently(maybe requires on floating-window system) */
-    }
-
-    pub fn release_pointer(&self) {
-        /* do nothing currently(maybe requires on floating-window system) */
-    }
-
-    pub fn close_safe(&self) {
-        // do nothing for wayland
-    }
-
-    pub fn minimize(&self) {
-        if let Err(e) = unsafe { self.xdg_toplevel.as_ref() }.set_minimized() {
-            tracing::warn!(reason = ?e, "Failed to call set_minimized");
-        }
-    }
-
-    pub fn toggle_maximize_restore(&self) {
-        if self.is_tiled() {
-            if let Err(e) = unsafe { self.xdg_toplevel.as_ref() }.unset_maximized() {
-                tracing::warn!(reason = ?e, "Failed to call unset_maximized");
-            }
-        } else {
-            if let Err(e) = unsafe { self.xdg_toplevel.as_ref() }.set_maximized() {
-                tracing::warn!(reason = ?e, "Failed to call set_maximized");
-            }
-        }
-    }
-
-    pub fn is_tiled(&self) -> bool {
-        unsafe { &*self.shell_event_handler.get() }.tiled
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn set_cursor_shape(&self, enter_serial: u32, shape: CursorShape) {
-        if let Err(e) = unsafe { self.cursor_shape_device.as_ref() }.set_shape(
-            enter_serial,
-            match shape {
-                CursorShape::Default => WpCursorShapeDeviceV1Shape::Default,
-                CursorShape::ResizeHorizontal => WpCursorShapeDeviceV1Shape::EwResize,
-            },
-        ) {
-            tracing::warn!(reason = ?e, "Failed to set cursor shape");
-        }
-    }
-
-    // wayland specific functionality
-    pub fn try_export_toplevel(&self) -> Option<wl::Owned<wl::ZxdgExportedV2>> {
-        let Some(ref x) = self.zxdg_exporter_v2 else {
-            tracing::warn!("No zxdg_exporter_v2 found on the system");
-            return None;
-        };
-
-        match unsafe { x.as_ref() }.export_toplevel(unsafe { self.content_surface.as_ref() }) {
-            Ok(x) => Some(x),
-            Err(e) => {
-                tracing::warn!(reason = ?e, "Failed to get exported toplevel");
-                None
-            }
-        }
-    }
-
-    #[inline]
-    pub fn ui_scale_factor(&self) -> f32 {
-        unsafe { (*self.shell_event_handler.get()).ui_scale_factor }
-    }
-
-    #[inline]
-    pub fn pointer_input_manager(&self) -> &UnsafeCell<PointerInputManager> {
-        unsafe { &(*self.shell_event_handler.get()).pointer_input_manager }
     }
 }

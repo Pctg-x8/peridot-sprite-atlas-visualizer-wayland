@@ -4,10 +4,11 @@ use core::{
 };
 use std::{cell::UnsafeCell, os::fd::AsRawFd};
 
+use bitflags::bitflags;
 use ffi::wl_proxy_destroy;
 
 mod cursor_shape;
-mod ffi;
+pub mod ffi;
 mod fractional_scale;
 mod gtk_shell;
 mod viewporter;
@@ -28,6 +29,28 @@ const NEWID_ARG: ffi::Argument = ffi::Argument { n: 0 };
 const NULLOBJ_ARG: ffi::Argument = ffi::Argument {
     o: core::ptr::null_mut(),
 };
+
+macro_rules! EventFnTable {
+    { for $tyvar: ident : $tr: path { $($name: ident ( $($an: ident: $act: ty => $aconv: expr),* )),* } } => {
+        {
+            $(extern "C" fn $name<L: $tr>(
+                data_: *mut core::ffi::c_void,
+                sender_: *mut ffi::Proxy,
+                $($an: $act),*
+            ) {
+                L::$name(
+                    unsafe { &mut *(data_ as *mut _) },
+                    unsafe { &mut *(sender_ as *mut _) },
+                    $($aconv),*
+                )
+            })*
+
+            #[repr(C)]
+            struct FPTable { $($name: extern "C" fn(*mut core::ffi::c_void, *mut ffi::Proxy, $($act),*)),* }
+            &const { FPTable { $($name: $name::<$tyvar>),* } } as &'static FPTable
+        }
+    }
+}
 
 #[repr(transparent)]
 pub struct OwnedProxy(NonNull<ffi::Proxy>);
@@ -213,6 +236,10 @@ impl<T: Interface> Owned<T> {
 
     pub const unsafe fn copy_ptr(&self) -> NonNull<T> {
         self.0
+    }
+
+    pub fn ref_eq(&self, other: &T) -> bool {
+        core::ptr::addr_eq(self.0.as_ptr(), other as *const _)
     }
 
     pub const fn leak(self) {
@@ -1266,8 +1293,370 @@ unsafe impl Interface for Output {
 //     // -- version 2 additions ---
 //     fn done(&mut self, output: &mut Output);
 //     fn scale(&mut self, output: &mut Output, factor: i32);
-
 // }
+
+#[repr(transparent)]
+pub struct DataOffer(Proxy);
+unsafe impl Interface for DataOffer {
+    fn def() -> &'static ffi::Interface {
+        unsafe { &wl_data_offer_interface }
+    }
+
+    unsafe fn destruct(&mut self) {
+        if let Err(e) = self
+            .0
+            .marshal_array_flags_void(2, ffi::MARSHAL_FLAG_DESTROY, &mut [])
+        {
+            panic!("Failed to call destroy: {} {e:?}", unsafe {
+                ffi::wl_display_get_error(self.0.display())
+            });
+        }
+    }
+}
+impl DataOffer {
+    #[inline]
+    pub fn accept(
+        &self,
+        serial: u32,
+        mime_type: Option<&core::ffi::CStr>,
+    ) -> Result<(), std::io::Error> {
+        self.0.marshal_array_flags_void(
+            0,
+            0,
+            &mut [
+                ffi::Argument { u: serial },
+                ffi::Argument {
+                    s: mime_type.map_or_else(core::ptr::null, core::ffi::CStr::as_ptr),
+                },
+            ],
+        )
+    }
+
+    #[inline]
+    pub fn receive(
+        &self,
+        mime_type: &core::ffi::CStr,
+        fd: &(impl AsRawFd + ?Sized),
+    ) -> Result<(), std::io::Error> {
+        self.0.marshal_array_flags_void(
+            1,
+            0,
+            &mut [
+                ffi::Argument {
+                    s: mime_type.as_ptr(),
+                },
+                ffi::Argument { h: fd.as_raw_fd() },
+            ],
+        )
+    }
+
+    #[inline]
+    pub fn finish(&self) -> Result<(), std::io::Error> {
+        assert!(self.0.version() >= 3, "version 3 required");
+
+        self.0.marshal_array_flags_void(3, 0, &mut [])
+    }
+
+    #[inline]
+    pub fn set_actions(
+        &self,
+        dnd_actions: DataDeviceManagerDndAction,
+        preferred_action: DataDeviceManagerDndAction,
+    ) -> Result<(), std::io::Error> {
+        assert!(self.0.version() >= 3, "version 3 required");
+
+        self.0.marshal_array_flags_void(
+            4,
+            0,
+            &mut [
+                ffi::Argument {
+                    u: dnd_actions.bits(),
+                },
+                ffi::Argument {
+                    u: preferred_action.bits(),
+                },
+            ],
+        )
+    }
+
+    pub fn add_listener<'l, L: DataOfferEventListener + 'l>(
+        &'l mut self,
+        listener: &'l mut L,
+    ) -> Result<(), ()> {
+        let fp = EventFnTable! {
+            for L: DataOfferEventListener {
+                offer(
+                    mime_type: *const core::ffi::c_char => unsafe { core::ffi::CStr::from_ptr(mime_type) }
+                ),
+                source_actions(source_actions: u32 => DataDeviceManagerDndAction::from_bits_retain(source_actions)),
+                action(dnd_action: u32 => DataDeviceManagerDndAction::from_bits_retain(dnd_action))
+            }
+        };
+
+        unsafe {
+            self.0
+                .add_listener(fp as *const _ as _, listener as *mut _ as _)
+        }
+    }
+}
+
+pub trait DataOfferEventListener {
+    fn offer(&mut self, sender: &mut DataOffer, mime_type: &core::ffi::CStr);
+    /// since version 3
+    fn source_actions(
+        &mut self,
+        sender: &mut DataOffer,
+        source_actions: DataDeviceManagerDndAction,
+    );
+    /// since version 3
+    fn action(&mut self, sender: &mut DataOffer, dnd_action: DataDeviceManagerDndAction);
+}
+
+#[repr(transparent)]
+pub struct DataSource(Proxy);
+unsafe impl Interface for DataSource {
+    fn def() -> &'static ffi::Interface {
+        unsafe { &wl_data_source_interface }
+    }
+
+    unsafe fn destruct(&mut self) {
+        if let Err(e) = self
+            .0
+            .marshal_array_flags_void(1, ffi::MARSHAL_FLAG_DESTROY, &mut [])
+        {
+            panic!("Failed to call destroy: {} {e:?}", unsafe {
+                ffi::wl_display_get_error(self.0.display())
+            });
+        }
+    }
+}
+impl DataSource {
+    #[inline]
+    pub fn offer(&self, mime_type: &core::ffi::CStr) -> Result<(), std::io::Error> {
+        self.0.marshal_array_flags_void(
+            0,
+            0,
+            &mut [ffi::Argument {
+                s: mime_type.as_ptr(),
+            }],
+        )
+    }
+
+    #[inline]
+    pub fn set_actions(
+        &self,
+        dnd_actions: DataDeviceManagerDndAction,
+    ) -> Result<(), std::io::Error> {
+        assert!(self.0.version() >= 3, "version 3 required");
+
+        self.0.marshal_array_flags_void(
+            2,
+            0,
+            &mut [ffi::Argument {
+                u: dnd_actions.bits(),
+            }],
+        )
+    }
+
+    pub fn add_listener<'l, L: DataSourceEventListener + 'l>(
+        &'l mut self,
+        listener: &'l mut L,
+    ) -> Result<(), ()> {
+        let fp = EventFnTable! {
+            for L: DataSourceEventListener {
+                target(
+                    mime_type: *const core::ffi::c_char => if mime_type.is_null() { None } else { Some(unsafe { core::ffi::CStr::from_ptr(mime_type) }) }
+                ),
+                send(
+                    mime_type: *const core::ffi::c_char => unsafe { core::ffi::CStr::from_ptr(mime_type) },
+                    fd: core::ffi::c_int => fd
+                ),
+                cancelled(),
+                dnd_drop_performed(),
+                dnd_finished(),
+                action(
+                    dnd_action: u32 => DataDeviceManagerDndAction::from_bits_retain(dnd_action)
+                )
+            }
+        };
+
+        unsafe {
+            self.0
+                .add_listener(fp as *const _ as _, listener as *mut _ as _)
+        }
+    }
+}
+
+pub trait DataSourceEventListener {
+    fn target(&mut self, sender: &mut DataSource, mime_type: Option<&core::ffi::CStr>);
+    fn send(
+        &mut self,
+        sender: &mut DataSource,
+        mime_type: &core::ffi::CStr,
+        fd: std::os::fd::RawFd,
+    );
+    fn cancelled(&mut self, sender: &mut DataSource);
+    /// since version 3
+    fn dnd_drop_performed(&mut self, sender: &mut DataSource);
+    /// since version 3
+    fn dnd_finished(&mut self, sender: &mut DataSource);
+    /// since version 3
+    fn action(&mut self, sender: &mut DataSource, dnd_action: DataDeviceManagerDndAction);
+}
+
+#[repr(transparent)]
+pub struct DataDevice(Proxy);
+unsafe impl Interface for DataDevice {
+    fn def() -> &'static ffi::Interface {
+        unsafe { &wl_data_device_interface }
+    }
+
+    unsafe fn destruct(&mut self) {
+        if self.0.version() < 2 {
+            // no destructor
+            return;
+        }
+
+        if let Err(e) = self
+            .0
+            .marshal_array_flags_void(2, ffi::MARSHAL_FLAG_DESTROY, &mut [])
+        {
+            panic!("Failed to call destroy: {} {e:?}", unsafe {
+                ffi::wl_display_get_error(self.0.display())
+            });
+        }
+    }
+}
+impl DataDevice {
+    pub fn display(&self) -> *mut ffi::Display {
+        self.0.display()
+    }
+
+    #[inline]
+    pub fn start_drag(
+        &self,
+        source: Option<&DataSource>,
+        origin: &Surface,
+        icon: Option<&Surface>,
+        serial: u32,
+    ) -> Result<(), std::io::Error> {
+        self.0.marshal_array_flags_void(
+            0,
+            0,
+            &mut [
+                source.map_or(NULLOBJ_ARG, |x| x.0.as_arg()),
+                origin.0.as_arg(),
+                icon.map_or(NULLOBJ_ARG, |x| x.0.as_arg()),
+                ffi::Argument { u: serial },
+            ],
+        )
+    }
+
+    #[inline]
+    pub fn set_selection(
+        &self,
+        source: Option<&DataSource>,
+        serial: u32,
+    ) -> Result<(), std::io::Error> {
+        self.0.marshal_array_flags_void(
+            1,
+            0,
+            &mut [
+                source.map_or(NULLOBJ_ARG, |x| x.0.as_arg()),
+                ffi::Argument { u: serial },
+            ],
+        )
+    }
+
+    pub fn add_listener<'l, L: DataDeviceEventListener + 'l>(
+        &'l mut self,
+        listener: &'l mut L,
+    ) -> Result<(), ()> {
+        let fp = EventFnTable! {
+            for L: DataDeviceEventListener {
+                data_offer(
+                    id: *mut ffi::Proxy => unsafe { Owned::from_untyped_unchecked(NonNull::new_unchecked(id as _)) }
+                ),
+                enter(
+                    serial: u32 => serial,
+                    surface: *mut ffi::Proxy => unsafe { &*(surface as *mut _) },
+                    x: Fixed => x,
+                    y: Fixed => y,
+                    id: *mut ffi::Proxy => if id.is_null() { None } else { Some(unsafe { &*(id as *mut _) }) }
+                ),
+                leave(),
+                motion(time: u32 => time, x: Fixed => x, y: Fixed => y),
+                drop(),
+                selection(id: *mut ffi::Proxy => if id.is_null() { None } else { Some(unsafe { &*(id as *mut _) }) })
+            }
+        };
+
+        unsafe {
+            self.0
+                .add_listener(fp as *const _ as _, listener as *mut _ as _)
+        }
+    }
+}
+
+pub trait DataDeviceEventListener {
+    fn data_offer(&mut self, sender: &mut DataDevice, id: Owned<DataOffer>);
+    fn enter(
+        &mut self,
+        sender: &mut DataDevice,
+        serial: u32,
+        surface: &Surface,
+        x: Fixed,
+        y: Fixed,
+        id: Option<&DataOffer>,
+    );
+    fn leave(&mut self, sender: &mut DataDevice);
+    fn motion(&mut self, sender: &mut DataDevice, time: u32, x: Fixed, y: Fixed);
+    fn drop(&mut self, sender: &mut DataDevice);
+    fn selection(&mut self, sender: &mut DataDevice, id: Option<&DataOffer>);
+}
+
+#[repr(transparent)]
+pub struct DataDeviceManager(Proxy);
+unsafe impl Interface for DataDeviceManager {
+    fn def() -> &'static ffi::Interface {
+        unsafe { &wl_data_device_manager_interface }
+    }
+}
+impl DataDeviceManager {
+    #[inline]
+    pub fn create_data_source(&self) -> Result<Owned<DataSource>, std::io::Error> {
+        Ok(unsafe {
+            Owned::wrap_unchecked(self.0.marshal_array_flags_typed(
+                0,
+                self.0.version(),
+                0,
+                &mut [NEWID_ARG],
+            )?)
+        })
+    }
+
+    #[inline]
+    pub fn get_data_device(&self, seat: &Seat) -> Result<Owned<DataDevice>, std::io::Error> {
+        Ok(unsafe {
+            Owned::wrap_unchecked(self.0.marshal_array_flags_typed(
+                1,
+                self.0.version(),
+                0,
+                &mut [NEWID_ARG, seat.0.as_arg()],
+            )?)
+        })
+    }
+}
+
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct DataDeviceManagerDndAction : u32 {
+        const NONE = 0;
+        const COPY = 1;
+        const MOVE = 2;
+        const ASK = 4;
+    }
+}
 
 #[link(name = "wayland-client")]
 unsafe extern "C" {
@@ -1284,6 +1673,10 @@ unsafe extern "C" {
     static wl_output_interface: ffi::Interface;
     static wl_callback_interface: ffi::Interface;
     static wl_pointer_interface: ffi::Interface;
+    static wl_data_device_manager_interface: ffi::Interface;
+    static wl_data_device_interface: ffi::Interface;
+    static wl_data_source_interface: ffi::Interface;
+    static wl_data_offer_interface: ffi::Interface;
 }
 
 const fn message(

@@ -1343,9 +1343,9 @@ impl FrameView {
         }
 
         let width = self.width.get();
-        app_system.composite_tree.get_mut(self.ct_root).size[0] =
-            AnimatableFloat::Value(width * self.ui_scale_factor.get());
-        app_system.composite_tree.mark_dirty(self.ct_root);
+        self.ct_root
+            .entity_mut_dirtified(&mut app_system.composite_tree)
+            .size[0] = AnimatableFloat::Value(width);
         app_system.hit_tree.get_data_mut(self.ht_frame).width = width;
     }
 

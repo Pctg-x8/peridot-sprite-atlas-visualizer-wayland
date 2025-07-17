@@ -11,6 +11,7 @@ use crate::{
     BLEND_STATE_SINGLE_NONE, FillcolorRConstants, IA_STATE_TRIFAN, IA_STATE_TRILIST,
     MS_STATE_EMPTY, RASTER_STATE_DEFAULT_FILL_NOCULL, RoundedRectConstants, VI_STATE_EMPTY,
     VI_STATE_FLOAT2_ONLY,
+    base_system::svg::SinglePathSVG,
     composite::{
         AtlasRect, CompositeInstanceManager, CompositeRect, CompositeTree, CompositeTreeRef,
         CompositionSurfaceAtlas, UnboundedCompositeInstanceManager,
@@ -35,6 +36,7 @@ mod cache;
 #[macro_use]
 pub mod prof;
 pub mod scratch_buffer;
+pub mod svg;
 
 pub struct FontSet {
     pub ui_default: freetype::Owned<freetype::Face>,
@@ -616,86 +618,14 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         Ok(atlas_rect)
     }
 
-    #[tracing::instrument(name = "AppBaseSystem::rasterize_svg", skip(self), fields(path = %path.as_ref().display()))]
+    #[tracing::instrument(name = "AppBaseSystem::rasterize_svg", skip(self, svg))]
     pub fn rasterize_svg(
         &mut self,
         width_px: u32,
         height_px: u32,
-        path: impl AsRef<Path>,
+        svg: &SinglePathSVG,
     ) -> br::Result<AtlasRect> {
         let atlas_rect = self.alloc_mask_atlas_rect(width_px, height_px);
-
-        let icon_svg_content = match std::fs::read_to_string(path) {
-            Ok(x) => x,
-            Err(e) => {
-                tracing::error!(reason = ?e, "Failed to load icon svg");
-                std::process::abort();
-            }
-        };
-        let mut reader = quick_xml::Reader::from_str(&icon_svg_content);
-        let mut svg_path_commands = Vec::new();
-        let mut viewbox = None;
-        loop {
-            match reader.read_event().unwrap() {
-                quick_xml::events::Event::Start(x) => {
-                    println!("xml start: {x:?}");
-                    println!("  name {:?}", x.name());
-                    for a in x.attributes().with_checks(false) {
-                        let a = a.unwrap();
-                        println!("  attr {:?} = {:?}", a.key, a.unescape_value());
-                    }
-
-                    if x.name().0 == b"svg" {
-                        let viewbox_value = &x
-                            .attributes()
-                            .with_checks(false)
-                            .find(|x| x.as_ref().is_ok_and(|x| x.key.0 == b"viewBox"))
-                            .unwrap()
-                            .unwrap()
-                            .value;
-                        viewbox = Some(crate::svg::ViewBox::from_str_bytes(viewbox_value));
-                    }
-                }
-                quick_xml::events::Event::End(x) => {
-                    println!("xml end: {x:?}");
-                    println!("  name {:?}", x.name());
-                }
-                quick_xml::events::Event::Empty(x) => {
-                    println!("xml empty: {x:?}");
-                    println!("  name {:?}", x.name());
-                    for a in x.attributes().with_checks(false) {
-                        let a = a.unwrap();
-                        println!("  attr {:?} = {:?}", a.key, a.unescape_value());
-                    }
-
-                    if x.name().0 == b"path" {
-                        let path_data = &x
-                            .attributes()
-                            .with_checks(false)
-                            .find(|x| x.as_ref().is_ok_and(|x| x.key.0 == b"d"))
-                            .unwrap()
-                            .unwrap()
-                            .value;
-                        for x in crate::svg::InstructionParser::new_bytes(path_data) {
-                            println!("  path inst: {x:?}");
-                            svg_path_commands.push(x);
-                        }
-                    }
-                }
-                quick_xml::events::Event::Text(x) => println!("xml text: {x:?}"),
-                quick_xml::events::Event::CData(x) => println!("xml cdata: {x:?}"),
-                quick_xml::events::Event::Comment(x) => println!("xml comment: {x:?}"),
-                quick_xml::events::Event::Decl(x) => println!("xml decl: {x:?}"),
-                quick_xml::events::Event::PI(x) => println!("xml pi: {x:?}"),
-                quick_xml::events::Event::DocType(x) => println!("xml doctype: {x:?}"),
-                quick_xml::events::Event::Eof => {
-                    println!("eof");
-                    break;
-                }
-            }
-        }
-
-        let viewbox = viewbox.unwrap();
 
         // rasterize icon svg
         let mut stencil_buffer = br::ImageObject::new(
@@ -934,9 +864,9 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         let mut quadratic_last_control_point = None::<(f32, f32)>;
         let mut current_figure_first_index = None;
         let mut p = (0.0f32, 0.0f32);
-        for x in svg_path_commands.iter() {
+        for x in svg.instructions.iter() {
             match x {
-                &crate::svg::Instruction::Move { absolute, x, y } => {
+                &svg::Instruction::Move { absolute, x, y } => {
                     if current_figure_first_index.is_some() {
                         panic!("not closed last figure");
                     }
@@ -946,30 +876,34 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
                     p = if absolute { (x, y) } else { (p.0 + x, p.1 + y) };
                     current_figure_first_index = Some(trifan_points.len());
 
-                    trifan_points.push([viewbox.translate_x(p.0), viewbox.translate_y(p.1)]);
+                    trifan_points
+                        .push([svg.viewbox.translate_x(p.0), svg.viewbox.translate_y(p.1)]);
                 }
-                &crate::svg::Instruction::Line { absolute, x, y } => {
+                &svg::Instruction::Line { absolute, x, y } => {
                     cubic_last_control_point = None;
                     quadratic_last_control_point = None;
                     p = if absolute { (x, y) } else { (p.0 + x, p.1 + y) };
 
-                    trifan_points.push([viewbox.translate_x(p.0), viewbox.translate_y(p.1)]);
+                    trifan_points
+                        .push([svg.viewbox.translate_x(p.0), svg.viewbox.translate_y(p.1)]);
                 }
-                &crate::svg::Instruction::HLine { absolute, x } => {
+                &svg::Instruction::HLine { absolute, x } => {
                     cubic_last_control_point = None;
                     quadratic_last_control_point = None;
                     p.0 = if absolute { x } else { p.0 + x };
 
-                    trifan_points.push([viewbox.translate_x(p.0), viewbox.translate_y(p.1)]);
+                    trifan_points
+                        .push([svg.viewbox.translate_x(p.0), svg.viewbox.translate_y(p.1)]);
                 }
-                &crate::svg::Instruction::VLine { absolute, y } => {
+                &svg::Instruction::VLine { absolute, y } => {
                     cubic_last_control_point = None;
                     quadratic_last_control_point = None;
                     p.1 = if absolute { y } else { p.1 + y };
 
-                    trifan_points.push([viewbox.translate_x(p.0), viewbox.translate_y(p.1)]);
+                    trifan_points
+                        .push([svg.viewbox.translate_x(p.0), svg.viewbox.translate_y(p.1)]);
                 }
-                &crate::svg::Instruction::BezierCurve {
+                &svg::Instruction::BezierCurve {
                     absolute,
                     c1_x,
                     c1_y,
@@ -1000,37 +934,41 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
                     figure.for_each_quadratic_bezier(1.0, &mut |q| {
                         curve_triangle_points.extend([
                             [
-                                viewbox.translate_x(q.from.x),
-                                viewbox.translate_y(q.from.y),
+                                svg.viewbox.translate_x(q.from.x),
+                                svg.viewbox.translate_y(q.from.y),
                                 0.0,
                                 0.0,
                             ],
                             [
-                                viewbox.translate_x(q.ctrl.x),
-                                viewbox.translate_y(q.ctrl.y),
+                                svg.viewbox.translate_x(q.ctrl.x),
+                                svg.viewbox.translate_y(q.ctrl.y),
                                 0.5,
                                 0.0,
                             ],
                             [
-                                viewbox.translate_x(q.to.x),
-                                viewbox.translate_y(q.to.y),
+                                svg.viewbox.translate_x(q.to.x),
+                                svg.viewbox.translate_y(q.to.y),
                                 1.0,
                                 1.0,
                             ],
                         ]);
 
                         // TODO: おなじ位置の頂点を出力する場合があるのでもうちょい最適化したいかも
-                        trifan_points
-                            .push([viewbox.translate_x(q.from.x), viewbox.translate_y(q.from.y)]);
-                        trifan_points
-                            .push([viewbox.translate_x(q.to.x), viewbox.translate_y(q.to.y)]);
+                        trifan_points.push([
+                            svg.viewbox.translate_x(q.from.x),
+                            svg.viewbox.translate_y(q.from.y),
+                        ]);
+                        trifan_points.push([
+                            svg.viewbox.translate_x(q.to.x),
+                            svg.viewbox.translate_y(q.to.y),
+                        ]);
                     });
 
                     cubic_last_control_point = Some((figure.ctrl2.x, figure.ctrl2.y));
                     quadratic_last_control_point = None;
                     p = (figure.to.x, figure.to.y);
                 }
-                &crate::svg::Instruction::SequentialBezierCurve {
+                &svg::Instruction::SequentialBezierCurve {
                     absolute,
                     c2_x,
                     c2_y,
@@ -1060,37 +998,41 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
                     figure.for_each_quadratic_bezier(1.0, &mut |q| {
                         curve_triangle_points.extend([
                             [
-                                viewbox.translate_x(q.from.x),
-                                viewbox.translate_y(q.from.y),
+                                svg.viewbox.translate_x(q.from.x),
+                                svg.viewbox.translate_y(q.from.y),
                                 0.0,
                                 0.0,
                             ],
                             [
-                                viewbox.translate_x(q.ctrl.x),
-                                viewbox.translate_y(q.ctrl.y),
+                                svg.viewbox.translate_x(q.ctrl.x),
+                                svg.viewbox.translate_y(q.ctrl.y),
                                 0.5,
                                 0.0,
                             ],
                             [
-                                viewbox.translate_x(q.to.x),
-                                viewbox.translate_y(q.to.y),
+                                svg.viewbox.translate_x(q.to.x),
+                                svg.viewbox.translate_y(q.to.y),
                                 1.0,
                                 1.0,
                             ],
                         ]);
 
                         // TODO: おなじ位置の頂点を出力する場合があるのでもうちょい最適化したい
-                        trifan_points
-                            .push([viewbox.translate_x(q.from.x), viewbox.translate_y(q.from.y)]);
-                        trifan_points
-                            .push([viewbox.translate_x(q.to.x), viewbox.translate_y(q.to.y)]);
+                        trifan_points.push([
+                            svg.viewbox.translate_x(q.from.x),
+                            svg.viewbox.translate_y(q.from.y),
+                        ]);
+                        trifan_points.push([
+                            svg.viewbox.translate_x(q.to.x),
+                            svg.viewbox.translate_y(q.to.y),
+                        ]);
                     });
 
                     cubic_last_control_point = Some((figure.ctrl2.x, figure.ctrl2.y));
                     quadratic_last_control_point = None;
                     p = (figure.to.x, figure.to.y);
                 }
-                &crate::svg::Instruction::QuadraticBezierCurve {
+                &svg::Instruction::QuadraticBezierCurve {
                     absolute,
                     cx,
                     cy,
@@ -1098,23 +1040,38 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
                     y,
                 } => {
                     curve_triangle_points.extend([
-                        [viewbox.translate_x(p.0), viewbox.translate_y(p.1), 0.0, 0.0],
+                        [
+                            svg.viewbox.translate_x(p.0),
+                            svg.viewbox.translate_y(p.1),
+                            0.0,
+                            0.0,
+                        ],
                         if absolute {
-                            [viewbox.translate_x(cx), viewbox.translate_y(cy), 0.5, 0.0]
+                            [
+                                svg.viewbox.translate_x(cx),
+                                svg.viewbox.translate_y(cy),
+                                0.5,
+                                0.0,
+                            ]
                         } else {
                             [
-                                viewbox.translate_x(p.0 + cx),
-                                viewbox.translate_y(p.1 + cy),
+                                svg.viewbox.translate_x(p.0 + cx),
+                                svg.viewbox.translate_y(p.1 + cy),
                                 0.5,
                                 0.0,
                             ]
                         },
                         if absolute {
-                            [viewbox.translate_x(x), viewbox.translate_y(y), 1.0, 1.0]
+                            [
+                                svg.viewbox.translate_x(x),
+                                svg.viewbox.translate_y(y),
+                                1.0,
+                                1.0,
+                            ]
                         } else {
                             [
-                                viewbox.translate_x(p.0 + x),
-                                viewbox.translate_y(p.1 + y),
+                                svg.viewbox.translate_x(p.0 + x),
+                                svg.viewbox.translate_y(p.1 + y),
                                 1.0,
                                 1.0,
                             ]
@@ -1128,9 +1085,10 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
                     });
                     p = if absolute { (x, y) } else { (p.0 + x, p.1 + y) };
 
-                    trifan_points.push([viewbox.translate_x(p.0), viewbox.translate_y(p.1)]);
+                    trifan_points
+                        .push([svg.viewbox.translate_x(p.0), svg.viewbox.translate_y(p.1)]);
                 }
-                &crate::svg::Instruction::SequentialQuadraticBezierCurve { absolute, x, y } => {
+                &svg::Instruction::SequentialQuadraticBezierCurve { absolute, x, y } => {
                     let (cx, cy) = if let Some((lcx, lcy)) = quadratic_last_control_point {
                         let d = (p.0 - lcx, p.1 - lcy);
                         (p.0 + d.0, p.1 + d.1)
@@ -1139,14 +1097,29 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
                     };
 
                     curve_triangle_points.extend([
-                        [viewbox.translate_x(p.0), viewbox.translate_y(p.1), 0.0, 0.0],
-                        [viewbox.translate_x(cx), viewbox.translate_y(cy), 0.5, 0.0],
+                        [
+                            svg.viewbox.translate_x(p.0),
+                            svg.viewbox.translate_y(p.1),
+                            0.0,
+                            0.0,
+                        ],
+                        [
+                            svg.viewbox.translate_x(cx),
+                            svg.viewbox.translate_y(cy),
+                            0.5,
+                            0.0,
+                        ],
                         if absolute {
-                            [viewbox.translate_x(x), viewbox.translate_y(y), 1.0, 1.0]
+                            [
+                                svg.viewbox.translate_x(x),
+                                svg.viewbox.translate_y(y),
+                                1.0,
+                                1.0,
+                            ]
                         } else {
                             [
-                                viewbox.translate_x(p.0 + x),
-                                viewbox.translate_y(p.1 + y),
+                                svg.viewbox.translate_x(p.0 + x),
+                                svg.viewbox.translate_y(p.1 + y),
                                 1.0,
                                 1.0,
                             ]
@@ -1156,9 +1129,10 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
                     quadratic_last_control_point = Some((cx, cy));
                     p = if absolute { (x, y) } else { (p.0 + x, p.1 + y) };
 
-                    trifan_points.push([viewbox.translate_x(p.0), viewbox.translate_y(p.1)]);
+                    trifan_points
+                        .push([svg.viewbox.translate_x(p.0), svg.viewbox.translate_y(p.1)]);
                 }
-                &crate::svg::Instruction::Arc {
+                &svg::Instruction::Arc {
                     absolute,
                     rx,
                     ry,
@@ -1186,44 +1160,49 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
                     figure.for_each_quadratic_bezier(&mut |q| {
                         curve_triangle_points.extend([
                             [
-                                viewbox.translate_x(q.from.x),
-                                viewbox.translate_y(q.from.y),
+                                svg.viewbox.translate_x(q.from.x),
+                                svg.viewbox.translate_y(q.from.y),
                                 0.0,
                                 0.0,
                             ],
                             [
-                                viewbox.translate_x(q.ctrl.x),
-                                viewbox.translate_y(q.ctrl.y),
+                                svg.viewbox.translate_x(q.ctrl.x),
+                                svg.viewbox.translate_y(q.ctrl.y),
                                 0.5,
                                 0.0,
                             ],
                             [
-                                viewbox.translate_x(q.to.x),
-                                viewbox.translate_y(q.to.y),
+                                svg.viewbox.translate_x(q.to.x),
+                                svg.viewbox.translate_y(q.to.y),
                                 1.0,
                                 1.0,
                             ],
                         ]);
 
                         // TODO: おなじ位置の頂点を出力する場合があるのでもうちょい最適化したい
-                        trifan_points
-                            .push([viewbox.translate_x(q.from.x), viewbox.translate_y(q.from.y)]);
-                        trifan_points
-                            .push([viewbox.translate_x(q.to.x), viewbox.translate_y(q.to.y)]);
+                        trifan_points.push([
+                            svg.viewbox.translate_x(q.from.x),
+                            svg.viewbox.translate_y(q.from.y),
+                        ]);
+                        trifan_points.push([
+                            svg.viewbox.translate_x(q.to.x),
+                            svg.viewbox.translate_y(q.to.y),
+                        ]);
                     });
 
                     cubic_last_control_point = None;
                     quadratic_last_control_point = None;
                     p = (figure.to.x, figure.to.y);
                 }
-                &crate::svg::Instruction::Close => {
+                &svg::Instruction::Close => {
                     cubic_last_control_point = None;
                     quadratic_last_control_point = None;
                     let x = current_figure_first_index.take().unwrap();
                     let p = (trifan_points[x][0], trifan_points[x][1]);
                     trifan_point_ranges.push(x..trifan_points.len());
 
-                    trifan_points.push([viewbox.translate_x(p.0), viewbox.translate_y(p.1)]);
+                    trifan_points
+                        .push([svg.viewbox.translate_x(p.0), svg.viewbox.translate_y(p.1)]);
                 }
             }
         }

@@ -14,7 +14,6 @@ mod quadtree;
 mod shell;
 mod source_reader;
 mod subsystem;
-mod svg;
 mod text;
 mod trigger_cell;
 mod uikit;
@@ -33,7 +32,9 @@ use std::{
     sync::Arc,
 };
 
-use crate::{base_system::prof, composite::FloatParameter, quadtree::QuadTree};
+#[cfg(feature = "profiling")]
+use crate::base_system::prof;
+use crate::{composite::FloatParameter, quadtree::QuadTree};
 use app_state::{AppState, SpriteInfo};
 use base_system::{
     AppBaseSystem, RenderPassOptions,

@@ -38,18 +38,6 @@ impl Drop for MappedMemoryBlock {
     }
 }
 impl MappedMemoryBlock {
-    pub const fn unwrap(self) -> (NonNull<core::ffi::c_void>, usize) {
-        let head_ptr = unsafe { core::ptr::read(&self.head_ptr) };
-        let length = unsafe { core::ptr::read(&self.length) };
-        core::mem::forget(self);
-
-        (head_ptr, length)
-    }
-
-    pub const fn ptr(&self) -> NonNull<core::ffi::c_void> {
-        self.head_ptr
-    }
-
     pub const fn ptr_of<T>(&self) -> NonNull<T> {
         self.head_ptr.cast()
     }

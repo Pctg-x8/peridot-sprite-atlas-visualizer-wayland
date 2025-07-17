@@ -1,12 +1,10 @@
-use std::{
-    cell::Cell,
-    path::{Path, PathBuf},
-    rc::Rc,
-};
+use std::{cell::Cell, path::Path, rc::Rc};
 
 use crate::{
     AppEvent, AppUpdateContext, PresenterInitContext, ViewInitContext,
-    base_system::{AppBaseSystem, FontType, scratch_buffer::StagingScratchBufferManager},
+    base_system::{
+        AppBaseSystem, FontType, scratch_buffer::StagingScratchBufferManager, svg::SinglePathSVG,
+    },
     composite::{
         AnimatableColor, AnimatableFloat, AnimationCurve, CompositeMode, CompositeRect,
         CompositeTreeFloatParameterRef, CompositeTreeRef, FloatParameter,
@@ -30,7 +28,7 @@ struct CommandButtonView {
     ct_bg_alpha_rate_shown: CompositeTreeFloatParameterRef,
     ct_bg_alpha_rate_pointer: CompositeTreeFloatParameterRef,
     ht_root: HitTestTreeRef,
-    icon_path: PathBuf,
+    icon_svg: SinglePathSVG,
     label: String,
     left: f32,
     show_delay_sec: f32,
@@ -59,6 +57,8 @@ impl CommandButtonView {
         show_delay_sec: f32,
         command: Command,
     ) -> Self {
+        let icon_svg = SinglePathSVG::load(icon_path);
+
         let bg_atlas_rect = init
             .base_system
             .rounded_fill_rect_mask(
@@ -71,7 +71,7 @@ impl CommandButtonView {
             .rasterize_svg(
                 (Self::ICON_SIZE * init.ui_scale_factor).ceil() as _,
                 (Self::ICON_SIZE * init.ui_scale_factor).ceil() as _,
-                &icon_path,
+                &icon_svg,
             )
             .unwrap();
         let label_atlas_rect = init
@@ -170,7 +170,7 @@ impl CommandButtonView {
             ct_bg_alpha_rate_shown,
             ct_bg_alpha_rate_pointer,
             ht_root,
-            icon_path: icon_path.as_ref().into(),
+            icon_svg,
             label: label.into(),
             left,
             show_delay_sec,
@@ -219,7 +219,7 @@ impl CommandButtonView {
             .rasterize_svg(
                 (Self::ICON_SIZE * ui_scale_factor).ceil() as _,
                 (Self::ICON_SIZE * ui_scale_factor).ceil() as _,
-                &self.icon_path,
+                &self.icon_svg,
             )
             .unwrap();
         base_system

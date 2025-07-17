@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{path::Path, str::FromStr};
 
 fn str_bytes_take_float_value(mut s: &[u8]) -> (f32, &[u8]) {
     let neg = if let &[b'-', ref rest @ ..] = s {
@@ -369,6 +369,108 @@ impl<'s> Iterator for InstructionParser<'s> {
                 })
             }
             InstType::Close => Some(Instruction::Close),
+        }
+    }
+}
+
+pub struct SinglePathSVG {
+    pub viewbox: ViewBox,
+    pub instructions: Vec<Instruction>,
+}
+impl SinglePathSVG {
+    #[tracing::instrument(name = "SinglePathSVG::load", fields(path = %path.as_ref().display()))]
+    pub fn load(path: impl AsRef<Path>) -> Self {
+        let content = match std::fs::read_to_string(path) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "reading svg content failed");
+                std::process::abort();
+            }
+        };
+
+        let mut reader = quick_xml::Reader::from_str(&content);
+        let mut instructions = Vec::new();
+        let mut viewbox = None;
+        let svg_start = match read_for_svg_tag(&mut reader) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "reading svg failed");
+                std::process::abort();
+            }
+        };
+        for a in svg_start.attributes().with_checks(false) {
+            let a = a.unwrap();
+
+            if a.key.0 == b"viewBox" {
+                viewbox = Some(ViewBox::from_str_bytes(&a.value));
+            }
+        }
+        loop {
+            match reader.read_event() {
+                Err(e) => {
+                    tracing::error!(reason = ?e, "reading svg failed");
+                    std::process::abort();
+                }
+                Ok(quick_xml::events::Event::End(x)) if x.name().0 == b"svg" => {
+                    // end of svg content
+                    break;
+                }
+                Ok(quick_xml::events::Event::Empty(x)) if x.name().0 == b"path" => {
+                    for a in x.attributes().with_checks(false) {
+                        let a = a.unwrap();
+
+                        if a.key.0 == b"d" {
+                            for x in InstructionParser::new_bytes(&a.value) {
+                                instructions.push(x);
+                            }
+                        }
+                    }
+                }
+                Ok(e) => {
+                    tracing::error!(event = ?e, "unexpected");
+                    unreachable!();
+                }
+            }
+        }
+        match reader.read_event() {
+            Err(e) => {
+                tracing::error!(reason = ?e, "reading svg failed");
+                std::process::abort();
+            }
+            Ok(quick_xml::events::Event::Eof) => (),
+            Ok(e) => {
+                tracing::error!(event = ?e, "unexpected");
+                unreachable!();
+            }
+        }
+
+        Self {
+            viewbox: match viewbox {
+                Some(x) => x,
+                None => {
+                    tracing::error!("no viewbox?");
+                    unreachable!();
+                }
+            },
+            instructions,
+        }
+    }
+}
+
+fn read_for_svg_tag<'a>(
+    reader: &mut quick_xml::Reader<&'a [u8]>,
+) -> Result<quick_xml::events::BytesStart<'a>, quick_xml::Error> {
+    loop {
+        match reader.read_event()? {
+            quick_xml::events::Event::Start(x) if x.name().0 == b"svg" => return Ok(x),
+            quick_xml::events::Event::Start(x) => {
+                tracing::error!(tag = ?x, "unexpected start tag");
+                unreachable!();
+            }
+            e => {
+                tracing::error!(event = ?e, "unexpected");
+                unreachable!();
+            }
         }
     }
 }

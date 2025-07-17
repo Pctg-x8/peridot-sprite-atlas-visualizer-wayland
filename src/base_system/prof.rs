@@ -1,6 +1,6 @@
 //! mini profiler
 
-use std::{io::Write, path::Path};
+use std::path::Path;
 
 use shared_perflog_proto::{ProfileMarker, ProfileMarkerCategory};
 
@@ -143,10 +143,11 @@ impl ProfilingContext {
 
     #[cfg(not(feature = "profiling"))]
     #[inline(always)]
-    pub fn begin_frame<'p>(&'p mut self) -> ProfilingFrameContext {
+    pub fn begin_frame(&mut self) -> ProfilingFrameContext {
         ProfilingFrameContext {}
     }
 
+    #[cfg_attr(not(feature = "profiling"), allow(dead_code, unused_variables))]
     #[inline(always)]
     fn append_now(&mut self, marker: ProfileMarker, cat: ProfileMarkerCategory) {
         #[cfg(feature = "profiling")]
@@ -159,11 +160,12 @@ impl ProfilingContext {
 
     pub fn flush(&mut self) {
         #[cfg(feature = "profiling")]
-        if let Err(e) = self.fp.flush() {
+        if let Err(e) = std::io::Write::flush(&mut self.fp) {
             tracing::warn!(reason = ?e, "flush perflog failed");
         }
     }
 
+    #[cfg(feature = "profiling")]
     pub fn timestamp() -> u64 {
         #[cfg(target_os = "linux")]
         {
@@ -171,6 +173,7 @@ impl ProfilingContext {
         }
     }
 
+    #[cfg(feature = "profiling")]
     pub fn timestamp_freq() -> u64 {
         #[cfg(target_os = "linux")]
         {

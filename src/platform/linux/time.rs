@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 pub fn hires_tick() -> u64 {
     let mut ts = core::mem::MaybeUninit::uninit();
     unsafe {

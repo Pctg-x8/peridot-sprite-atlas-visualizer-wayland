@@ -2921,8 +2921,9 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         last_rendering = false;
                     }
 
-                    _pf.begin_resize();
                     if let Some((width, height)) = newsize_request.take() {
+                        let _pf = _pf.scoped(ProfileMarker::Resize);
+
                         let w_dip = width as f32 / app_shell.ui_scale_factor();
                         let h_dip = height as f32 / app_shell.ui_scale_factor();
                         tracing::trace!(width, height, "frame resize");
@@ -2936,9 +2937,12 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
 
                         sc.resize(br::Extent2D { width, height });
 
-                        main_grabbed_fbs = sc
-                            .backbuffer_views()
-                            .map(|bb| {
+                        main_grabbed_fbs.clear();
+                        main_final_fbs.clear();
+                        main_continue_grabbed_fbs.clear();
+                        main_continue_final_fbs.clear();
+                        for bb in sc.backbuffer_views() {
+                            main_grabbed_fbs.push(
                                 br::FramebufferObject::new(
                                     app_system.subsystem,
                                     &br::FramebufferCreateInfo::new(
@@ -2948,12 +2952,9 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                         sc.size.height,
                                     ),
                                 )
-                                .unwrap()
-                            })
-                            .collect::<Vec<_>>();
-                        main_final_fbs = sc
-                            .backbuffer_views()
-                            .map(|bb| {
+                                .unwrap(),
+                            );
+                            main_final_fbs.push(
                                 br::FramebufferObject::new(
                                     app_system.subsystem,
                                     &br::FramebufferCreateInfo::new(
@@ -2963,12 +2964,9 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                         sc.size.height,
                                     ),
                                 )
-                                .unwrap()
-                            })
-                            .collect::<Vec<_>>();
-                        main_continue_grabbed_fbs = sc
-                            .backbuffer_views()
-                            .map(|bb| {
+                                .unwrap(),
+                            );
+                            main_continue_grabbed_fbs.push(
                                 br::FramebufferObject::new(
                                     app_system.subsystem,
                                     &br::FramebufferCreateInfo::new(
@@ -2978,12 +2976,9 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                         sc.size.height,
                                     ),
                                 )
-                                .unwrap()
-                            })
-                            .collect::<Vec<_>>();
-                        main_continue_final_fbs = sc
-                            .backbuffer_views()
-                            .map(|bb| {
+                                .unwrap(),
+                            );
+                            main_continue_final_fbs.push(
                                 br::FramebufferObject::new(
                                     app_system.subsystem,
                                     &br::FramebufferCreateInfo::new(
@@ -2993,9 +2988,9 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                         sc.size.height,
                                     ),
                                 )
-                                .unwrap()
-                            })
-                            .collect::<Vec<_>>();
+                                .unwrap(),
+                            );
+                        }
 
                         composite_backdrop_buffers_invalidated = true;
 
@@ -3364,7 +3359,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                             sc.size,
                         );
                     }
-                    _pf.end_resize();
 
                     current_selected_sprite_marker_view
                         .update(&mut app_system.composite_tree, current_sec);
@@ -3378,7 +3372,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     popup_manager.update(app_system, current_sec);
 
                     {
-                        _pf.begin_populate_composite_instances();
+                        let _pf = _pf.scoped(ProfileMarker::PopulateCompositeInstances);
 
                         // もろもろの判定がめんどいのでいったん毎回updateする
                         let n = app_system
@@ -3418,8 +3412,11 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         if last_composite_render_instructions != composite_render_instructions {
                             // needs update render commands
                             if !main_cb_invalid {
-                                unsafe {
-                                    main_cp.reset(br::CommandPoolResetFlags::EMPTY).unwrap();
+                                // invalidate first
+                                if let Err(e) =
+                                    unsafe { main_cp.reset(br::CommandPoolResetFlags::EMPTY) }
+                                {
+                                    tracing::warn!(reason = ?e, "main command pool reset failed");
                                 }
 
                                 main_cb_invalid = true;
@@ -3429,29 +3426,21 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                 > composite_backdrop_buffer_descriptor_pool_capacity
                             {
                                 // resize pool
+                                let object_count = composite_render_instructions
+                                    .required_backdrop_buffer_count
+                                    .max(1);
+
                                 composite_backdrop_buffer_descriptor_pool =
                                     br::DescriptorPoolObject::new(
                                         app_system.subsystem,
                                         &br::DescriptorPoolCreateInfo::new(
-                                            composite_render_instructions
-                                                .required_backdrop_buffer_count
-                                                .max(1)
-                                                as _,
-                                            &[br::DescriptorType::CombinedImageSampler.make_size(
-                                                composite_render_instructions
-                                                    .required_backdrop_buffer_count
-                                                    .max(1)
-                                                    as _,
-                                            )],
+                                            object_count as _,
+                                            &[br::DescriptorType::CombinedImageSampler
+                                                .make_size(object_count as _)],
                                         ),
                                     )
                                     .unwrap();
-                                composite_backdrop_buffer_descriptor_pool_capacity =
-                                    composite_render_instructions.required_backdrop_buffer_count;
-                                composite_backdrop_buffer_descriptor_sets.reserve(
-                                    composite_render_instructions.required_backdrop_buffer_count
-                                        - composite_backdrop_buffer_descriptor_sets.len(),
-                                );
+                                composite_backdrop_buffer_descriptor_pool_capacity = object_count;
                             } else {
                                 // just reset
                                 unsafe {
@@ -3462,11 +3451,9 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                             composite_backdrop_buffer_descriptor_sets.extend(
                                 composite_backdrop_buffer_descriptor_pool
                                     .alloc(
-                                        &core::iter::repeat(
+                                        &core::iter::repeat_n(
                                             composite_backdrop_descriptor_layout
                                                 .as_transparent_ref(),
-                                        )
-                                        .take(
                                             composite_render_instructions
                                                 .required_backdrop_buffer_count
                                                 .max(1),
@@ -3481,8 +3468,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         }
 
                         composite_instance_buffer_dirty = true;
-
-                        _pf.end_populate_composite_instances();
                     }
 
                     let composite_instance_buffer_dirty =
@@ -4229,7 +4214,6 @@ async fn app_menu_on_add_sprite<'subsystem>(
 
     if !has_file_chooser {
         // FileChooserなし
-
         events.push(AppEvent::UIMessageDialogRequest {
             content: String::from("org.freedesktop.portal.FileChooser not found"),
         });
@@ -4257,25 +4241,19 @@ async fn app_menu_on_add_sprite<'subsystem>(
         .unwrap();
     if let Some(error) = reply_msg.try_get_error() {
         tracing::error!(reason = ?error, "FileChooser version get failed");
-
         return;
     }
 
     let mut reply_iter = reply_msg.iter();
     assert_eq!(reply_iter.arg_type(), b'v' as _);
     let mut content_iter = reply_iter.recurse();
-    assert_eq!(content_iter.arg_type(), b'u' as _);
-    let mut v = core::mem::MaybeUninit::<u32>::uninit();
-    unsafe {
-        content_iter.get_value_basic(v.as_mut_ptr() as _);
-    }
+    let v = content_iter
+        .try_get_u32()
+        .expect("unexpected version value");
 
-    println!("AddSprite: file chooser found! version = {}", unsafe {
-        v.assume_init()
-    });
+    tracing::trace!(version = v, "AddSprite: file chooser found!");
 
     let unique_name = dbus.underlying_mut().unique_name().unwrap().to_owned();
-    println!("unique name: {unique_name:?}");
     let unique_name_portal_request_path = unique_name
         .to_str()
         .unwrap()
@@ -4293,29 +4271,7 @@ async fn app_menu_on_add_sprite<'subsystem>(
         c"Response".into(),
     );
 
-    let (exported_shell_handle, exported_shell) = 'optin_exported: {
-        if let Some(mut x) = shell.try_export_toplevel() {
-            struct Handler {
-                handle: Option<std::ffi::CString>,
-            }
-            impl wl::ZxdgExportedV2EventListener for Handler {
-                fn handle(&mut self, _sender: &mut wl::ZxdgExportedV2, handle: &core::ffi::CStr) {
-                    self.handle = Some(handle.into());
-                }
-            }
-            let mut handler = Handler { handle: None };
-            if let Err(e) = x.add_listener(&mut handler) {
-                tracing::warn!(target = "ZxdgExportedV2", reason = ?e, "Failed to add listener");
-                break 'optin_exported (std::ffi::CString::from(c""), None);
-            }
-            shell.sync();
-
-            (handler.handle.unwrap_or_else(|| c"".into()), Some(x))
-        } else {
-            (c"".into(), None)
-        }
-    };
-
+    let exported_shell = shell.try_export_toplevel();
     let reply_msg = dbus
         .send({
             let mut msg = dbus::Message::new_method_call(
@@ -4326,7 +4282,10 @@ async fn app_menu_on_add_sprite<'subsystem>(
             )
             .unwrap();
             let mut msg_args_appender = msg.iter_append();
-            msg_args_appender.append_cstr(&exported_shell_handle);
+            msg_args_appender.append_cstr(match exported_shell {
+                Some(ref x) => x.handle.as_c_str(),
+                None => c"",
+            });
             msg_args_appender.append_cstr(c"Add Sprite");
             let mut options_appender = msg_args_appender
                 .open_container(dbus::TYPE_ARRAY, Some(c"{sv}"))
@@ -4359,7 +4318,6 @@ async fn app_menu_on_add_sprite<'subsystem>(
         reply_iter.get_value_basic(sp.as_mut_ptr() as _);
     }
     let open_file_dialog_handle = unsafe { core::ffi::CStr::from_ptr(sp.assume_init()) };
-    println!("OpenFile dialog handle: {open_file_dialog_handle:?}");
 
     if open_file_dialog_handle != &request_object_path as &core::ffi::CStr {
         tracing::debug!(
@@ -4379,8 +4337,7 @@ async fn app_menu_on_add_sprite<'subsystem>(
 
     println!("open file response! {:?}", resp.signature());
     let mut resp_iter = resp.iter();
-    assert_eq!(resp_iter.arg_type(), dbus::TYPE_UINT);
-    let response = unsafe { resp_iter.get_u32_unchecked() };
+    let response = resp_iter.try_get_u32().expect("unexpected type");
     if response != 0 {
         tracing::warn!(code = response, "FileChooser.OpenFile has cancelled");
         return;
@@ -4394,18 +4351,16 @@ async fn app_menu_on_add_sprite<'subsystem>(
         assert_eq!(resp_results_iter.arg_type(), dbus::TYPE_DICT_ENTRY);
         let mut kv_iter = resp_results_iter.recurse();
 
-        assert_eq!(kv_iter.arg_type(), dbus::TYPE_STRING);
-        match unsafe { kv_iter.get_cstr_unchecked() } {
+        match kv_iter.try_get_cstr().expect("unexpected key value") {
             x if x == c"uris" => {
                 kv_iter.next();
 
                 let mut value_iter = kv_iter.begin_iter_variant_content().unwrap();
                 let mut iter = value_iter.begin_iter_array_content().unwrap();
                 while iter.arg_type() != dbus::TYPE_INVALID {
-                    assert_eq!(iter.arg_type(), dbus::TYPE_STRING);
-                    uris.push(std::ffi::CString::from(unsafe {
-                        iter.get_cstr_unchecked()
-                    }));
+                    uris.push(std::ffi::CString::from(
+                        iter.try_get_cstr().expect("unexpected uris value"),
+                    ));
                     iter.next();
                 }
             }
@@ -4417,13 +4372,13 @@ async fn app_menu_on_add_sprite<'subsystem>(
                 while iter.arg_type() != dbus::TYPE_INVALID {
                     assert_eq!(iter.arg_type(), dbus::TYPE_STRUCT);
                     let mut elements_iter = iter.recurse();
-                    assert_eq!(elements_iter.arg_type(), dbus::TYPE_STRING);
-                    let key =
-                        unsafe { std::ffi::CString::from(elements_iter.get_cstr_unchecked()) };
+                    let key = std::ffi::CString::from(
+                        elements_iter.try_get_cstr().expect("unexpected key value"),
+                    );
                     elements_iter.next();
-                    assert_eq!(elements_iter.arg_type(), dbus::TYPE_STRING);
-                    let value =
-                        unsafe { std::ffi::CString::from(elements_iter.get_cstr_unchecked()) };
+                    let value = std::ffi::CString::from(
+                        elements_iter.try_get_cstr().expect("unexpected value"),
+                    );
                     println!("choices {key:?} -> {value:?}");
                     drop(elements_iter);
                     iter.next();
@@ -4434,20 +4389,20 @@ async fn app_menu_on_add_sprite<'subsystem>(
 
                 assert_eq!(kv_iter.arg_type(), dbus::TYPE_STRUCT);
                 let mut struct_iter = kv_iter.recurse();
-                assert_eq!(struct_iter.arg_type(), dbus::TYPE_STRING);
-                let filter_name =
-                    unsafe { std::ffi::CString::from(struct_iter.get_cstr_unchecked()) };
+                let filter_name = std::ffi::CString::from(
+                    struct_iter
+                        .try_get_cstr()
+                        .expect("unexpected filter name value"),
+                );
                 struct_iter.next();
                 assert_eq!(struct_iter.arg_type(), dbus::TYPE_ARRAY);
                 let mut array_iter = struct_iter.recurse();
                 while array_iter.arg_type() != dbus::TYPE_INVALID {
                     assert_eq!(array_iter.arg_type(), dbus::TYPE_STRUCT);
                     let mut struct_iter = array_iter.recurse();
-                    assert_eq!(struct_iter.arg_type(), dbus::TYPE_UINT);
-                    let v = unsafe { struct_iter.get_u32_unchecked() };
+                    let v = struct_iter.try_get_u32().expect("unexpected type");
                     struct_iter.next();
-                    assert_eq!(struct_iter.arg_type(), dbus::TYPE_STRING);
-                    let f = unsafe { struct_iter.get_cstr_unchecked() };
+                    let f = struct_iter.try_get_cstr().expect("unexpected filter value");
                     println!("filter {filter_name:?}: {v} {f:?}");
                     array_iter.next();
                 }

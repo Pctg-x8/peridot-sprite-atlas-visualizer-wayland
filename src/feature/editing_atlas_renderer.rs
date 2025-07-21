@@ -775,103 +775,100 @@ impl<'d> EditingAtlasRenderer<'d> {
         self.param_is_dirty = false;
         self.bg_vertex_buffer_is_dirty = false;
         let mut loaded_sprite_atlas_image_barrier_needed = false;
-        rec.update_buffer(
-            &self.param_buffer,
-            0,
-            core::mem::size_of::<GridParams>() as _,
-            &self.current_params_data,
-        )
-        .update_buffer(
-            &self.bg_vertex_buffer,
-            0,
-            core::mem::size_of::<[[f32; 4]; 4]>() as _,
-            &[
-                [0.0f32, 0.0, 0.0, 1.0],
-                [self.atlas_size.width as f32, 0.0, 0.0, 1.0],
-                [0.0f32, self.atlas_size.height as f32, 0.0, 1.0],
-                [
-                    self.atlas_size.width as f32,
-                    self.atlas_size.height as f32,
-                    0.0,
-                    1.0,
+        rec.update_buffer_exact(&self.param_buffer, 0, &self.current_params_data)
+            .update_buffer_exact(
+                &self.bg_vertex_buffer,
+                0,
+                &[
+                    [0.0f32, 0.0, 0.0, 1.0],
+                    [self.atlas_size.width as f32, 0.0, 0.0, 1.0],
+                    [0.0f32, self.atlas_size.height as f32, 0.0, 1.0],
+                    [
+                        self.atlas_size.width as f32,
+                        self.atlas_size.height as f32,
+                        0.0,
+                        1.0,
+                    ],
                 ],
-            ],
-        )
-        .inject(|r| {
-            let buffers_mref = self.sprite_instance_buffers.get_mut();
-            if !buffers_mref.is_dirty {
-                return r;
-            }
-            buffers_mref.is_dirty = false;
-
-            r.copy_buffer(
-                &buffers_mref.stg_buffer,
-                &buffers_mref.buffer,
-                &[br::BufferCopy::mirror(
-                    0,
-                    (self.sprite_count.get() * core::mem::size_of::<SpriteInstance>()) as _,
-                )],
             )
-        })
-        .inject(|r| {
-            let atlas_ref = self.loaded_sprite_source_atlas.borrow();
-            let mut copies_mref = self.sprite_image_copies.write();
-            if copies_mref.is_empty() {
-                // no copies needed
-                return r;
-            }
+            .inject(|r| {
+                let buffers_mref = self.sprite_instance_buffers.get_mut();
+                if !buffers_mref.is_dirty {
+                    return r;
+                }
+                buffers_mref.is_dirty = false;
 
-            loaded_sprite_atlas_image_barrier_needed = true;
-            copies_mref.drain().fold(
-                r.inject(|r| {
-                    inject_cmd_pipeline_barrier_2(
-                        r,
-                        subsystem,
-                        &br::DependencyInfo::new(
-                            &[],
-                            &[],
-                            &[br::ImageMemoryBarrier2::new(
-                                atlas_ref.resource.image(),
-                                br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
-                            )
-                            .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
+                r.copy_buffer(
+                    &buffers_mref.stg_buffer,
+                    &buffers_mref.buffer,
+                    &[br::BufferCopy::mirror(
+                        0,
+                        (self.sprite_count.get() * core::mem::size_of::<SpriteInstance>()) as _,
+                    )],
+                )
+            })
+            .inject(|r| {
+                let atlas_ref = self.loaded_sprite_source_atlas.borrow();
+                let mut copies_mref = self.sprite_image_copies.write();
+                if copies_mref.is_empty() {
+                    // no copies needed
+                    return r;
+                }
+
+                loaded_sprite_atlas_image_barrier_needed = true;
+                copies_mref.drain().fold(
+                    r.inject(|r| {
+                        inject_cmd_pipeline_barrier_2(
+                            r,
+                            subsystem,
+                            &br::DependencyInfo::new(
+                                &[],
+                                &[],
+                                &[br::ImageMemoryBarrier2::new(
+                                    atlas_ref.resource.image(),
+                                    br::ImageSubresourceRange::new(
+                                        br::AspectMask::COLOR,
+                                        0..1,
+                                        0..1,
+                                    ),
+                                )
+                                .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
+                            ),
+                        )
+                    }),
+                    |r, (bi, cps)| {
+                        r.copy_buffer_to_image(
+                            staging_scratch_buffer.buffer_of(bi),
+                            atlas_ref.resource.image(),
+                            br::ImageLayout::TransferDestOpt,
+                            &cps,
+                        )
+                    },
+                )
+            })
+            .inject(|r| {
+                let atlas_ref = self.loaded_sprite_source_atlas.borrow();
+                let mut image_memory_barriers = Vec::with_capacity(8);
+                if loaded_sprite_atlas_image_barrier_needed {
+                    image_memory_barriers.push(
+                        br::ImageMemoryBarrier2::new(
+                            atlas_ref.resource.image(),
+                            br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+                        )
+                        .transit_from(
+                            br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt),
+                        )
+                        .from(
+                            br::PipelineStageFlags2::COPY,
+                            br::AccessFlags2::TRANSFER.write,
+                        )
+                        .to(
+                            br::PipelineStageFlags2::FRAGMENT_SHADER,
+                            br::AccessFlags2::SHADER.read,
                         ),
-                    )
-                }),
-                |r, (bi, cps)| {
-                    r.copy_buffer_to_image(
-                        staging_scratch_buffer.buffer_of(bi),
-                        atlas_ref.resource.image(),
-                        br::ImageLayout::TransferDestOpt,
-                        &cps,
-                    )
-                },
-            )
-        })
-        .inject(|r| {
-            let atlas_ref = self.loaded_sprite_source_atlas.borrow();
-            let mut image_memory_barriers = Vec::with_capacity(8);
-            if loaded_sprite_atlas_image_barrier_needed {
-                image_memory_barriers.push(
-                    br::ImageMemoryBarrier2::new(
-                        atlas_ref.resource.image(),
-                        br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
-                    )
-                    .transit_from(
-                        br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt),
-                    )
-                    .from(
-                        br::PipelineStageFlags2::COPY,
-                        br::AccessFlags2::TRANSFER.write,
-                    )
-                    .to(
-                        br::PipelineStageFlags2::FRAGMENT_SHADER,
-                        br::AccessFlags2::SHADER.read,
-                    ),
-                );
-            }
+                    );
+                }
 
-            r.inject(|r| {
                 inject_cmd_pipeline_barrier_2(
                     r,
                     subsystem,
@@ -892,7 +889,6 @@ impl<'d> EditingAtlasRenderer<'d> {
                     ),
                 )
             })
-        })
     }
 
     pub fn recreate(

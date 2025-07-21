@@ -1278,22 +1278,6 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
         }
     }
 
-    // wayland specific functionality
-    pub fn try_export_toplevel(&self) -> Option<wl::Owned<wl::ZxdgExportedV2>> {
-        let Some(ref x) = self.zxdg_exporter_v2 else {
-            tracing::warn!("No zxdg_exporter_v2 found on the system");
-            return None;
-        };
-
-        match unsafe { x.as_ref() }.export_toplevel(unsafe { self.content_surface.as_ref() }) {
-            Ok(x) => Some(x),
-            Err(e) => {
-                tracing::warn!(reason = ?e, "Failed to get exported toplevel");
-                None
-            }
-        }
-    }
-
     #[inline]
     pub fn ui_scale_factor(&self) -> f32 {
         unsafe { (*self.shell_event_handler.get()).ui_scale_factor }
@@ -1302,6 +1286,50 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
     #[inline]
     pub fn pointer_input_manager(&self) -> &UnsafeCell<PointerInputManager> {
         unsafe { &(*self.shell_event_handler.get()).pointer_input_manager }
+    }
+
+    // wayland specific functionality
+    #[tracing::instrument(name = "AppShell::try_export_toplevel", skip(self))]
+    pub fn try_export_toplevel(&self) -> Option<ExportedShellData> {
+        let Some(ref x) = self.zxdg_exporter_v2 else {
+            tracing::warn!("No zxdg_exporter_v2 found on the system");
+            return None;
+        };
+
+        let mut object =
+            match unsafe { x.as_ref() }.export_toplevel(unsafe { self.content_surface.as_ref() }) {
+                Ok(x) => x,
+                Err(e) => {
+                    tracing::warn!(reason = ?e, "Failed to get exported toplevel");
+                    return None;
+                }
+            };
+
+        struct Handler {
+            handle: Option<std::ffi::CString>,
+        }
+        impl wl::ZxdgExportedV2EventListener for Handler {
+            fn handle(&mut self, _sender: &mut wl::ZxdgExportedV2, handle: &core::ffi::CStr) {
+                self.handle = Some(handle.into());
+            }
+        }
+        let mut handler = Handler { handle: None };
+        if let Err(e) = object.add_listener(&mut handler) {
+            tracing::warn!(target = "ZxdgExportedV2", reason = ?e, "Failed to add listener");
+            return None;
+        }
+        self.sync();
+
+        Some(ExportedShellData {
+            object,
+            handle: match handler.handle {
+                Some(x) => x,
+                None => {
+                    tracing::warn!("no zxdg_exported_v2.handle respond?");
+                    c"".into()
+                }
+            },
+        })
     }
 }
 
@@ -1973,4 +2001,9 @@ impl AppShellDecorator {
 
         shm
     }
+}
+
+pub struct ExportedShellData {
+    pub object: wl::Owned<wl::ZxdgExportedV2>,
+    pub handle: std::ffi::CString,
 }

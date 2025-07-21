@@ -472,11 +472,27 @@ impl MessageIter<'_> {
         }
     }
 
+    #[inline(always)]
+    pub fn try_get_u32(&mut self) -> Result<u32, core::ffi::c_int> {
+        match self.arg_type() {
+            TYPE_UINT => Ok(unsafe { self.get_u32_unchecked() }),
+            v => Err(v),
+        }
+    }
+
     pub unsafe fn get_cstr_unchecked(&mut self) -> &CStr {
         let mut sink = MaybeUninit::<*const core::ffi::c_char>::uninit();
         unsafe {
             self.get_value_basic(sink.as_mut_ptr() as _);
             CStr::from_ptr(sink.assume_init())
+        }
+    }
+
+    #[inline(always)]
+    pub fn try_get_cstr(&mut self) -> Result<&CStr, core::ffi::c_int> {
+        match self.arg_type() {
+            TYPE_STRING => Ok(unsafe { self.get_cstr_unchecked() }),
+            v => Err(v),
         }
     }
 

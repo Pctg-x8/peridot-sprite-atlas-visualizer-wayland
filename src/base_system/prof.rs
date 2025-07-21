@@ -44,34 +44,6 @@ impl<'p> ProfilingFrameContext<'p> {
     pub fn record(&mut self, marker: ProfileMarker, cat: ProfileMarkerCategory) {
         self.ctx.append_now(marker, cat);
     }
-
-    #[inline(always)]
-    pub fn begin_resize(&mut self) {
-        self.ctx
-            .append_now(ProfileMarker::Resize, ProfileMarkerCategory::Begin);
-    }
-
-    #[inline(always)]
-    pub fn end_resize(&mut self) {
-        self.ctx
-            .append_now(ProfileMarker::Resize, ProfileMarkerCategory::End);
-    }
-
-    #[inline(always)]
-    pub fn begin_populate_composite_instances(&mut self) {
-        self.ctx.append_now(
-            ProfileMarker::PopulateCompositeInstances,
-            ProfileMarkerCategory::Begin,
-        );
-    }
-
-    #[inline(always)]
-    pub fn end_populate_composite_instances(&mut self) {
-        self.ctx.append_now(
-            ProfileMarker::PopulateCompositeInstances,
-            ProfileMarkerCategory::End,
-        );
-    }
 }
 #[cfg(not(feature = "profiling"))]
 impl ProfilingFrameContext {

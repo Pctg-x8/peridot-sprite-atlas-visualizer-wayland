@@ -2504,48 +2504,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     app_shell.flush();
 
     #[cfg(target_os = "linux")]
-    pub enum PollFDType {
-        AppEventBus,
-        AppShellDisplay,
-        BackgroundWorkerViewFeedback,
-        DBusWatch(*mut dbus::WatchRef),
-    }
-    #[cfg(target_os = "linux")]
-    struct PollFDPool {
-        types: Vec<PollFDType>,
-        freelist: BTreeSet<u64>,
-    }
-    #[cfg(target_os = "linux")]
-    impl PollFDPool {
-        pub fn new() -> Self {
-            Self {
-                types: Vec::new(),
-                freelist: BTreeSet::new(),
-            }
-        }
-
-        pub fn alloc(&mut self, t: PollFDType) -> u64 {
-            if let Some(x) = self.freelist.pop_first() {
-                // use preallocated
-                self.types[x as usize] = t;
-                return x;
-            }
-
-            // allocate new one
-            self.types.push(t);
-            (self.types.len() - 1) as _
-        }
-
-        pub fn free(&mut self, x: u64) {
-            self.freelist.insert(x);
-        }
-
-        pub fn get(&self, x: u64) -> Option<&PollFDType> {
-            self.types.get(x as usize)
-        }
-    }
-
-    #[cfg(target_os = "linux")]
     let poll_fd_pool = RefCell::new(PollFDPool::new());
     #[cfg(target_os = "linux")]
     let epoll = platform::linux::Epoll::new(0).unwrap();
@@ -2583,121 +2541,17 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         .unwrap();
 
     #[cfg(target_os = "linux")]
-    struct DBusWatcher<'e> {
-        epoll: &'e platform::linux::Epoll,
-        fd_pool: &'e RefCell<PollFDPool>,
-        fd_to_pool_index: HashMap<core::ffi::c_int, u64>,
-    }
-    #[cfg(target_os = "linux")]
-    impl dbus::WatchFunction for DBusWatcher<'_> {
-        fn add(&mut self, watch: &mut dbus::WatchRef) -> bool {
-            if watch.enabled() {
-                let mut event_type = 0;
-                let flags = watch.flags();
-                if flags.contains(dbus::WatchFlags::READABLE) {
-                    event_type |= platform::linux::EPOLLIN;
-                }
-                if flags.contains(dbus::WatchFlags::WRITABLE) {
-                    event_type |= platform::linux::EPOLLOUT;
-                }
-
-                let pool_index = self
-                    .fd_pool
-                    .borrow_mut()
-                    .alloc(PollFDType::DBusWatch(watch as *mut _));
-
-                self.epoll
-                    .add(
-                        &watch.as_raw_fd(),
-                        event_type,
-                        platform::linux::EpollData::U64(pool_index),
-                    )
-                    .unwrap();
-                self.fd_to_pool_index.insert(watch.as_raw_fd(), pool_index);
-            }
-
-            true
-        }
-
-        fn remove(&mut self, watch: &mut dbus::WatchRef) {
-            let Some(pool_index) = self.fd_to_pool_index.remove(&watch.as_raw_fd()) else {
-                // not bound
-                return;
-            };
-
-            match self.epoll.del(&watch.as_raw_fd()) {
-                // ENOENTは無視
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-                Err(e) => {
-                    tracing::error!(reason = ?e, "Failed to remove dbus watch");
-                }
-                Ok(_) => (),
-            }
-
-            self.fd_pool.borrow_mut().free(pool_index);
-        }
-
-        fn toggled(&mut self, watch: &mut dbus::WatchRef) {
-            let mut event_type = 0;
-            let flags = watch.flags();
-            if flags.contains(dbus::WatchFlags::READABLE) {
-                event_type |= platform::linux::EPOLLIN;
-            }
-            if flags.contains(dbus::WatchFlags::WRITABLE) {
-                event_type |= platform::linux::EPOLLOUT;
-            }
-
-            if watch.enabled() {
-                let pool_index = self
-                    .fd_pool
-                    .borrow_mut()
-                    .alloc(PollFDType::DBusWatch(watch as *mut _));
-
-                self.epoll
-                    .add(
-                        &watch.as_raw_fd(),
-                        event_type,
-                        platform::linux::EpollData::U64(pool_index),
-                    )
-                    .unwrap();
-                self.fd_to_pool_index.insert(watch.as_raw_fd(), pool_index);
-            } else {
-                let Some(pool_index) = self.fd_to_pool_index.remove(&watch.as_raw_fd()) else {
-                    // not bound
-                    return;
-                };
-
-                match self.epoll.del(&watch.as_raw_fd()) {
-                    // ENOENTは無視
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-                    Err(e) => {
-                        tracing::error!(reason = ?e, "Failed to remove dbus watch");
-                    }
-                    Ok(_) => (),
-                }
-
-                self.fd_pool.borrow_mut().free(pool_index);
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
     dbus.con.set_watch_functions(Box::new(DBusWatcher {
         epoll: &epoll,
         fd_pool: &poll_fd_pool,
         fd_to_pool_index: HashMap::new(),
     }));
 
-    let elapsed = setup_timer.elapsed();
-    tracing::info!(?elapsed, "App Setup done!");
+    let mut popup_manager = PopupManager::new(popup_hit_layer, CompositeTree::ROOT);
 
-    // initial post event
-    events.push(AppEvent::ToplevelWindowFrameTiming);
-
-    let mut _profiler = ProfilingContext::init("./local/profile");
+    // initialize misc state
     let mut active_ui_scale = app_shell.ui_scale_factor();
     let mut newsize_request = None;
-    let t = std::time::Instant::now();
     let mut last_pointer_pos = (0.0f32, 0.0f32);
     let mut last_composite_render_instructions = CompositeRenderingData {
         instructions: Vec::new(),
@@ -2705,15 +2559,24 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         required_backdrop_buffer_count: 0,
     };
     let mut composite_instance_buffer_dirty = false;
-    let mut popup_manager = PopupManager::new(popup_hit_layer, CompositeTree::ROOT);
-    #[cfg(target_os = "linux")]
-    let mut epoll_events =
-        [const { core::mem::MaybeUninit::<platform::linux::epoll_event>::uninit() }; 8];
+
+    // initial post event
+    events.push(AppEvent::ToplevelWindowFrameTiming);
+
     let mut app_update_context = AppUpdateContext {
         event_queue: &events,
         state: &app_state,
         ui_scale_factor: app_shell.ui_scale_factor(),
     };
+
+    let elapsed = setup_timer.elapsed();
+    tracing::info!(?elapsed, "App Setup done!");
+
+    #[cfg(target_os = "linux")]
+    let mut epoll_events =
+        [const { core::mem::MaybeUninit::<platform::linux::epoll_event>::uninit() }; 8];
+    let t = std::time::Instant::now();
+    let mut _profiler = ProfilingContext::init("./local/profile");
     'app: loop {
         #[cfg(target_os = "linux")]
         {
@@ -4507,6 +4370,147 @@ async fn app_menu_on_add_sprite<'subsystem>(
     }
 
     app_state.borrow_mut().add_sprites_by_uri_list(uris);
+}
+
+#[cfg(target_os = "linux")]
+pub enum PollFDType {
+    AppEventBus,
+    AppShellDisplay,
+    BackgroundWorkerViewFeedback,
+    DBusWatch(*mut dbus::WatchRef),
+}
+#[cfg(target_os = "linux")]
+struct PollFDPool {
+    types: Vec<PollFDType>,
+    freelist: BTreeSet<u64>,
+}
+#[cfg(target_os = "linux")]
+impl PollFDPool {
+    pub fn new() -> Self {
+        Self {
+            types: Vec::new(),
+            freelist: BTreeSet::new(),
+        }
+    }
+
+    pub fn alloc(&mut self, t: PollFDType) -> u64 {
+        if let Some(x) = self.freelist.pop_first() {
+            // use preallocated
+            self.types[x as usize] = t;
+            return x;
+        }
+
+        // allocate new one
+        self.types.push(t);
+        (self.types.len() - 1) as _
+    }
+
+    pub fn free(&mut self, x: u64) {
+        self.freelist.insert(x);
+    }
+
+    pub fn get(&self, x: u64) -> Option<&PollFDType> {
+        self.types.get(x as usize)
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct DBusWatcher<'e> {
+    epoll: &'e platform::linux::Epoll,
+    fd_pool: &'e RefCell<PollFDPool>,
+    fd_to_pool_index: HashMap<core::ffi::c_int, u64>,
+}
+#[cfg(target_os = "linux")]
+impl dbus::WatchFunction for DBusWatcher<'_> {
+    fn add(&mut self, watch: &mut dbus::WatchRef) -> bool {
+        if watch.enabled() {
+            let mut event_type = 0;
+            let flags = watch.flags();
+            if flags.contains(dbus::WatchFlags::READABLE) {
+                event_type |= platform::linux::EPOLLIN;
+            }
+            if flags.contains(dbus::WatchFlags::WRITABLE) {
+                event_type |= platform::linux::EPOLLOUT;
+            }
+
+            let pool_index = self
+                .fd_pool
+                .borrow_mut()
+                .alloc(PollFDType::DBusWatch(watch as *mut _));
+
+            self.epoll
+                .add(
+                    &watch.as_raw_fd(),
+                    event_type,
+                    platform::linux::EpollData::U64(pool_index),
+                )
+                .unwrap();
+            self.fd_to_pool_index.insert(watch.as_raw_fd(), pool_index);
+        }
+
+        true
+    }
+
+    fn remove(&mut self, watch: &mut dbus::WatchRef) {
+        let Some(pool_index) = self.fd_to_pool_index.remove(&watch.as_raw_fd()) else {
+            // not bound
+            return;
+        };
+
+        match self.epoll.del(&watch.as_raw_fd()) {
+            // ENOENTは無視
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to remove dbus watch");
+            }
+            Ok(_) => (),
+        }
+
+        self.fd_pool.borrow_mut().free(pool_index);
+    }
+
+    fn toggled(&mut self, watch: &mut dbus::WatchRef) {
+        let mut event_type = 0;
+        let flags = watch.flags();
+        if flags.contains(dbus::WatchFlags::READABLE) {
+            event_type |= platform::linux::EPOLLIN;
+        }
+        if flags.contains(dbus::WatchFlags::WRITABLE) {
+            event_type |= platform::linux::EPOLLOUT;
+        }
+
+        if watch.enabled() {
+            let pool_index = self
+                .fd_pool
+                .borrow_mut()
+                .alloc(PollFDType::DBusWatch(watch as *mut _));
+
+            self.epoll
+                .add(
+                    &watch.as_raw_fd(),
+                    event_type,
+                    platform::linux::EpollData::U64(pool_index),
+                )
+                .unwrap();
+            self.fd_to_pool_index.insert(watch.as_raw_fd(), pool_index);
+        } else {
+            let Some(pool_index) = self.fd_to_pool_index.remove(&watch.as_raw_fd()) else {
+                // not bound
+                return;
+            };
+
+            match self.epoll.del(&watch.as_raw_fd()) {
+                // ENOENTは無視
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                Err(e) => {
+                    tracing::error!(reason = ?e, "Failed to remove dbus watch");
+                }
+                Ok(_) => (),
+            }
+
+            self.fd_pool.borrow_mut().free(pool_index);
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]

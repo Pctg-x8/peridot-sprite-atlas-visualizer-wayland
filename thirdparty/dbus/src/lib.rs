@@ -9,6 +9,7 @@ use core::{
     ops::{Deref, DerefMut},
     ptr::NonNull,
 };
+use std::cell::UnsafeCell;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 
@@ -24,6 +25,7 @@ pub use self::ffi::DBusBusType as BusType;
 pub use self::ffi::DBUS_TYPE_ARRAY as TYPE_ARRAY;
 pub use self::ffi::DBUS_TYPE_DICT_ENTRY as TYPE_DICT_ENTRY;
 pub use self::ffi::DBUS_TYPE_INVALID as TYPE_INVALID;
+pub use self::ffi::DBUS_TYPE_OBJECT_PATH as TYPE_OBJECT_PATH;
 pub use self::ffi::DBUS_TYPE_STRING as TYPE_STRING;
 pub use self::ffi::DBUS_TYPE_STRUCT as TYPE_STRUCT;
 pub use self::ffi::DBUS_TYPE_UINT as TYPE_UINT;
@@ -153,7 +155,7 @@ impl Connection {
         }
     }
 
-    pub fn unique_name(&mut self) -> Option<&CStr> {
+    pub fn unique_name(&self) -> Option<&CStr> {
         let p = unsafe { ffi::dbus_bus_get_unique_name(self.0.as_ptr()) };
         if p.is_null() {
             None
@@ -418,7 +420,7 @@ impl Message {
             ffi::dbus_message_iter_init(self.0.as_ptr(), iter.as_mut_ptr());
         }
 
-        MessageIter(unsafe { iter.assume_init() }, PhantomData)
+        MessageIter(UnsafeCell::new(unsafe { iter.assume_init() }), PhantomData)
     }
 
     pub fn iter_append<'m>(&'m mut self) -> MessageIterAppend<'m> {
@@ -432,39 +434,45 @@ impl Message {
 }
 
 #[repr(transparent)]
-pub struct MessageIter<'m>(ffi::DBusMessageIter, PhantomData<&'m Message>);
+pub struct MessageIter<'m>(UnsafeCell<ffi::DBusMessageIter>, PhantomData<&'m Message>);
 impl MessageIter<'_> {
     pub fn signature(&self) -> Option<OwnedStr> {
-        NonNull::new(unsafe { ffi::dbus_message_iter_get_signature(&self.0 as *const _) })
-            .map(OwnedStr)
+        NonNull::new(unsafe { ffi::dbus_message_iter_get_signature(self.0.get()) }).map(OwnedStr)
     }
 
     pub fn recurse(&mut self) -> Self {
         let mut subiter = MaybeUninit::uninit();
         unsafe {
-            ffi::dbus_message_iter_recurse(&mut self.0 as *mut _, subiter.as_mut_ptr());
+            ffi::dbus_message_iter_recurse(self.0.get_mut(), subiter.as_mut_ptr());
         }
 
-        MessageIter(unsafe { subiter.assume_init() }, PhantomData)
+        MessageIter(
+            UnsafeCell::new(unsafe { subiter.assume_init() }),
+            PhantomData,
+        )
     }
 
-    pub fn has_next(&mut self) -> bool {
-        unsafe { ffi::dbus_message_iter_has_next(&mut self.0) != 0 }
+    #[inline(always)]
+    pub fn has_next(&self) -> bool {
+        unsafe { ffi::dbus_message_iter_has_next(self.0.get()) != 0 }
     }
 
+    #[inline(always)]
     pub fn next(&mut self) -> bool {
-        unsafe { ffi::dbus_message_iter_next(&mut self.0) != 0 }
+        unsafe { ffi::dbus_message_iter_next(self.0.get_mut()) != 0 }
     }
 
-    pub fn arg_type(&mut self) -> core::ffi::c_int {
-        unsafe { ffi::dbus_message_iter_get_arg_type(&mut self.0) }
+    #[inline(always)]
+    pub fn arg_type(&self) -> core::ffi::c_int {
+        unsafe { ffi::dbus_message_iter_get_arg_type(self.0.get()) }
     }
 
-    pub unsafe fn get_value_basic(&mut self, sink: *mut core::ffi::c_void) {
-        unsafe { ffi::dbus_message_iter_get_basic(&mut self.0, sink) }
+    #[inline(always)]
+    pub unsafe fn get_value_basic(&self, sink: *mut core::ffi::c_void) {
+        unsafe { ffi::dbus_message_iter_get_basic(self.0.get(), sink) }
     }
 
-    pub unsafe fn get_u32_unchecked(&mut self) -> u32 {
+    pub unsafe fn get_u32_unchecked(&self) -> u32 {
         let mut sink = MaybeUninit::<u32>::uninit();
         unsafe {
             self.get_value_basic(sink.as_mut_ptr() as _);
@@ -473,14 +481,14 @@ impl MessageIter<'_> {
     }
 
     #[inline(always)]
-    pub fn try_get_u32(&mut self) -> Result<u32, core::ffi::c_int> {
+    pub fn try_get_u32(&self) -> Result<u32, core::ffi::c_int> {
         match self.arg_type() {
             TYPE_UINT => Ok(unsafe { self.get_u32_unchecked() }),
             v => Err(v),
         }
     }
 
-    pub unsafe fn get_cstr_unchecked(&mut self) -> &CStr {
+    pub unsafe fn get_cstr_unchecked(&self) -> &CStr {
         let mut sink = MaybeUninit::<*const core::ffi::c_char>::uninit();
         unsafe {
             self.get_value_basic(sink.as_mut_ptr() as _);
@@ -489,9 +497,17 @@ impl MessageIter<'_> {
     }
 
     #[inline(always)]
-    pub fn try_get_cstr(&mut self) -> Result<&CStr, core::ffi::c_int> {
+    pub fn try_get_cstr(&self) -> Result<&CStr, core::ffi::c_int> {
         match self.arg_type() {
             TYPE_STRING => Ok(unsafe { self.get_cstr_unchecked() }),
+            v => Err(v),
+        }
+    }
+
+    #[inline(always)]
+    pub fn try_get_object_path(&self) -> Result<&CStr, core::ffi::c_int> {
+        match self.arg_type() {
+            TYPE_OBJECT_PATH => Ok(unsafe { self.get_cstr_unchecked() }),
             v => Err(v),
         }
     }

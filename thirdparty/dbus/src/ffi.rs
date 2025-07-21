@@ -90,6 +90,7 @@ pub const DBUS_MESSAGE_TYPE_SIGNAL: core::ffi::c_int = 4;
 pub const DBUS_TYPE_INVALID: core::ffi::c_int = 0;
 pub const DBUS_TYPE_BOOLEAN: core::ffi::c_int = b'b' as _;
 pub const DBUS_TYPE_STRING: core::ffi::c_int = b's' as _;
+pub const DBUS_TYPE_OBJECT_PATH: core::ffi::c_int = b'o' as _;
 pub const DBUS_TYPE_ARRAY: core::ffi::c_int = b'a' as _;
 pub const DBUS_TYPE_VARIANT: core::ffi::c_int = b'v' as _;
 pub const DBUS_TYPE_DICT_ENTRY: core::ffi::c_int = b'e' as _;
@@ -164,9 +165,8 @@ unsafe extern "C" {
         message: *mut DBusMessage,
         iter: *mut DBusMessageIter,
     ) -> u32;
-    // 元ソースでは*mutだけど実装みるかんじ*constでよさそうにみえる
     pub unsafe fn dbus_message_iter_get_signature(
-        iter: *const DBusMessageIter,
+        iter: *mut DBusMessageIter,
     ) -> *mut core::ffi::c_char;
     pub unsafe fn dbus_message_iter_has_next(iter: *mut DBusMessageIter) -> dbus_bool_t;
     pub unsafe fn dbus_message_iter_next(iter: *mut DBusMessageIter) -> dbus_bool_t;

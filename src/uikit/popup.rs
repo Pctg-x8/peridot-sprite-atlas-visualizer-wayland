@@ -1,7 +1,7 @@
-use std::rc::Rc;
+use std::{collections::HashMap, rc::Rc};
 
 use crate::{
-    AppEvent, ViewInitContext,
+    AppEvent, PresenterInitContext, ViewInitContext,
     base_system::AppBaseSystem,
     composite::{
         AnimatableColor, AnimatableFloat, AnimationCurve, CompositeMode, CompositeRect,
@@ -332,5 +332,66 @@ impl CommonFrameView {
         };
 
         ct.mark_dirty(self.ct_root);
+    }
+}
+
+// TODO: message_dialog限定なのをあとでなおす
+pub struct PopupManager {
+    instance_by_id: HashMap<uuid::Uuid, super::message_dialog::Presenter>,
+    hit_base_layer: HitTestTreeRef,
+    composite_base_layer: CompositeTreeRef,
+}
+impl PopupManager {
+    pub fn new(hit_base_layer: HitTestTreeRef, composite_base_layer: CompositeTreeRef) -> Self {
+        Self {
+            instance_by_id: HashMap::new(),
+            hit_base_layer,
+            composite_base_layer,
+        }
+    }
+
+    pub fn spawn(
+        &mut self,
+        presenter_init_context: &mut PresenterInitContext,
+        current_sec: f32,
+        content: &str,
+    ) -> uuid::Uuid {
+        let id = uuid::Uuid::new_v4();
+        let presenter = super::message_dialog::Presenter::new(presenter_init_context, id, content);
+        presenter.show(
+            presenter_init_context.for_view.base_system,
+            self.composite_base_layer,
+            self.hit_base_layer,
+            current_sec,
+        );
+        // TODO: ここでRECOMPUTE_POINTER_ENTER相当の処理をしないといけない(ポインタを動かさないかぎりEnter状態が続くのでマスクを貫通できる)
+        // クローズしたときも同じ
+
+        self.instance_by_id.insert(id, presenter);
+        id
+    }
+
+    pub fn close(&self, base_system: &mut AppBaseSystem, current_sec: f32, id: &uuid::Uuid) {
+        let Some(inst) = self.instance_by_id.get(id) else {
+            // no instance bound
+            return;
+        };
+
+        inst.hide(base_system, current_sec);
+    }
+
+    pub fn remove(&mut self, base_system: &mut AppBaseSystem, id: &uuid::Uuid) {
+        let Some(inst) = self.instance_by_id.remove(id) else {
+            // no instance bound
+            return;
+        };
+
+        inst.unmount(&mut base_system.composite_tree);
+    }
+
+    pub fn update(&mut self, base_system: &mut AppBaseSystem, current_sec: f32) {
+        for x in self.instance_by_id.values() {
+            x.update(&mut base_system.composite_tree, current_sec);
+        }
     }
 }

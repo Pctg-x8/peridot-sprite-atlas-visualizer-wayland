@@ -20,6 +20,7 @@ mod uikit;
 
 use helper_types::SafeF32;
 use shared_perflog_proto::{ProfileMarker, ProfileMarkerCategory};
+use uikit::popup::PopupManager;
 #[cfg(all(unix, not(target_os = "macos")))]
 use wayland as wl;
 
@@ -32,8 +33,6 @@ use std::{
     sync::Arc,
 };
 
-#[cfg(feature = "profiling")]
-use crate::base_system::prof;
 use crate::{
     base_system::{
         FontType, create_render_pass2, inject_cmd_begin_render_pass2, inject_cmd_end_render_pass2,
@@ -64,19 +63,11 @@ use composite::{
 };
 use coordinate::SizePixels;
 use feature::editing_atlas_renderer::EditingAtlasRenderer;
-use freetype::FreeType;
-use hittest::{
-    CursorShape, HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef,
-};
-use input::{EventContinueControl, PointerInputManager};
-#[cfg(target_os = "linux")]
-use linux_input_event_codes::BTN_LEFT;
+use hittest::{HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef};
+use input::EventContinueControl;
 use parking_lot::RwLock;
 use shell::AppShell;
 use subsystem::Subsystem;
-use text::TextLayout;
-#[cfg(all(unix, not(target_os = "macos")))]
-use wl::{WpCursorShapeDeviceV1, WpCursorShapeDeviceV1Shape, WpCursorShapeManagerV1};
 
 pub enum AppEvent {
     ToplevelWindowNewSize {
@@ -2720,7 +2711,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         required_backdrop_buffer_count: 0,
     };
     let mut composite_instance_buffer_dirty = false;
-    let mut popups = HashMap::<uuid::Uuid, uikit::message_dialog::Presenter>::new();
+    let mut popup_manager = PopupManager::new(popup_hit_layer, CompositeTree::ROOT);
     #[cfg(target_os = "linux")]
     let mut epoll_events =
         [const { core::mem::MaybeUninit::<platform::linux::epoll_event>::uninit() }; 8];
@@ -2900,9 +2891,8 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
 
             tracing::debug!(
                 byte_size = staging_scratch_buffer_locked.total_reserved_amount(),
-                "Reserved Staging Buffers during Popup UI",
+                "Reserved Staging Buffers during UI Rescaling",
             );
-            staging_scratch_buffer_locked.reset();
         }
 
         task_worker.try_tick();
@@ -3385,9 +3375,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         current_sec,
                         &mut staging_scratch_buffers.write().active_buffer_mut(),
                     );
-                    for p in popups.values() {
-                        p.update(&mut app_system.composite_tree, current_sec);
-                    }
+                    popup_manager.update(app_system, current_sec);
 
                     {
                         _pf.begin_populate_composite_instances();
@@ -4046,46 +4034,25 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         parking_lot::RwLockWriteGuard::map(staging_scratch_buffers.write(), |x| {
                             x.active_buffer_mut()
                         });
-                    let id = uuid::Uuid::new_v4();
-                    let p = uikit::message_dialog::Presenter::new(
+
+                    popup_manager.spawn(
                         &mut PresenterInitContext {
                             for_view: ViewInitContext {
                                 base_system: app_system,
                                 staging_scratch_buffer: &mut staging_scratch_buffer_locked,
-                                ui_scale_factor: app_shell.ui_scale_factor(),
+                                ui_scale_factor: active_ui_scale,
                             },
                             app_state: &mut *app_state.borrow_mut(),
                         },
-                        id,
+                        t.elapsed().as_secs_f32(),
                         &content,
                     );
-                    p.show(
-                        app_system,
-                        CompositeTree::ROOT,
-                        popup_hit_layer,
-                        t.elapsed().as_secs_f32(),
-                    );
-
-                    // TODO: ここでRECOMPUTE_POINTER_ENTER相当の処理をしないといけない(ポインタを動かさないかぎりEnter状態が続くのでマスクを貫通できる)
-                    // クローズしたときも同じ
-
-                    tracing::debug!(
-                        byte_size = staging_scratch_buffer_locked.total_reserved_amount(),
-                        "Reserved Staging Buffers during Popup UI",
-                    );
-                    staging_scratch_buffer_locked.reset();
-
-                    popups.insert(id, p);
                 }
                 AppEvent::UIPopupClose { id } => {
-                    if let Some(inst) = popups.get(&id) {
-                        inst.hide(app_system, t.elapsed().as_secs_f32());
-                    }
+                    popup_manager.close(app_system, t.elapsed().as_secs_f32(), &id);
                 }
                 AppEvent::UIPopupUnmount { id } => {
-                    if let Some(inst) = popups.remove(&id) {
-                        inst.unmount(&mut app_system.composite_tree);
-                    }
+                    popup_manager.remove(app_system, &id);
                 }
                 AppEvent::AppMenuToggle => {
                     app_state.borrow_mut().toggle_menu();

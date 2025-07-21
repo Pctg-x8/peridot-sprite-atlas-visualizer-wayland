@@ -203,17 +203,14 @@ unsafe extern "C" {
         error: *mut DBusError,
         message: *mut DBusMessage,
     ) -> dbus_bool_t;
-    // このへんもconstでいい気がするが......
-    pub unsafe fn dbus_message_get_path(message: *const DBusMessage) -> *const core::ffi::c_char;
-    pub unsafe fn dbus_message_get_interface(
-        message: *const DBusMessage,
-    ) -> *const core::ffi::c_char;
-    pub unsafe fn dbus_message_get_member(message: *const DBusMessage) -> *const core::ffi::c_char;
-    pub unsafe fn dbus_message_get_signature(
-        message: *const DBusMessage,
-    ) -> *const core::ffi::c_char;
-    pub unsafe fn dbus_message_get_serial(message: *const DBusMessage) -> u32;
-    pub unsafe fn dbus_message_get_reply_serial(message: *const DBusMessage) -> u32;
+    pub unsafe fn dbus_message_get_path(message: *mut DBusMessage) -> *const core::ffi::c_char;
+    pub unsafe fn dbus_message_get_interface(message: *mut DBusMessage)
+    -> *const core::ffi::c_char;
+    pub unsafe fn dbus_message_get_member(message: *mut DBusMessage) -> *const core::ffi::c_char;
+    pub unsafe fn dbus_message_get_signature(message: *mut DBusMessage)
+    -> *const core::ffi::c_char;
+    pub unsafe fn dbus_message_get_serial(message: *mut DBusMessage) -> u32;
+    pub unsafe fn dbus_message_get_reply_serial(message: *mut DBusMessage) -> u32;
 
     pub unsafe fn dbus_pending_call_unref(pending: *mut DBusPendingCall);
     pub unsafe fn dbus_pending_call_block(pending: *mut DBusPendingCall);

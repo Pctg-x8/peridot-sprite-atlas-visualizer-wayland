@@ -43,6 +43,8 @@ bitflags! {
 
 #[repr(transparent)]
 pub struct Error(ffi::DBusError);
+unsafe impl Sync for Error {}
+unsafe impl Send for Error {}
 impl Drop for Error {
     #[inline]
     fn drop(&mut self) {
@@ -115,6 +117,8 @@ impl DerefMut for Error {
 
 #[repr(transparent)]
 pub struct Connection(NonNull<ffi::DBusConnection>);
+unsafe impl Sync for Connection {}
+unsafe impl Send for Connection {}
 impl Drop for Connection {
     #[inline]
     fn drop(&mut self) {
@@ -164,7 +168,7 @@ impl Connection {
         }
     }
 
-    pub fn send_with_serial(&mut self, message: &mut Message) -> Option<u32> {
+    pub fn send_with_serial(&self, message: &mut Message) -> Option<u32> {
         let mut serial = MaybeUninit::uninit();
         let r = unsafe {
             ffi::dbus_connection_send(self.0.as_ptr(), message.0.as_ptr(), serial.as_mut_ptr())
@@ -177,7 +181,7 @@ impl Connection {
     }
 
     pub fn send_with_reply(
-        &mut self,
+        &self,
         message: &mut Message,
         timeout_milliseconds: Option<core::ffi::c_int>,
     ) -> Option<PendingCall> {
@@ -199,7 +203,7 @@ impl Connection {
     }
 
     #[inline]
-    pub fn dispatch_status(&mut self) -> core::ffi::c_int {
+    pub fn dispatch_status(&self) -> core::ffi::c_int {
         unsafe { ffi::dbus_connection_get_dispatch_status(self.0.as_ptr()) }
     }
 
@@ -209,7 +213,7 @@ impl Connection {
     }
 
     #[inline]
-    pub fn pop_message(&mut self) -> Option<Message> {
+    pub fn pop_message(&self) -> Option<Message> {
         NonNull::new(unsafe { ffi::dbus_connection_pop_message(self.0.as_ptr()) }).map(Message)
     }
 
@@ -219,7 +223,7 @@ impl Connection {
     }
 
     pub unsafe fn set_watch_functions_raw(
-        &mut self,
+        &self,
         add_function: ffi::DBusAddWatchFunction,
         remove_function: ffi::DBusRemoveWatchFunction,
         toggled_function: ffi::DBusWatchToggledFunction,
@@ -238,13 +242,13 @@ impl Connection {
         }
     }
 
-    pub fn set_watch_functions<WF: WatchFunction>(&mut self, callback_object: Box<WF>) -> bool {
+    pub fn set_watch_functions<WF: WatchFunction>(&self, callback_object: Box<WF>) -> bool {
         extern "C" fn add<WF: WatchFunction>(
             watch: *mut ffi::DBusWatch,
             data: *mut core::ffi::c_void,
         ) -> ffi::dbus_bool_t {
-            if WF::add(unsafe { &mut *(data as *mut WF) }, unsafe {
-                &mut *(watch as *mut WatchRef)
+            if WF::add(unsafe { &mut *(data as *mut _) }, unsafe {
+                &mut *(watch as *mut _)
             }) {
                 1
             } else {
@@ -255,16 +259,16 @@ impl Connection {
             watch: *mut ffi::DBusWatch,
             data: *mut core::ffi::c_void,
         ) {
-            WF::remove(unsafe { &mut *(data as *mut WF) }, unsafe {
-                &mut *(watch as *mut WatchRef)
+            WF::remove(unsafe { &mut *(data as *mut _) }, unsafe {
+                &mut *(watch as *mut _)
             })
         }
         extern "C" fn toggled<WF: WatchFunction>(
             watch: *mut ffi::DBusWatch,
             data: *mut core::ffi::c_void,
         ) {
-            WF::toggled(unsafe { &mut *(data as *mut WF) }, unsafe {
-                &mut *(watch as *mut WatchRef)
+            WF::toggled(unsafe { &mut *(data as *mut _) }, unsafe {
+                &mut *(watch as *mut _)
             })
         }
         extern "C" fn free_data<WF: WatchFunction>(data: *mut core::ffi::c_void) {
@@ -322,6 +326,8 @@ const fn opt_cstr_ptr(a: Option<&CStr>) -> *const core::ffi::c_char {
 
 #[repr(transparent)]
 pub struct Message(NonNull<ffi::DBusMessage>);
+unsafe impl Sync for Message {}
+unsafe impl Send for Message {}
 impl Drop for Message {
     fn drop(&mut self) {
         unsafe {
@@ -336,6 +342,7 @@ impl Clone for Message {
     }
 }
 impl Message {
+    #[inline]
     pub fn new_method_call(
         destination: Option<&CStr>,
         path: &CStr,
@@ -353,6 +360,7 @@ impl Message {
         .map(Self)
     }
 
+    #[inline]
     pub fn try_get_error(&self) -> Option<Error> {
         let mut e = Error::new();
         if self.set_error_to(&mut e) {
@@ -372,6 +380,7 @@ impl Message {
         unsafe { ffi::dbus_message_get_type(self.0.as_ptr()) }
     }
 
+    #[inline]
     pub fn path(&self) -> Option<&CStr> {
         let p = unsafe { ffi::dbus_message_get_path(self.0.as_ptr()) };
         if p.is_null() {
@@ -381,6 +390,7 @@ impl Message {
         }
     }
 
+    #[inline]
     pub fn interface(&self) -> Option<&CStr> {
         let p = unsafe { ffi::dbus_message_get_interface(self.0.as_ptr()) };
         if p.is_null() {
@@ -390,6 +400,7 @@ impl Message {
         }
     }
 
+    #[inline]
     pub fn member(&self) -> Option<&CStr> {
         let p = unsafe { ffi::dbus_message_get_member(self.0.as_ptr()) };
         if p.is_null() {
@@ -414,6 +425,7 @@ impl Message {
         unsafe { ffi::dbus_message_get_reply_serial(self.0.as_ptr()) }
     }
 
+    #[inline]
     pub fn iter<'m>(&'m self) -> MessageIter<'m> {
         let mut iter = MaybeUninit::uninit();
         unsafe {
@@ -423,6 +435,7 @@ impl Message {
         MessageIter(UnsafeCell::new(unsafe { iter.assume_init() }), PhantomData)
     }
 
+    #[inline]
     pub fn iter_append<'m>(&'m mut self) -> MessageIterAppend<'m> {
         let mut iter = MaybeUninit::uninit();
         unsafe {
@@ -435,6 +448,8 @@ impl Message {
 
 #[repr(transparent)]
 pub struct MessageIter<'m>(UnsafeCell<ffi::DBusMessageIter>, PhantomData<&'m Message>);
+unsafe impl Sync for MessageIter<'_> {}
+unsafe impl Send for MessageIter<'_> {}
 impl MessageIter<'_> {
     pub fn signature(&self) -> Option<OwnedStr> {
         NonNull::new(unsafe { ffi::dbus_message_iter_get_signature(self.0.get()) }).map(OwnedStr)
@@ -472,6 +487,7 @@ impl MessageIter<'_> {
         unsafe { ffi::dbus_message_iter_get_basic(self.0.get(), sink) }
     }
 
+    #[inline]
     pub unsafe fn get_u32_unchecked(&self) -> u32 {
         let mut sink = MaybeUninit::<u32>::uninit();
         unsafe {
@@ -488,6 +504,7 @@ impl MessageIter<'_> {
         }
     }
 
+    #[inline]
     pub unsafe fn get_cstr_unchecked(&self) -> &CStr {
         let mut sink = MaybeUninit::<*const core::ffi::c_char>::uninit();
         unsafe {
@@ -512,19 +529,27 @@ impl MessageIter<'_> {
         }
     }
 
-    pub fn begin_iter_variant_content(&mut self) -> Option<Self> {
-        if self.arg_type() == TYPE_VARIANT {
-            Some(self.recurse())
-        } else {
-            None
+    #[inline]
+    pub fn try_begin_iter_variant_content(&mut self) -> Result<Self, core::ffi::c_int> {
+        match self.arg_type() {
+            TYPE_VARIANT => Ok(self.recurse()),
+            x => Err(x),
         }
     }
 
-    pub fn begin_iter_array_content(&mut self) -> Option<Self> {
-        if self.arg_type() == TYPE_ARRAY {
-            Some(self.recurse())
-        } else {
-            None
+    #[inline]
+    pub fn try_begin_iter_array_content(&mut self) -> Result<Self, core::ffi::c_int> {
+        match self.arg_type() {
+            TYPE_ARRAY => Ok(self.recurse()),
+            x => Err(x),
+        }
+    }
+
+    #[inline]
+    pub fn try_begin_iter_struct_content(&mut self) -> Result<Self, core::ffi::c_int> {
+        match self.arg_type() {
+            TYPE_STRUCT => Ok(self.recurse()),
+            x => Err(x),
         }
     }
 }
@@ -535,6 +560,8 @@ pub trait MessageIterAppendLike {
 
 #[repr(transparent)]
 pub struct MessageIterAppend<'m>(ffi::DBusMessageIter, PhantomData<&'m mut Message>);
+unsafe impl Sync for MessageIterAppend<'_> {}
+unsafe impl Send for MessageIterAppend<'_> {}
 impl<'m> MessageIterAppend<'m> {
     pub unsafe fn append_basic(
         &mut self,
@@ -582,6 +609,8 @@ pub struct MessageIterAppendContainer<'p, P: MessageIterAppendLike + 'p>(
     ffi::DBusMessageIter,
     &'p mut P,
 );
+unsafe impl<P: MessageIterAppendLike + Sync> Sync for MessageIterAppendContainer<'_, P> {}
+unsafe impl<P: MessageIterAppendLike + Send> Send for MessageIterAppendContainer<'_, P> {}
 impl<'p, P: MessageIterAppendLike + 'p> Drop for MessageIterAppendContainer<'_, P> {
     #[inline]
     fn drop(&mut self) {
@@ -712,6 +741,8 @@ impl<'p, P: MessageIterAppendLike + 'p> MessageIterAppendLike
 
 #[repr(transparent)]
 pub struct PendingCall(NonNull<ffi::DBusPendingCall>);
+unsafe impl Sync for PendingCall {}
+unsafe impl Send for PendingCall {}
 impl Drop for PendingCall {
     #[inline(always)]
     fn drop(&mut self) {
@@ -736,6 +767,8 @@ impl PendingCall {
 
 #[repr(transparent)]
 pub struct WatchRef(ffi::DBusWatch);
+unsafe impl Sync for WatchRef {}
+unsafe impl Send for WatchRef {}
 #[cfg(unix)]
 impl AsRawFd for WatchRef {
     #[inline(always)]
@@ -762,6 +795,8 @@ impl WatchRef {
 
 #[repr(transparent)]
 pub struct OwnedStr(NonNull<core::ffi::c_char>);
+unsafe impl Sync for OwnedStr {}
+unsafe impl Send for OwnedStr {}
 impl Drop for OwnedStr {
     #[inline(always)]
     fn drop(&mut self) {

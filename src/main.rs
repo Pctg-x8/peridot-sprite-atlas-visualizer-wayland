@@ -1324,9 +1324,7 @@ fn main() {
     #[cfg(all(unix, not(target_os = "macos")))]
     let dbus = dbus::Connection::connect_bus(dbus::BusType::Session).unwrap();
     #[cfg(all(unix, not(target_os = "macos")))]
-    let mut dbus = DBusLink {
-        con: RefCell::new(dbus),
-    };
+    let mut dbus = DBusLink { con: dbus };
 
     let events = AppEventBus {
         queue: UnsafeCell::new(VecDeque::new()),
@@ -2684,13 +2682,11 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     }
 
     #[cfg(target_os = "linux")]
-    dbus.con
-        .get_mut()
-        .set_watch_functions(Box::new(DBusWatcher {
-            epoll: &epoll,
-            fd_pool: &poll_fd_pool,
-            fd_to_pool_index: HashMap::new(),
-        }));
+    dbus.con.set_watch_functions(Box::new(DBusWatcher {
+        epoll: &epoll,
+        fd_pool: &poll_fd_pool,
+        fd_to_pool_index: HashMap::new(),
+    }));
 
     let elapsed = setup_timer.elapsed();
     tracing::info!(?elapsed, "App Setup done!");
@@ -4092,22 +4088,17 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
 
 #[cfg(target_os = "linux")]
 struct DBusLink {
-    con: RefCell<dbus::Connection>,
+    con: dbus::Connection,
 }
 #[cfg(target_os = "linux")]
 impl DBusLink {
     #[inline(always)]
-    pub fn underlying_mut(&self) -> std::cell::RefMut<dbus::Connection> {
-        self.con.borrow_mut()
-    }
-
-    #[inline(always)]
-    pub fn underlying(&self) -> std::cell::Ref<dbus::Connection> {
-        self.con.borrow()
+    pub fn underlying(&self) -> &dbus::Connection {
+        &self.con
     }
 
     pub async fn send(&self, mut msg: dbus::Message) -> Option<dbus::Message> {
-        let Some(serial) = self.con.borrow_mut().send_with_serial(&mut msg) else {
+        let Some(serial) = self.con.send_with_serial(&mut msg) else {
             return None;
         };
 
@@ -4441,8 +4432,12 @@ async fn app_menu_on_add_sprite<'subsystem>(
             x if x == c"uris" => {
                 kv_iter.next();
 
-                let mut value_iter = kv_iter.begin_iter_variant_content().unwrap();
-                let mut iter = value_iter.begin_iter_array_content().unwrap();
+                let mut value_iter = kv_iter
+                    .try_begin_iter_variant_content()
+                    .expect("invalid uris value");
+                let mut iter = value_iter
+                    .try_begin_iter_array_content()
+                    .expect("invalid uris value content");
                 while iter.arg_type() != dbus::TYPE_INVALID {
                     uris.push(std::ffi::CString::from(
                         iter.try_get_cstr().expect("unexpected uris value"),
@@ -4453,11 +4448,16 @@ async fn app_menu_on_add_sprite<'subsystem>(
             x if x == c"choices" => {
                 kv_iter.next();
 
-                let mut value_iter = kv_iter.begin_iter_variant_content().unwrap();
-                let mut iter = value_iter.begin_iter_array_content().unwrap();
+                let mut value_iter = kv_iter
+                    .try_begin_iter_variant_content()
+                    .expect("invalid choices value");
+                let mut iter = value_iter
+                    .try_begin_iter_array_content()
+                    .expect("invalid choices value content");
                 while iter.arg_type() != dbus::TYPE_INVALID {
-                    assert_eq!(iter.arg_type(), dbus::TYPE_STRUCT);
-                    let mut elements_iter = iter.recurse();
+                    let mut elements_iter = iter
+                        .try_begin_iter_struct_content()
+                        .expect("invalid choices value content element");
                     let key = elements_iter
                         .try_get_cstr()
                         .expect("unexpected key value")
@@ -4469,28 +4469,34 @@ async fn app_menu_on_add_sprite<'subsystem>(
                         .to_owned();
                     println!("choices {key:?} -> {value:?}");
                     drop(elements_iter);
+
                     iter.next();
                 }
             }
             x if x == c"current_filter" => {
                 kv_iter.next();
 
-                assert_eq!(kv_iter.arg_type(), dbus::TYPE_STRUCT);
-                let mut struct_iter = kv_iter.recurse();
+                let mut struct_iter = kv_iter
+                    .try_begin_iter_struct_content()
+                    .expect("invalid current_filter value");
                 let filter_name = struct_iter
                     .try_get_cstr()
                     .expect("unexpected filter name value")
                     .to_owned();
                 struct_iter.next();
-                assert_eq!(struct_iter.arg_type(), dbus::TYPE_ARRAY);
-                let mut array_iter = struct_iter.recurse();
+                let mut array_iter = struct_iter
+                    .try_begin_iter_array_content()
+                    .expect("invalid current_filter value content");
                 while array_iter.arg_type() != dbus::TYPE_INVALID {
-                    assert_eq!(array_iter.arg_type(), dbus::TYPE_STRUCT);
-                    let mut struct_iter = array_iter.recurse();
+                    let mut struct_iter = array_iter
+                        .try_begin_iter_struct_content()
+                        .expect("invalid current_filter value content element");
                     let v = struct_iter.try_get_u32().expect("unexpected type");
                     struct_iter.next();
                     let f = struct_iter.try_get_cstr().expect("unexpected filter value");
                     println!("filter {filter_name:?}: {v} {f:?}");
+                    drop(struct_iter);
+
                     array_iter.next();
                 }
             }
@@ -4505,7 +4511,7 @@ async fn app_menu_on_add_sprite<'subsystem>(
 
 #[cfg(target_os = "linux")]
 fn dispatch_dbus(dbus: &DBusLink) {
-    while let Some(m) = dbus.underlying_mut().pop_message() {
+    while let Some(m) = dbus.underlying().pop_message() {
         let span =
             tracing::info_span!(target: "dbus_loop", "dbus message recv", r#type = m.r#type());
         let _enter = span.enter();

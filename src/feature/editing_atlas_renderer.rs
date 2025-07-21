@@ -17,7 +17,7 @@ use crate::{
     MS_STATE_EMPTY, RASTER_STATE_DEFAULT_FILL_NOCULL, VI_STATE_EMPTY, VI_STATE_FLOAT4_ONLY,
     app_state::SpriteInfo,
     base_system::{
-        AppBaseSystem,
+        AppBaseSystem, inject_cmd_pipeline_barrier_2,
         scratch_buffer::{
             BufferedStagingScratchBuffer, StagingScratchBufferManager, StagingScratchBufferMapMode,
         },
@@ -47,10 +47,11 @@ impl<'subsystem> LoadedSpriteSourceAtlas<'subsystem> {
     fn new(base_system: &AppBaseSystem<'subsystem>, format: br::Format) -> Self {
         let mut resource = br::ImageObject::new(
             base_system.subsystem,
-            &br::ImageCreateInfo::new(br::Extent2D::spread1(Self::SIZE), format)
-                .sampled()
-                .transfer_dest()
-                .usage_with(br::ImageUsageFlags::TRANSFER_SRC),
+            &br::ImageCreateInfo::new(br::Extent2D::spread1(Self::SIZE), format).with_usage(
+                br::ImageUsageFlags::SAMPLED
+                    | br::ImageUsageFlags::TRANSFER_DEST
+                    | br::ImageUsageFlags::TRANSFER_SRC,
+            ),
         )
         .unwrap();
         resource
@@ -761,11 +762,12 @@ impl<'d> EditingAtlasRenderer<'d> {
             || !self.sprite_image_copies.read().is_empty()
     }
 
-    pub fn process_dirty_data<'c, E>(
+    pub fn process_dirty_data<'c>(
         &mut self,
+        subsystem: &Subsystem,
         staging_scratch_buffer: &StagingScratchBufferManager<'d>,
-        rec: br::CmdRecord<'c, E>,
-    ) -> br::CmdRecord<'c, E> {
+        rec: br::CmdRecord<'c>,
+    ) -> br::CmdRecord<'c> {
         if !self.is_dirty() {
             return rec;
         }
@@ -821,15 +823,21 @@ impl<'d> EditingAtlasRenderer<'d> {
 
             loaded_sprite_atlas_image_barrier_needed = true;
             copies_mref.drain().fold(
-                r.pipeline_barrier_2(&br::DependencyInfo::new(
-                    &[],
-                    &[],
-                    &[br::ImageMemoryBarrier2::new(
-                        atlas_ref.resource.image(),
-                        br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+                r.inject(|r| {
+                    inject_cmd_pipeline_barrier_2(
+                        r,
+                        subsystem,
+                        &br::DependencyInfo::new(
+                            &[],
+                            &[],
+                            &[br::ImageMemoryBarrier2::new(
+                                atlas_ref.resource.image(),
+                                br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+                            )
+                            .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
+                        ),
                     )
-                    .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
-                )),
+                }),
                 |r, (bi, cps)| {
                     r.copy_buffer_to_image(
                         staging_scratch_buffer.buffer_of(bi),
@@ -863,20 +871,27 @@ impl<'d> EditingAtlasRenderer<'d> {
                 );
             }
 
-            r.pipeline_barrier_2(&br::DependencyInfo::new(
-                &[br::MemoryBarrier2::new()
-                    .from(
-                        br::PipelineStageFlags2::COPY,
-                        br::AccessFlags2::TRANSFER.write,
-                    )
-                    .to(
-                        br::PipelineStageFlags2::FRAGMENT_SHADER
-                            | br::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT,
-                        br::AccessFlags2::SHADER.read | br::AccessFlags2::VERTEX_ATTRIBUTE_READ,
-                    )],
-                &[],
-                &image_memory_barriers,
-            ))
+            r.inject(|r| {
+                inject_cmd_pipeline_barrier_2(
+                    r,
+                    subsystem,
+                    &br::DependencyInfo::new(
+                        &[br::MemoryBarrier2::new()
+                            .from(
+                                br::PipelineStageFlags2::COPY,
+                                br::AccessFlags2::TRANSFER.write,
+                            )
+                            .to(
+                                br::PipelineStageFlags2::FRAGMENT_SHADER
+                                    | br::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT,
+                                br::AccessFlags2::SHADER.read
+                                    | br::AccessFlags2::VERTEX_ATTRIBUTE_READ,
+                            )],
+                        &[],
+                        &image_memory_barriers,
+                    ),
+                )
+            })
         })
     }
 
@@ -956,11 +971,11 @@ impl<'d> EditingAtlasRenderer<'d> {
         self.sprite_instance_render_pipeline = sprite_instance_render_pipeline;
     }
 
-    pub fn render_commands<'cb, E>(
+    pub fn render_commands<'cb>(
         &self,
         sc_size: br::Extent2D,
-        rec: br::CmdRecord<'cb, E>,
-    ) -> br::CmdRecord<'cb, E> {
+        rec: br::CmdRecord<'cb>,
+    ) -> br::CmdRecord<'cb> {
         rec.bind_pipeline(br::PipelineBindPoint::Graphics, &self.render_pipeline)
             .push_constant(
                 &self.render_pipeline_layout,

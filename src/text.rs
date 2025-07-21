@@ -139,9 +139,7 @@ impl TextLayout {
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         b.buf.as_ptr().add(b.pitch * y),
-                        ptr.addr_of_mut(
-                            self.width_px() as usize * dy as usize + b.left_offset as usize,
-                        ),
+                        ptr.addr_of_mut((self.width_px() as isize * dy + b.left_offset) as _),
                         b.width,
                     )
                 }

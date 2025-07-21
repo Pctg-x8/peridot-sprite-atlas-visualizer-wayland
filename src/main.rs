@@ -20,10 +20,10 @@ mod uikit;
 
 use helper_types::SafeF32;
 use shared_perflog_proto::{ProfileMarker, ProfileMarkerCategory};
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 use wayland as wl;
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 use std::os::fd::AsRawFd;
 use std::{
     cell::{Cell, RefCell, UnsafeCell},
@@ -34,13 +34,21 @@ use std::{
 
 #[cfg(feature = "profiling")]
 use crate::base_system::prof;
-use crate::{base_system::FontType, composite::FloatParameter, quadtree::QuadTree};
+use crate::{
+    base_system::{
+        FontType, create_render_pass2, inject_cmd_begin_render_pass2, inject_cmd_end_render_pass2,
+        inject_cmd_pipeline_barrier_2,
+    },
+    composite::FloatParameter,
+    quadtree::QuadTree,
+};
 use app_state::AppState;
 use base_system::{
     AppBaseSystem, RenderPassOptions,
     prof::ProfilingContext,
     scratch_buffer::{BufferedStagingScratchBuffer, StagingScratchBufferManager},
 };
+
 use bedrock::{
     self as br, CommandBufferMut, CommandPoolMut, DescriptorPoolMut, Device, Fence, FenceMut,
     ImageChild, InstanceChild, MemoryBound, PhysicalDevice, RenderPass, ShaderModule, Swapchain,
@@ -56,11 +64,19 @@ use composite::{
 };
 use coordinate::SizePixels;
 use feature::editing_atlas_renderer::EditingAtlasRenderer;
-use hittest::{HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef};
-use input::EventContinueControl;
+use freetype::FreeType;
+use hittest::{
+    CursorShape, HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef,
+};
+use input::{EventContinueControl, PointerInputManager};
+#[cfg(target_os = "linux")]
+use linux_input_event_codes::BTN_LEFT;
 use parking_lot::RwLock;
 use shell::AppShell;
 use subsystem::Subsystem;
+use text::TextLayout;
+#[cfg(all(unix, not(target_os = "macos")))]
+use wl::{WpCursorShapeDeviceV1, WpCursorShapeDeviceV1Shape, WpCursorShapeManagerV1};
 
 pub enum AppEvent {
     ToplevelWindowNewSize {
@@ -140,6 +156,11 @@ impl AppEventBus {
         #[cfg(windows)]
         {
             self.event_notify.reset().map_err(From::from)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // TODO
+            Ok(())
         }
     }
 }
@@ -1062,14 +1083,19 @@ impl<'s> PrimaryRenderTarget<'s> {
         } else {
             br::CompositeAlphaFlags::INHERIT
         };
-        let sc_format = surface_formats
-            .iter()
-            .find(|x| {
-                x.format == br::vk::VK_FORMAT_R8G8B8A8_UNORM
-                    && x.colorSpace == br::vk::VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
-            })
-            .unwrap()
-            .clone();
+        let mut sc_format = None;
+        for &f in surface_formats.iter() {
+            tracing::debug!(format = ?f.format, color_space = ?f.colorSpace, "surface format");
+            // prefer first format
+            if sc_format.is_none()
+                && (f.format == br::vk::VK_FORMAT_R8G8B8A8_UNORM
+                    || f.format == br::vk::VK_FORMAT_B8G8R8A8_UNORM)
+                && f.colorSpace == br::vk::VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
+            {
+                sc_format = Some(f);
+            }
+        }
+        let sc_format = sc_format.unwrap();
         let sc_size = br::Extent2D {
             width: if surface_caps.currentExtent.width == 0xffff_ffff {
                 640
@@ -1306,9 +1332,9 @@ fn main() {
     tracing::info!("Initializing BaseSystem...");
     let setup_timer = std::time::Instant::now();
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     let dbus = dbus::Connection::connect_bus(dbus::BusType::Session).unwrap();
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     let mut dbus = DBusLink {
         con: RefCell::new(dbus),
     };
@@ -1346,7 +1372,7 @@ fn main() {
         &mut app_state,
         &task_worker,
         &bg_worker,
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "macos")))]
         &mut dbus,
     );
 
@@ -1361,7 +1387,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     app_state: &'sys mut RefCell<AppState<'subsystem>>,
     task_worker: &smol::LocalExecutor<'sys>,
     bg_worker: &BackgroundWorker<'subsystem>,
-    #[cfg(unix)] dbus: &'sys mut DBusLink,
+    #[cfg(all(unix, not(target_os = "macos")))] dbus: &'sys mut DBusLink,
 ) {
     tracing::info!("Initializing Peridot SpriteAtlas Visualizer/Editor");
     let setup_timer = std::time::Instant::now();
@@ -1395,8 +1421,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     let mut composite_grab_buffer = br::ImageObject::new(
         app_system.subsystem,
         &br::ImageCreateInfo::new(sc.size, sc.color_format())
-            .sampled()
-            .transfer_dest(),
+            .with_usage(br::ImageUsageFlags::SAMPLED | br::ImageUsageFlags::TRANSFER_DEST),
     )
     .unwrap();
     let mut composite_grab_buffer_memory = app_system
@@ -1411,7 +1436,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     .create()
     .unwrap();
 
-    let main_rp_grabbed = br::RenderPassObject::new(
+    let main_rp_grabbed = create_render_pass2(
         app_system.subsystem,
         &br::RenderPassCreateInfo2::new(
             &[br::AttachmentDescription2::new(sc.color_format())
@@ -1435,7 +1460,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     )
     .unwrap();
     main_rp_grabbed.set_name(Some(c"main_rp_grabbed")).unwrap();
-    let main_rp_final = br::RenderPassObject::new(
+    let main_rp_final = create_render_pass2(
         app_system.subsystem,
         &br::RenderPassCreateInfo2::new(
             &[br::AttachmentDescription2::new(sc.color_format())
@@ -1460,7 +1485,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     )
     .unwrap();
     main_rp_final.set_name(Some(c"main_rp_final")).unwrap();
-    let main_rp_continue_grabbed = br::RenderPassObject::new(
+    let main_rp_continue_grabbed = create_render_pass2(
         app_system.subsystem,
         &br::RenderPassCreateInfo2::new(
             &[br::AttachmentDescription2::new(sc.color_format())
@@ -1488,7 +1513,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     main_rp_continue_grabbed
         .set_name(Some(c"main_rp_continue_grabbed"))
         .unwrap();
-    let main_rp_continue_final = br::RenderPassObject::new(
+    let main_rp_continue_final = create_render_pass2(
         app_system.subsystem,
         &br::RenderPassCreateInfo2::new(
             &[br::AttachmentDescription2::new(sc.color_format())
@@ -1515,7 +1540,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     main_rp_continue_final
         .set_name(Some(c"main_rp_continue_final"))
         .unwrap();
-    let composite_backdrop_blur_rp = br::RenderPassObject::new(
+    let composite_backdrop_blur_rp = create_render_pass2(
         app_system.subsystem,
         &br::RenderPassCreateInfo2::new(
             &[br::AttachmentDescription2::new(sc.color_format())
@@ -1617,8 +1642,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                 },
                 sc.color_format(),
             )
-            .sampled()
-            .as_color_attachment(),
+            .with_usage(br::ImageUsageFlags::SAMPLED | br::ImageUsageFlags::COLOR_ATTACHMENT),
         )
         .unwrap();
         let req = r.requirements();
@@ -2041,18 +2065,24 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
             .unwrap();
         app_system
             .sync_execute_graphics_commands(|rec| {
-                rec.begin_render_pass2(
-                    &br::RenderPassBeginInfo::new(
-                        &rp,
-                        &fb,
-                        corner_cutout_atlas_rect.vk_rect(),
-                        &[],
-                    ),
-                    &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-                )
+                rec.inject(|r| {
+                    inject_cmd_begin_render_pass2(
+                        r,
+                        app_system.subsystem,
+                        &br::RenderPassBeginInfo::new(
+                            &rp,
+                            &fb,
+                            corner_cutout_atlas_rect.vk_rect(),
+                            &[],
+                        ),
+                        &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                    )
+                })
                 .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline)
                 .draw(3, 1, 0, 0)
-                .end_render_pass2(&br::SubpassEndInfo::new())
+                .inject(|r| {
+                    inject_cmd_end_render_pass2(r, app_system.subsystem, &br::SubpassEndInfo::new())
+                })
             })
             .unwrap();
         drop(pipeline);
@@ -2153,10 +2183,9 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         vbuf.bind(&mem, 0).unwrap();
         app_system
             .sync_execute_graphics_commands(|rec| {
-                rec.update_buffer(
+                rec.update_buffer_exact(
                     &vbuf,
                     0,
-                    (core::mem::size_of::<[[f32; 2]; 2]>() * 4) as _,
                     &[
                         [[-1.0f32, -1.0], [1.0, 1.0]],
                         [[1.0f32, -1.0], [-1.0, 1.0]],
@@ -2164,19 +2193,25 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         [[1.0f32, 1.0], [-1.0, -1.0]],
                     ],
                 )
-                .pipeline_barrier_2(&br::DependencyInfo::new(
-                    &[br::MemoryBarrier2::new()
-                        .from(
-                            br::PipelineStageFlags2::COPY,
-                            br::AccessFlags2::TRANSFER.write,
-                        )
-                        .to(
-                            br::PipelineStageFlags2::VERTEX_INPUT,
-                            br::AccessFlags2::VERTEX_ATTRIBUTE_READ,
-                        )],
-                    &[],
-                    &[],
-                ))
+                .inject(|r| {
+                    inject_cmd_pipeline_barrier_2(
+                        r,
+                        app_system.subsystem,
+                        &br::DependencyInfo::new(
+                            &[br::MemoryBarrier2::new()
+                                .from(
+                                    br::PipelineStageFlags2::COPY,
+                                    br::AccessFlags2::TRANSFER.write,
+                                )
+                                .to(
+                                    br::PipelineStageFlags2::VERTEX_INPUT,
+                                    br::AccessFlags2::VERTEX_ATTRIBUTE_READ,
+                                )],
+                            &[],
+                            &[],
+                        ),
+                    )
+                })
             })
             .unwrap();
 
@@ -2822,6 +2857,11 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                 events.push(AppEvent::ToplevelWindowFrameTiming);
             }
         }
+        #[cfg(target_os = "macos")]
+        {
+            // TODO: ここで止まってしまうのでメインループの仕組みごっそり変える必要がある
+            app_shell.process_pending_events();
+        }
 
         let current_ui_scale = app_shell.ui_scale_factor();
         if active_ui_scale != current_ui_scale {
@@ -2973,9 +3013,9 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         drop(composite_grab_buffer_memory);
                         let mut composite_grab_buffer1 = br::ImageObject::new(
                             app_system.subsystem,
-                            &br::ImageCreateInfo::new(sc.size, sc.color_format())
-                                .sampled()
-                                .transfer_dest(),
+                            &br::ImageCreateInfo::new(sc.size, sc.color_format()).with_usage(
+                                br::ImageUsageFlags::SAMPLED | br::ImageUsageFlags::TRANSFER_DEST,
+                            ),
                         )
                         .unwrap();
                         composite_grab_buffer_memory = app_system
@@ -3009,8 +3049,10 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                     },
                                     sc.color_format(),
                                 )
-                                .sampled()
-                                .as_color_attachment(),
+                                .with_usage(
+                                    br::ImageUsageFlags::SAMPLED
+                                        | br::ImageUsageFlags::COLOR_ATTACHMENT,
+                                ),
                             )
                             .unwrap();
                             let req = r.requirements();
@@ -3477,10 +3519,11 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         {
                             let image = br::ImageObject::new(
                                 app_system.subsystem,
-                                &br::ImageCreateInfo::new(sc.size, sc.color_format())
-                                    .sampled()
-                                    .as_color_attachment()
-                                    .transfer_dest(),
+                                &br::ImageCreateInfo::new(sc.size, sc.color_format()).with_usage(
+                                    br::ImageUsageFlags::SAMPLED
+                                        | br::ImageUsageFlags::COLOR_ATTACHMENT
+                                        | br::ImageUsageFlags::TRANSFER_DEST,
+                                ),
                             )
                             .unwrap();
                             let req = image.requirements();
@@ -3572,35 +3615,45 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         unsafe {
                             update_cp.reset(br::CommandPoolResetFlags::EMPTY).unwrap();
                         }
-                        let rec = unsafe {
-                            update_cb
-                                .begin(&br::CommandBufferBeginInfo::new(), &app_system.subsystem)
-                                .unwrap()
-                        };
+                        let rec =
+                            unsafe { update_cb.begin(&br::CommandBufferBeginInfo::new()).unwrap() };
                         let rec = if composite_instance_buffer_dirty {
                             app_system.composite_instance_manager.sync_buffer(rec)
                         } else {
                             rec
                         };
-                        rec.pipeline_barrier_2(&br::DependencyInfo::new(
-                            &[br::MemoryBarrier2::new()
-                                .from(
-                                    br::PipelineStageFlags2::COPY,
-                                    br::AccessFlags2::TRANSFER.write,
-                                )
-                                .to(
-                                    br::PipelineStageFlags2::VERTEX_SHADER,
-                                    br::AccessFlags2::SHADER.read,
-                                )],
-                            &[],
-                            &[br::ImageMemoryBarrier2::new(
-                                composite_backdrop_buffers[0].image(),
-                                br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+                        rec.inject(|r| {
+                            inject_cmd_pipeline_barrier_2(
+                                r,
+                                app_system.subsystem,
+                                &br::DependencyInfo::new(
+                                    &[br::MemoryBarrier2::new()
+                                        .from(
+                                            br::PipelineStageFlags2::COPY,
+                                            br::AccessFlags2::TRANSFER.write,
+                                        )
+                                        .to(
+                                            br::PipelineStageFlags2::VERTEX_SHADER,
+                                            br::AccessFlags2::SHADER.read,
+                                        )],
+                                    &[],
+                                    &[br::ImageMemoryBarrier2::new(
+                                        composite_backdrop_buffers[0].image(),
+                                        br::ImageSubresourceRange::new(
+                                            br::AspectMask::COLOR,
+                                            0..1,
+                                            0..1,
+                                        ),
+                                    )
+                                    .transit_to(
+                                        br::ImageLayout::ShaderReadOnlyOpt.from_undefined(),
+                                    )],
+                                ),
                             )
-                            .transit_to(br::ImageLayout::ShaderReadOnlyOpt.from_undefined())],
-                        ))
+                        })
                         .inject(|r| {
                             editing_atlas_renderer.borrow_mut().process_dirty_data(
+                                app_system.subsystem,
                                 &staging_scratch_buffers_locked.active_buffer(),
                                 r,
                             )
@@ -3704,133 +3757,142 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                     } => (&main_rp_final, &main_final_fbs[n]),
                                 };
 
-                            unsafe {
-                                cb.begin(&br::CommandBufferBeginInfo::new(), &app_system.subsystem)
-                                    .unwrap()
-                            }
-                            .begin_render_pass2(
-                                &br::RenderPassBeginInfo::new(
-                                    first_rp,
-                                    first_fb,
-                                    sc.size.into_rect(br::Offset2D::ZERO),
-                                    &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 1.0])],
-                                ),
-                                &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-                            )
-                            .inject(|r| editing_atlas_renderer.borrow().render_commands(sc.size, r))
-                            .inject(|r| {
-                                populate_composite_render_commands(
-                                    r,
-                                    true,
-                                    sc.size,
-                                    &last_composite_render_instructions,
-                                    |rpreq| match rpreq {
-                                        RenderPassRequirements {
-                                            continued: false, ..
-                                        } => unreachable!("not at first(must be continued)"),
-                                        RenderPassRequirements {
-                                            continued: true,
-                                            after_operation: RenderPassAfterOperation::Grab,
-                                        } => (
-                                            main_rp_continue_grabbed.as_transparent_ref(),
-                                            main_continue_grabbed_fbs[n].as_transparent_ref(),
+                            unsafe { cb.begin(&br::CommandBufferBeginInfo::new()).unwrap() }
+                                .inject(|r| {
+                                    inject_cmd_begin_render_pass2(
+                                        r,
+                                        app_system.subsystem,
+                                        &br::RenderPassBeginInfo::new(
+                                            first_rp,
+                                            first_fb,
+                                            sc.size.into_rect(br::Offset2D::ZERO),
+                                            &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 1.0])],
                                         ),
-                                        RenderPassRequirements {
-                                            continued: true,
-                                            after_operation: RenderPassAfterOperation::None,
-                                        } => (
-                                            main_rp_continue_final.as_transparent_ref(),
-                                            main_continue_final_fbs[n].as_transparent_ref(),
-                                        ),
-                                    },
-                                    |rpreq| match rpreq {
-                                        RenderPassRequirements {
-                                            continued: false,
-                                            after_operation: RenderPassAfterOperation::Grab,
-                                        } => composite_pipeline_grabbed.as_transparent_ref(),
-                                        RenderPassRequirements {
-                                            continued: false,
-                                            after_operation: RenderPassAfterOperation::None,
-                                        } => composite_pipeline_final.as_transparent_ref(),
-                                        RenderPassRequirements {
-                                            continued: true,
-                                            after_operation: RenderPassAfterOperation::Grab,
-                                        } => {
-                                            composite_pipeline_continue_grabbed.as_transparent_ref()
-                                        }
-                                        RenderPassRequirements {
-                                            continued: true,
-                                            after_operation: RenderPassAfterOperation::None,
-                                        } => composite_pipeline_continue_final.as_transparent_ref(),
-                                    },
-                                    &composite_pipeline_layout,
-                                    composite_alphamask_group_descriptor,
-                                    &composite_backdrop_buffer_descriptor_sets,
-                                    &composite_grab_buffer,
-                                    &sc.backbuffer_image(n),
-                                    &composite_backdrop_blur_rp,
-                                    &blur_pipeline_layout,
-                                    &blur_downsample_pipelines,
-                                    &blur_upsample_pipelines,
-                                    &blur_fixed_descriptors,
-                                    &blur_downsample_pass_fbs,
-                                    &blur_upsample_pass_fixed_fbs,
-                                    &composite_backdrop_blur_destination_fbs,
-                                )
-                            })
-                            .inject(|r| {
-                                if app_shell.is_tiled() {
-                                    // shell window is tiled(no decorations needed)
-                                    return r;
-                                }
+                                        &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                                    )
+                                })
+                                .inject(|r| {
+                                    editing_atlas_renderer.borrow().render_commands(sc.size, r)
+                                })
+                                .inject(|r| {
+                                    populate_composite_render_commands(
+                                        r,
+                                        app_system.subsystem,
+                                        true,
+                                        sc.size,
+                                        &last_composite_render_instructions,
+                                        |rpreq| match rpreq {
+                                            RenderPassRequirements {
+                                                continued: false, ..
+                                            } => unreachable!("not at first(must be continued)"),
+                                            RenderPassRequirements {
+                                                continued: true,
+                                                after_operation: RenderPassAfterOperation::Grab,
+                                            } => (
+                                                main_rp_continue_grabbed.as_transparent_ref(),
+                                                main_continue_grabbed_fbs[n].as_transparent_ref(),
+                                            ),
+                                            RenderPassRequirements {
+                                                continued: true,
+                                                after_operation: RenderPassAfterOperation::None,
+                                            } => (
+                                                main_rp_continue_final.as_transparent_ref(),
+                                                main_continue_final_fbs[n].as_transparent_ref(),
+                                            ),
+                                        },
+                                        |rpreq| match rpreq {
+                                            RenderPassRequirements {
+                                                continued: false,
+                                                after_operation: RenderPassAfterOperation::Grab,
+                                            } => composite_pipeline_grabbed.as_transparent_ref(),
+                                            RenderPassRequirements {
+                                                continued: false,
+                                                after_operation: RenderPassAfterOperation::None,
+                                            } => composite_pipeline_final.as_transparent_ref(),
+                                            RenderPassRequirements {
+                                                continued: true,
+                                                after_operation: RenderPassAfterOperation::Grab,
+                                            } => composite_pipeline_continue_grabbed
+                                                .as_transparent_ref(),
+                                            RenderPassRequirements {
+                                                continued: true,
+                                                after_operation: RenderPassAfterOperation::None,
+                                            } => composite_pipeline_continue_final
+                                                .as_transparent_ref(),
+                                        },
+                                        &composite_pipeline_layout,
+                                        composite_alphamask_group_descriptor,
+                                        &composite_backdrop_buffer_descriptor_sets,
+                                        &composite_grab_buffer,
+                                        &sc.backbuffer_image(n),
+                                        &composite_backdrop_blur_rp,
+                                        &blur_pipeline_layout,
+                                        &blur_downsample_pipelines,
+                                        &blur_upsample_pipelines,
+                                        &blur_fixed_descriptors,
+                                        &blur_downsample_pass_fbs,
+                                        &blur_upsample_pass_fixed_fbs,
+                                        &composite_backdrop_blur_destination_fbs,
+                                    )
+                                })
+                                .inject(|r| {
+                                    if app_shell.is_tiled() {
+                                        // shell window is tiled(no decorations needed)
+                                        return r;
+                                    }
 
-                                if corner_cutout_atlas_rect.is_none() {
-                                    // no client size decoration
-                                    return r;
-                                }
+                                    if corner_cutout_atlas_rect.is_none() {
+                                        // no client size decoration
+                                        return r;
+                                    }
 
-                                let rp_last_continued = last_composite_render_instructions
-                                    .render_passes
-                                    .last()
-                                    .map_or(false, |x| x.continued);
-                                assert!(
-                                    last_composite_render_instructions
+                                    let rp_last_continued = last_composite_render_instructions
                                         .render_passes
                                         .last()
-                                        .is_none_or(
-                                            |x| x.after_operation == RenderPassAfterOperation::None
-                                        )
-                                );
+                                        .map_or(false, |x| x.continued);
+                                    assert!(
+                                        last_composite_render_instructions
+                                            .render_passes
+                                            .last()
+                                            .is_none_or(|x| x.after_operation
+                                                == RenderPassAfterOperation::None)
+                                    );
 
-                                r.bind_pipeline(
-                                    br::PipelineBindPoint::Graphics,
-                                    if rp_last_continued {
-                                        corner_cutout_render_pipeline_cont.as_ref().unwrap()
-                                    } else {
-                                        corner_cutout_render_pipeline.as_ref().unwrap()
-                                    },
-                                )
-                                .bind_descriptor_sets(
-                                    br::PipelineBindPoint::Graphics,
-                                    corner_cutout_render_pipeline_layout.as_ref().unwrap(),
-                                    0,
-                                    &[corner_cutout_render_descriptors.as_ref().unwrap().0],
-                                    &[],
-                                )
-                                .bind_vertex_buffer_array(
-                                    0,
-                                    &[corner_cutout_render_data
-                                        .as_ref()
-                                        .unwrap()
-                                        .0
-                                        .as_transparent_ref()],
-                                    &[0],
-                                )
-                                .draw(4, 4, 0, 0)
-                            })
-                            .end_render_pass2(&br::SubpassEndInfo::new())
-                            .end()
-                            .unwrap();
+                                    r.bind_pipeline(
+                                        br::PipelineBindPoint::Graphics,
+                                        if rp_last_continued {
+                                            corner_cutout_render_pipeline_cont.as_ref().unwrap()
+                                        } else {
+                                            corner_cutout_render_pipeline.as_ref().unwrap()
+                                        },
+                                    )
+                                    .bind_descriptor_sets(
+                                        br::PipelineBindPoint::Graphics,
+                                        corner_cutout_render_pipeline_layout.as_ref().unwrap(),
+                                        0,
+                                        &[corner_cutout_render_descriptors.as_ref().unwrap().0],
+                                        &[],
+                                    )
+                                    .bind_vertex_buffer_array(
+                                        0,
+                                        &[corner_cutout_render_data
+                                            .as_ref()
+                                            .unwrap()
+                                            .0
+                                            .as_transparent_ref()],
+                                        &[0],
+                                    )
+                                    .draw(4, 4, 0, 0)
+                                })
+                                .inject(|r| {
+                                    inject_cmd_end_render_pass2(
+                                        r,
+                                        app_system.subsystem,
+                                        &br::SubpassEndInfo::new(),
+                                    )
+                                })
+                                .end()
+                                .unwrap();
                         }
 
                         main_cb_invalid = false;
@@ -4465,6 +4527,7 @@ static mut DBUS_WAIT_FOR_REPLY_WAKERS: *mut HashMap<
         core::task::Waker,
     )>,
 > = core::ptr::null_mut();
+#[cfg(target_os = "linux")]
 fn wake_for_reply(reply: dbus::Message) {
     let Some(wakers) = unsafe { &mut *DBUS_WAIT_FOR_REPLY_WAKERS }.remove(&reply.reply_serial())
     else {
@@ -4495,6 +4558,7 @@ static mut DBUS_WAIT_FOR_SIGNAL_WAKERS: *mut HashMap<
         core::task::Waker,
     )>,
 > = core::ptr::null_mut();
+#[cfg(target_os = "linux")]
 fn wake_for_signal(
     path: std::ffi::CString,
     interface: std::ffi::CString,

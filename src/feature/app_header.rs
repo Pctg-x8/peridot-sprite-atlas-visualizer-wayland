@@ -7,7 +7,8 @@ use crate::{
     ViewInitContext,
     base_system::{
         AppBaseSystem, BufferMapMode, FontType, MemoryBoundBuffer, PixelFormat, RenderPassOptions,
-        RenderTexture, RenderTextureFlags, RenderTextureOptions,
+        RenderTexture, RenderTextureFlags, RenderTextureOptions, create_render_pass2,
+        inject_cmd_begin_render_pass2, inject_cmd_end_render_pass2, inject_cmd_pipeline_barrier_2,
         scratch_buffer::{StagingScratchBufferManager, StagingScratchBufferMapMode},
     },
     composite::{
@@ -114,7 +115,7 @@ impl SystemCommandButtonView {
         )
         .unwrap();
 
-        let rp = br::RenderPassObject::new(
+        let rp = create_render_pass2(
             base_system.subsystem,
             &br::RenderPassCreateInfo2::new(
                 &[icon_msaa_buf
@@ -184,27 +185,43 @@ impl SystemCommandButtonView {
 
         base_system
             .sync_execute_graphics_commands(|rec| {
-                rec.begin_render_pass2(
-                    &br::RenderPassBeginInfo::new(
-                        &rp,
-                        &fb,
-                        icon_msaa_buf.render_region(),
-                        &[br::ClearValue::color_f32([0.0; 4])],
-                    ),
-                    &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-                )
+                rec.inject(|r| {
+                    inject_cmd_begin_render_pass2(
+                        r,
+                        base_system.subsystem,
+                        &br::RenderPassBeginInfo::new(
+                            &rp,
+                            &fb,
+                            icon_msaa_buf.render_region(),
+                            &[br::ClearValue::color_f32([0.0; 4])],
+                        ),
+                        &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                    )
+                })
                 .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline)
                 .bind_vertex_buffer_array(0, &[buf.as_transparent_ref()], &[0])
                 .bind_index_buffer(&buf, indices_offset, br::IndexType::U16)
                 .draw_indexed(indices.len() as _, 1, 0, 0, 0)
-                .end_render_pass2(&br::SubpassEndInfo::new())
-                .pipeline_barrier_2(&br::DependencyInfo::new(
-                    &[],
-                    &[],
-                    &[base_system
-                        .barrier_for_mask_atlas_resource()
-                        .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
-                ))
+                .inject(|r| {
+                    inject_cmd_end_render_pass2(
+                        r,
+                        base_system.subsystem,
+                        &br::SubpassEndInfo::new(),
+                    )
+                })
+                .inject(|r| {
+                    inject_cmd_pipeline_barrier_2(
+                        r,
+                        base_system.subsystem,
+                        &br::DependencyInfo::new(
+                            &[],
+                            &[],
+                            &[base_system
+                                .barrier_for_mask_atlas_resource()
+                                .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
+                        ),
+                    )
+                })
                 .resolve_image(
                     icon_msaa_buf.as_image(),
                     br::ImageLayout::TransferSrcOpt,
@@ -226,24 +243,30 @@ impl SystemCommandButtonView {
                         extent: atlas_rect.extent().with_depth(1),
                     }],
                 )
-                .pipeline_barrier_2(&br::DependencyInfo::new(
-                    &[],
-                    &[],
-                    &[base_system
-                        .barrier_for_mask_atlas_resource()
-                        .transferring_layout(
-                            br::ImageLayout::TransferDestOpt,
-                            br::ImageLayout::ShaderReadOnlyOpt,
-                        )
-                        .from(
-                            br::PipelineStageFlags2::RESOLVE,
-                            br::AccessFlags2::TRANSFER.write,
-                        )
-                        .to(
-                            br::PipelineStageFlags2::FRAGMENT_SHADER,
-                            br::AccessFlags2::SHADER_SAMPLED_READ,
-                        )],
-                ))
+                .inject(|r| {
+                    inject_cmd_pipeline_barrier_2(
+                        r,
+                        base_system.subsystem,
+                        &br::DependencyInfo::new(
+                            &[],
+                            &[],
+                            &[base_system
+                                .barrier_for_mask_atlas_resource()
+                                .transferring_layout(
+                                    br::ImageLayout::TransferDestOpt,
+                                    br::ImageLayout::ShaderReadOnlyOpt,
+                                )
+                                .from(
+                                    br::PipelineStageFlags2::RESOLVE,
+                                    br::AccessFlags2::TRANSFER.write,
+                                )
+                                .to(
+                                    br::PipelineStageFlags2::FRAGMENT_SHADER,
+                                    br::AccessFlags2::SHADER_SAMPLED_READ,
+                                )],
+                        ),
+                    )
+                })
             })
             .unwrap();
     }
@@ -482,15 +505,19 @@ impl MenuButtonView {
 
         base_system
             .sync_execute_graphics_commands(|rec| {
-                rec.begin_render_pass2(
-                    &br::RenderPassBeginInfo::new(
-                        &rp,
-                        &fb,
-                        atlas_rect.vk_rect(),
-                        &[br::ClearValue::color_f32([0.0; 4])],
-                    ),
-                    &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-                )
+                rec.inject(|r| {
+                    inject_cmd_begin_render_pass2(
+                        r,
+                        base_system.subsystem,
+                        &br::RenderPassBeginInfo::new(
+                            &rp,
+                            &fb,
+                            atlas_rect.vk_rect(),
+                            &[br::ClearValue::color_f32([0.0; 4])],
+                        ),
+                        &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                    )
+                })
                 .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline)
                 .bind_vertex_buffer_array(0, &[vbuf.as_transparent_ref()], &[0])
                 .bind_index_buffer(
@@ -499,7 +526,13 @@ impl MenuButtonView {
                     br::IndexType::U16,
                 )
                 .draw_indexed(Self::ICON_INDICES.len() as _, 1, 0, 0, 0)
-                .end_render_pass2(&br::SubpassEndInfo::new())
+                .inject(|r| {
+                    inject_cmd_end_render_pass2(
+                        r,
+                        base_system.subsystem,
+                        &br::SubpassEndInfo::new(),
+                    )
+                })
             })
             .unwrap();
     }
@@ -690,14 +723,20 @@ impl BaseView {
 
         ctx.base_system
             .sync_execute_graphics_commands(|rec| {
-                rec.pipeline_barrier_2(&br::DependencyInfo::new(
-                    &[],
-                    &[],
-                    &[ctx
-                        .base_system
-                        .barrier_for_mask_atlas_resource()
-                        .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
-                ))
+                rec.inject(|r| {
+                    inject_cmd_pipeline_barrier_2(
+                        r,
+                        ctx.base_system.subsystem,
+                        &br::DependencyInfo::new(
+                            &[],
+                            &[],
+                            &[ctx
+                                .base_system
+                                .barrier_for_mask_atlas_resource()
+                                .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
+                        ),
+                    )
+                })
                 .inject(|r| {
                     let (b, o) = ctx.staging_scratch_buffer.of(&bg_stg_image_pixels);
 
@@ -719,24 +758,31 @@ impl BaseView {
                         }],
                     )
                 })
-                .pipeline_barrier_2(&br::DependencyInfo::new(
-                    &[],
-                    &[],
-                    &[ctx
-                        .base_system
-                        .barrier_for_mask_atlas_resource()
-                        .from(
-                            br::PipelineStageFlags2::COPY,
-                            br::AccessFlags2::TRANSFER.write,
-                        )
-                        .to(
-                            br::PipelineStageFlags2::FRAGMENT_SHADER,
-                            br::AccessFlags2::SHADER_SAMPLED_READ,
-                        )
-                        .transit_from(
-                            br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt),
-                        )],
-                ))
+                .inject(|r| {
+                    inject_cmd_pipeline_barrier_2(
+                        r,
+                        ctx.base_system.subsystem,
+                        &br::DependencyInfo::new(
+                            &[],
+                            &[],
+                            &[ctx
+                                .base_system
+                                .barrier_for_mask_atlas_resource()
+                                .from(
+                                    br::PipelineStageFlags2::COPY,
+                                    br::AccessFlags2::TRANSFER.write,
+                                )
+                                .to(
+                                    br::PipelineStageFlags2::FRAGMENT_SHADER,
+                                    br::AccessFlags2::SHADER_SAMPLED_READ,
+                                )
+                                .transit_from(
+                                    br::ImageLayout::TransferDestOpt
+                                        .to(br::ImageLayout::ShaderReadOnlyOpt),
+                                )],
+                        ),
+                    )
+                })
             })
             .unwrap();
 

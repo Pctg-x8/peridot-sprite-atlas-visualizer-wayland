@@ -16,7 +16,22 @@ impl Cache {
 
             p
         };
+        #[cfg(target_os = "macos")]
+        let base_path = {
+            let fm = objc_rt::foundation::NSFileManager::default();
+            let url = fm
+                .url_for_directory(
+                    objc_rt::foundation::NSSearchPathDirectory::CachesDirectory,
+                    objc_rt::foundation::NSSearchPathDomainMask::LocalDomainMask,
+                    None,
+                    true,
+                )
+                .unwrap();
 
+            PathBuf::from(url.file_system_representation().to_str().unwrap())
+        };
+
+        tracing::info!(path = %base_path.display(), "cache initialized");
         Self { base_path }
     }
 

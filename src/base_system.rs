@@ -202,11 +202,11 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         let pipeline_cache = Self::load_or_create_pipeline_cache(subsystem, &fs_cache);
 
         // initialize font systems
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "macos")))]
         fontconfig::init();
 
         let (primary_face_path, primary_face_index);
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "macos")))]
         {
             let mut fc_pat = fontconfig::Pattern::new();
             fc_pat.add_family_name(c"system-ui");
@@ -241,6 +241,12 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         #[cfg(windows)]
         {
             primary_face_path = c"C:\\Windows\\Fonts\\YuGothR.ttc";
+            primary_face_index = 0;
+        }
+        // TODO: mock
+        #[cfg(target_os = "macos")]
+        {
+            primary_face_path = c"/System/Library/Fonts/Supplemental/Arial.ttf";
             primary_face_index = 0;
         }
 
@@ -341,7 +347,7 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         }
 
         tracing::info!("creating fresh");
-        let o = br::RenderPassObject::new(
+        let o = create_render_pass2(
             self.subsystem,
             &br::RenderPassCreateInfo2::new(
                 &[br::AttachmentDescription2::new(br::vk::VK_FORMAT_R8_UNORM)
@@ -358,7 +364,7 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
                         br::ImageLayout::ShaderReadOnlyOpt,
                     )],
                 &[br::SubpassDescription2::new()
-                    .colors(&[br::AttachmentReference2::color_attachment_opt(0)])],
+                    .colors(&[const { br::AttachmentReference2::color_attachment_opt(0) }])],
                 &[br::SubpassDependency2::new(
                     br::SubpassIndex::Internal(0),
                     br::SubpassIndex::External,
@@ -432,14 +438,23 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         let image_pixels = layout.build_stg_image_pixel_buffer(staging_scratch_buffer);
 
         self.sync_execute_graphics_commands(|rec| {
-            rec.pipeline_barrier_2(&br::DependencyInfo::new(
-                &[],
-                &[],
-                &[self
-                    .barrier_for_mask_atlas_resource()
-                    .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())
-                    .of_execution(br::PipelineStageFlags2(0), br::PipelineStageFlags2::COPY)],
-            ))
+            rec.inject(|r| {
+                inject_cmd_pipeline_barrier_2(
+                    r,
+                    self.subsystem,
+                    &br::DependencyInfo::new(
+                        &[],
+                        &[],
+                        &[self
+                            .barrier_for_mask_atlas_resource()
+                            .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())
+                            .of_execution(
+                                br::PipelineStageFlags2(0),
+                                br::PipelineStageFlags2::COPY,
+                            )],
+                    ),
+                )
+            })
             .inject(|r| {
                 let (b, o) = staging_scratch_buffer.of(&image_pixels);
 
@@ -461,23 +476,30 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
                     }],
                 )
             })
-            .pipeline_barrier_2(&br::DependencyInfo::new(
-                &[],
-                &[],
-                &[self
-                    .barrier_for_mask_atlas_resource()
-                    .transit_from(
-                        br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt),
-                    )
-                    .of_memory(
-                        br::AccessFlags2::TRANSFER.write,
-                        br::AccessFlags2::SHADER.read,
-                    )
-                    .of_execution(
-                        br::PipelineStageFlags2::COPY,
-                        br::PipelineStageFlags2::FRAGMENT_SHADER,
-                    )],
-            ))
+            .inject(|r| {
+                inject_cmd_pipeline_barrier_2(
+                    r,
+                    self.subsystem,
+                    &br::DependencyInfo::new(
+                        &[],
+                        &[],
+                        &[self
+                            .barrier_for_mask_atlas_resource()
+                            .transit_from(
+                                br::ImageLayout::TransferDestOpt
+                                    .to(br::ImageLayout::ShaderReadOnlyOpt),
+                            )
+                            .of_memory(
+                                br::AccessFlags2::TRANSFER.write,
+                                br::AccessFlags2::SHADER.read,
+                            )
+                            .of_execution(
+                                br::PipelineStageFlags2::COPY,
+                                br::PipelineStageFlags2::FRAGMENT_SHADER,
+                            )],
+                    ),
+                )
+            })
         })?;
 
         self.text_cache
@@ -548,18 +570,22 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
             .set_multisample_state(MS_STATE_EMPTY)])?;
 
         self.sync_execute_graphics_commands(|rec| {
-            rec.begin_render_pass2(
-                &br::RenderPassBeginInfo::new(
-                    &render_pass,
-                    &framebuffer,
-                    atlas_rect.vk_rect(),
-                    &[br::ClearValue::color_f32([0.0; 4])],
-                ),
-                &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-            )
+            rec.inject(|r| {
+                inject_cmd_begin_render_pass2(
+                    r,
+                    self.subsystem,
+                    &br::RenderPassBeginInfo::new(
+                        &render_pass,
+                        &framebuffer,
+                        atlas_rect.vk_rect(),
+                        &[br::ClearValue::color_f32([0.0; 4])],
+                    ),
+                    &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                )
+            })
             .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline)
             .draw(3, 1, 0, 0)
-            .end_render_pass2(&br::SubpassEndInfo::new())
+            .inject(|r| inject_cmd_end_render_pass2(r, self.subsystem, &br::SubpassEndInfo::new()))
         })?;
 
         self.rounded_rect_cache
@@ -623,18 +649,22 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
             .unwrap();
 
         self.sync_execute_graphics_commands(|rec| {
-            rec.begin_render_pass2(
-                &br::RenderPassBeginInfo::new(
-                    &render_pass,
-                    &framebuffer,
-                    atlas_rect.vk_rect(),
-                    &[br::ClearValue::color_f32([0.0; 4])],
-                ),
-                &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-            )
+            rec.inject(|r| {
+                inject_cmd_begin_render_pass2(
+                    r,
+                    self.subsystem,
+                    &br::RenderPassBeginInfo::new(
+                        &render_pass,
+                        &framebuffer,
+                        atlas_rect.vk_rect(),
+                        &[br::ClearValue::color_f32([0.0; 4])],
+                    ),
+                    &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                )
+            })
             .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline)
             .draw(3, 1, 0, 0)
-            .end_render_pass2(&br::SubpassEndInfo::new())
+            .inject(|r| inject_cmd_end_render_pass2(r, self.subsystem, &br::SubpassEndInfo::new()))
         })?;
 
         self.rounded_fill_rect_cache
@@ -655,8 +685,10 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         let mut stencil_buffer = br::ImageObject::new(
             self.subsystem,
             &br::ImageCreateInfo::new(atlas_rect.extent(), br::vk::VK_FORMAT_S8_UINT)
-                .as_depth_stencil_attachment()
-                .as_transient_attachment()
+                .with_usage(
+                    br::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+                        | br::ImageUsageFlags::TRANSIENT_ATTACHMENT,
+                )
                 .sample_counts(4),
         )?;
         let stencil_buffer_mem =
@@ -671,8 +703,9 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         let mut ms_color_buffer = br::ImageObject::new(
             self.subsystem,
             &br::ImageCreateInfo::new(atlas_rect.extent(), br::vk::VK_FORMAT_R8_UNORM)
-                .as_color_attachment()
-                .usage_with(br::ImageUsageFlags::TRANSFER_SRC)
+                .with_usage(
+                    br::ImageUsageFlags::COLOR_ATTACHMENT | br::ImageUsageFlags::TRANSFER_SRC,
+                )
                 .sample_counts(4),
         )?;
         let ms_color_buffer_mem =
@@ -684,7 +717,7 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         )
         .create()?;
 
-        let render_pass = br::RenderPassObject::new(
+        let render_pass = create_render_pass2(
             self.subsystem,
             &br::RenderPassCreateInfo2::new(
                 &[
@@ -1280,18 +1313,22 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         }
 
         self.sync_execute_graphics_commands(|rec| {
-            rec.begin_render_pass2(
-                &br::RenderPassBeginInfo::new(
-                    &render_pass,
-                    &fb,
-                    atlas_rect.extent().into_rect(br::Offset2D::ZERO),
-                    &[
-                        br::ClearValue::color_f32([0.0; 4]),
-                        br::ClearValue::depth_stencil(1.0, 0),
-                    ],
-                ),
-                &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-            )
+            rec.inject(|r| {
+                inject_cmd_begin_render_pass2(
+                    r,
+                    self.subsystem,
+                    &br::RenderPassBeginInfo::new(
+                        &render_pass,
+                        &fb,
+                        atlas_rect.extent().into_rect(br::Offset2D::ZERO),
+                        &[
+                            br::ClearValue::color_f32([0.0; 4]),
+                            br::ClearValue::depth_stencil(1.0, 0),
+                        ],
+                    ),
+                    &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                )
+            })
             .bind_pipeline(
                 br::PipelineBindPoint::Graphics,
                 &first_stencil_shape_pipeline,
@@ -1319,21 +1356,34 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
                 )
                 .draw(curve_triangle_points.len() as _, 1, 0, 0)
             })
-            .next_subpass2(
-                &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-                &br::SubpassEndInfo::new(),
-            )
+            .inject(|r| {
+                inject_cmd_next_subpass2(
+                    r,
+                    self.subsystem,
+                    &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                    &br::SubpassEndInfo::new(),
+                )
+            })
             .bind_pipeline(br::PipelineBindPoint::Graphics, &colorize_pipeline)
             .draw(3, 1, 0, 0)
-            .end_render_pass2(&br::SubpassEndInfo::new())
-            .pipeline_barrier_2(&br::DependencyInfo::new(
-                &[],
-                &[],
-                &[self
-                    .barrier_for_mask_atlas_resource()
-                    .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())
-                    .of_execution(br::PipelineStageFlags2(0), br::PipelineStageFlags2::RESOLVE)],
-            ))
+            .inject(|r| inject_cmd_end_render_pass2(r, self.subsystem, &br::SubpassEndInfo::new()))
+            .inject(|r| {
+                inject_cmd_pipeline_barrier_2(
+                    r,
+                    self.subsystem,
+                    &br::DependencyInfo::new(
+                        &[],
+                        &[],
+                        &[self
+                            .barrier_for_mask_atlas_resource()
+                            .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())
+                            .of_execution(
+                                br::PipelineStageFlags2(0),
+                                br::PipelineStageFlags2::RESOLVE,
+                            )],
+                    ),
+                )
+            })
             .resolve_image(
                 ms_color_buffer.image(),
                 br::ImageLayout::TransferSrcOpt,
@@ -1347,23 +1397,30 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
                     extent: atlas_rect.extent().with_depth(1),
                 }],
             )
-            .pipeline_barrier_2(&br::DependencyInfo::new(
-                &[],
-                &[],
-                &[self
-                    .barrier_for_mask_atlas_resource()
-                    .transit_from(
-                        br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt),
-                    )
-                    .of_memory(
-                        br::AccessFlags2::TRANSFER.write,
-                        br::AccessFlags2::SHADER.read,
-                    )
-                    .of_execution(
-                        br::PipelineStageFlags2::RESOLVE,
-                        br::PipelineStageFlags2::FRAGMENT_SHADER,
-                    )],
-            ))
+            .inject(|r| {
+                inject_cmd_pipeline_barrier_2(
+                    r,
+                    self.subsystem,
+                    &br::DependencyInfo::new(
+                        &[],
+                        &[],
+                        &[self
+                            .barrier_for_mask_atlas_resource()
+                            .transit_from(
+                                br::ImageLayout::TransferDestOpt
+                                    .to(br::ImageLayout::ShaderReadOnlyOpt),
+                            )
+                            .of_memory(
+                                br::AccessFlags2::TRANSFER.write,
+                                br::AccessFlags2::SHADER.read,
+                            )
+                            .of_execution(
+                                br::PipelineStageFlags2::RESOLVE,
+                                br::PipelineStageFlags2::FRAGMENT_SHADER,
+                            )],
+                    ),
+                )
+            })
         })?;
 
         Ok(atlas_rect)
@@ -1508,20 +1565,14 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
 
     pub fn sync_execute_graphics_commands(
         &self,
-        rec: impl for<'e> FnOnce(br::CmdRecord<'e, Subsystem>) -> br::CmdRecord<'e, Subsystem>,
+        rec: impl for<'e> FnOnce(br::CmdRecord<'e>) -> br::CmdRecord<'e>,
     ) -> br::Result<()> {
         let mut cp = self.create_transient_graphics_command_pool()?;
         let [mut cb] = br::CommandBufferObject::alloc_array(
             self.subsystem,
             &br::CommandBufferFixedCountAllocateInfo::new(&mut cp, br::CommandBufferLevel::Primary),
         )?;
-        rec(unsafe {
-            cb.begin(
-                &br::CommandBufferBeginInfo::new().onetime_submit(),
-                self.subsystem,
-            )?
-        })
-        .end()?;
+        rec(unsafe { cb.begin(&br::CommandBufferBeginInfo::new().onetime_submit())? }).end()?;
 
         self.sync_execute_graphics_command_buffers(&[br::CommandBufferSubmitInfo::new(&cb)])
     }
@@ -1861,16 +1912,16 @@ impl<'subsystem> RenderTexture<'subsystem> {
         format: PixelFormat,
         options: &RenderTextureOptions,
     ) -> br::Result<RenderTexture<'subsystem>> {
-        let mut create_info =
-            br::ImageCreateInfo::new(size, format.vk_format()).as_color_attachment();
+        let mut create_info = br::ImageCreateInfo::new(size, format.vk_format())
+            .with_usage(br::ImageUsageFlags::COLOR_ATTACHMENT);
         if options
             .flags
             .contains(RenderTextureFlags::ALLOW_TRANSFER_SRC)
         {
-            create_info = create_info.usage_with(br::ImageUsageFlags::TRANSFER_SRC);
+            create_info = create_info.with_usage(br::ImageUsageFlags::TRANSFER_SRC);
         }
         if !options.flags.contains(RenderTextureFlags::NON_SAMPLED) {
-            create_info = create_info.usage_with(br::ImageUsageFlags::SAMPLED);
+            create_info = create_info.with_usage(br::ImageUsageFlags::SAMPLED);
         }
         if let Some(msaa_count) = options.msaa_count {
             create_info = create_info.sample_counts(msaa_count);
@@ -1940,4 +1991,113 @@ impl<'subsystem> br::DeviceChild for RenderTextureImageAccess<'subsystem> {
     fn device(&self) -> &Self::ConcreteDevice {
         self.0.res.image().device()
     }
+}
+
+// MoltenVKでは一部のコマンドがpromoteされていないらしい（1.3 compatibleのはずなのに）のでこれらのコマンドはラッパー関数を通す
+// https://github.com/KhronosGroup/MoltenVK/issues/2133
+
+#[cfg(target_os = "macos")]
+#[inline(always)]
+pub fn create_render_pass2<'subsystem>(
+    subsystem: &'subsystem Subsystem,
+    create_info: &br::RenderPassCreateInfo2,
+) -> br::Result<br::RenderPassObject<&'subsystem Subsystem>> {
+    Ok(unsafe {
+        br::RenderPassObject::manage(
+            br::DeviceCreateRenderPass2Extension::new_render_pass2_khr(
+                subsystem,
+                create_info,
+                None,
+            )?,
+            subsystem,
+        )
+    })
+}
+#[cfg(not(target_os = "macos"))]
+#[inline(always)]
+pub fn create_render_pass2<'subsystem>(
+    subsystem: &'subsystem Subsystem,
+    create_info: &br::RenderPassCreateInfo2,
+) -> br::Result<br::RenderPassObject<&'subsystem Subsystem>> {
+    br::RenderPassObject::new(subsystem, create_info)
+}
+
+#[cfg(target_os = "macos")]
+#[inline(always)]
+pub fn inject_cmd_begin_render_pass2<'x>(
+    r: br::CmdRecord<'x>,
+    subsystem: &Subsystem,
+    begin_info: &br::RenderPassBeginInfo,
+    subpass_begin_info: &br::SubpassBeginInfo,
+) -> br::CmdRecord<'x> {
+    r.begin_render_pass2_khr(subsystem, begin_info, subpass_begin_info)
+}
+#[cfg(not(target_os = "macos"))]
+#[inline(always)]
+pub fn inject_cmd_begin_render_pass2<'x>(
+    r: br::CmdRecord<'x>,
+    _subsystem: &Subsystem,
+    begin_info: &br::RenderPassBeginInfo,
+    subpass_begin_info: &br::SubpassBeginInfo,
+) -> br::CmdRecord<'x> {
+    r.begin_render_pass2(begin_info, subpass_begin_info)
+}
+
+#[cfg(target_os = "macos")]
+#[inline(always)]
+pub fn inject_cmd_next_subpass2<'x>(
+    r: br::CmdRecord<'x>,
+    subsystem: &Subsystem,
+    begin_info: &br::SubpassBeginInfo,
+    end_info: &br::SubpassEndInfo,
+) -> br::CmdRecord<'x> {
+    r.next_subpass2_khr(subsystem, begin_info, end_info)
+}
+#[cfg(not(target_os = "macos"))]
+#[inline(always)]
+pub fn inject_cmd_next_subpass2<'x>(
+    r: br::CmdRecord<'x>,
+    _subsystem: &Subsystem,
+    begin_info: &br::SubpassBeginInfo,
+    end_info: &br::SubpassEndInfo,
+) -> br::CmdRecord<'x> {
+    r.next_subpass2(begin_info, end_info)
+}
+
+#[cfg(target_os = "macos")]
+#[inline(always)]
+pub fn inject_cmd_end_render_pass2<'x>(
+    r: br::CmdRecord<'x>,
+    subsystem: &Subsystem,
+    end_info: &br::SubpassEndInfo,
+) -> br::CmdRecord<'x> {
+    r.end_render_pass2_khr(subsystem, end_info)
+}
+#[cfg(not(target_os = "macos"))]
+#[inline(always)]
+pub fn inject_cmd_end_render_pass2<'x>(
+    r: br::CmdRecord<'x>,
+    _subsystem: &Subsystem,
+    end_info: &br::SubpassEndInfo,
+) -> br::CmdRecord<'x> {
+    r.end_render_pass2(end_info)
+}
+
+#[cfg(target_os = "macos")]
+#[inline(always)]
+pub fn inject_cmd_pipeline_barrier_2<'x>(
+    r: br::CmdRecord<'x>,
+    subsystem: &Subsystem,
+    deps: &br::DependencyInfo,
+) -> br::CmdRecord<'x> {
+    r.pipeline_barrier_2_khr(subsystem, deps)
+}
+#[cfg(not(target_os = "macos"))]
+#[inline(always)]
+pub fn inject_cmd_pipeline_barrier_2<'x>(
+    r: br::CmdRecord<'x>,
+    _subsystem: &Subsystem,
+    deps: &br::DependencyInfo,
+) -> br::CmdRecord<'x> {
+    r.pipeline_barrier_2(deps)
 }

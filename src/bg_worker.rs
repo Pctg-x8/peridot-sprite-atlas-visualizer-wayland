@@ -49,6 +49,10 @@ impl<'subsystem> BackgroundWorkerEnqueueWeakAccess<'subsystem> {
     }
 }
 
+// TODO: macでのメインスレッド通知系どうしようか
+#[cfg(target_os = "macos")]
+pub struct MainThreadWaker;
+
 pub struct BackgroundWorker<'subsystem> {
     join_handles: Vec<JoinHandle<()>>,
     work_queue: Arc<Injector<BackgroundWork<'subsystem>>>,
@@ -58,6 +62,8 @@ pub struct BackgroundWorker<'subsystem> {
     main_thread_waker: Arc<crate::platform::linux::EventFD>,
     #[cfg(windows)]
     main_thread_waker: Arc<crate::platform::win32::event::EventObject>,
+    #[cfg(target_os = "macos")]
+    main_thread_waker: Arc<MainThreadWaker>,
 }
 impl<'subsystem> BackgroundWorker<'subsystem> {
     pub fn new() -> Self {
@@ -89,6 +95,8 @@ impl<'subsystem> BackgroundWorker<'subsystem> {
         #[cfg(windows)]
         let main_thread_waker =
             Arc::new(crate::platform::win32::event::EventObject::new(None, true, false).unwrap());
+        #[cfg(target_os = "macos")]
+        let main_thread_waker = Arc::new(MainThreadWaker);
         for (n, local_queue) in local_queues.into_iter().enumerate() {
             join_handles.push(
                 unsafe {std::thread::Builder::new()
@@ -204,6 +212,11 @@ impl<'subsystem> BackgroundWorker<'subsystem> {
         #[cfg(windows)]
         {
             self.main_thread_waker.reset().map_err(From::from)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // do nothing
+            Ok(())
         }
     }
 

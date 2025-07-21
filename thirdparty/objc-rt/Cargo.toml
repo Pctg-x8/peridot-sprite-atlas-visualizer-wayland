@@ -1,9 +1,9 @@
 [package]
-name = "wayland"
+name = "objc-rt"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-tracing.workspace = true
-bitflags.workspace = true
 ffi-common = { path = "../../shared/ffi-common" }
+bitflags.workspace = true
+tracing.workspace = true

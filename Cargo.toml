@@ -1,11 +1,13 @@
 [workspace]
 members = [
     "devtools/perflog-printer",
+    "shared/ffi-common",
     "shared/perflog-proto",
     "thirdparty/dbus",
     "thirdparty/fontconfig",
     "thirdparty/freetype",
     "thirdparty/harfbuzz",
+    "thirdparty/objc-rt",
     "thirdparty/wayland",
 ]
 
@@ -16,8 +18,20 @@ edition = "2024"
 build = "build.rs"
 
 [features]
-platform-linux-wayland = ["bedrock/VK_KHR_wayland_surface", "dep:wayland"]
-platform-windows = ["bedrock/VK_KHR_win32_surface"]
+platform-linux-wayland = [
+    "bedrock/VK_KHR_wayland_surface",
+    "dep:wayland",
+    "bedrock/Allow1_4APIs",
+]
+platform-windows = ["bedrock/VK_KHR_win32_surface", "bedrock/Allow1_4APIs"]
+platform-macos = [
+    "bedrock/DynamicLoaded",
+    "bedrock/VK_EXT_metal_surface",
+    "bedrock/VK_KHR_portability_enumeration",
+    "bedrock/VK_KHR_synchronization2",
+    "bedrock/VK_KHR_get_physical_device_properties2",
+    "bedrock/VK_KHR_create_renderpass2",
+]
 profiling = []
 
 [workspace.dependencies]
@@ -28,10 +42,10 @@ thiserror = "2.0.12"
 freetype2 = { git = "https://github.com/Pctg-x8/ft2-rs" }
 
 [dependencies]
+# Note: MoltenVKが正しくVulkan 1.3以上に対応してないので（promoteされたシンボルの一部がないらしい）Allow1_4APIsはプラットフォームfeature側で有効にする
 bedrock = { git = "https://github.com/Pctg-x8/bedrock", branch = "peridot", features = [
     "Implements",
     "Presentation",
-    "Allow1_4APIs",
     "VK_EXT_debug_utils",
 ] }
 bitflags.workspace = true
@@ -51,7 +65,7 @@ freetype = { path = "./thirdparty/freetype" }
 harfbuzz = { path = "./thirdparty/harfbuzz" }
 shared-perflog-proto.path = "./shared/perflog-proto"
 
-[target.'cfg(unix)'.dependencies]
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 wayland = { path = "./thirdparty/wayland", optional = true }
 dbus = { path = "./thirdparty/dbus" }
 fontconfig = { path = "./thirdparty/fontconfig" }
@@ -77,3 +91,6 @@ features = [
     "Storage_Pickers",
     "Storage_Streams",
 ]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc-rt = { path = "./thirdparty/objc-rt" }

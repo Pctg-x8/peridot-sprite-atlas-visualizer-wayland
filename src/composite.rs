@@ -4,7 +4,15 @@ use std::collections::{BTreeSet, HashMap};
 
 use bedrock::{self as br, Image, ImageChild, MemoryBound, TypedVulkanStructure, VkHandle};
 
-use crate::{AppEvent, AppEventBus, helper_types::SafeF32, mathext::Matrix4, subsystem::Subsystem};
+use crate::{
+    AppEvent, AppEventBus,
+    base_system::{
+        inject_cmd_begin_render_pass2, inject_cmd_end_render_pass2, inject_cmd_pipeline_barrier_2,
+    },
+    helper_types::SafeF32,
+    mathext::Matrix4,
+    subsystem::Subsystem,
+};
 
 pub const BLUR_SAMPLE_STEPS: usize = 2;
 
@@ -569,7 +577,7 @@ impl UnboundedCompositeInstanceManager {
         self.count - 1
     }
 
-    pub fn sync_buffer<'cb, E: 'cb>(&self, cr: br::CmdRecord<'cb, E>) -> br::CmdRecord<'cb, E> {
+    pub fn sync_buffer<'cb>(&self, cr: br::CmdRecord<'cb>) -> br::CmdRecord<'cb> {
         cr.copy_buffer(
             &unsafe { br::VkHandleRef::dangling(self.buffer_stg) },
             &unsafe { br::VkHandleRef::dangling(self.buffer) },
@@ -1387,8 +1395,9 @@ impl CompositeTree {
     }
 }
 
-pub fn populate_composite_render_commands<'x, 'r, X>(
-    mut rec: br::CmdRecord<'x, X>,
+pub fn populate_composite_render_commands<'x, 'r>(
+    mut rec: br::CmdRecord<'x>,
+    subsystem: &Subsystem,
     mut in_render_pass: bool,
     target_size: br::Extent2D,
     render_data: &CompositeRenderingData,
@@ -1412,7 +1421,7 @@ pub fn populate_composite_render_commands<'x, 'r, X>(
     backdrop_blur_downsample_fixed_fbs: &[impl br::VkHandle<Handle = br::vk::VkFramebuffer>],
     backdrop_blur_upsample_fixed_fbs: &[impl br::VkHandle<Handle = br::vk::VkFramebuffer>],
     backdrop_blur_destination_fbs: &[impl br::VkHandle<Handle = br::vk::VkFramebuffer>],
-) -> br::CmdRecord<'x, X> {
+) -> br::CmdRecord<'x> {
     let render_region = target_size.into_rect(br::Offset2D::ZERO);
 
     let mut rpt_pointer = 0;
@@ -1430,15 +1439,19 @@ pub fn populate_composite_render_commands<'x, 'r, X>(
                     let (rp, fb) =
                         render_target_pair_provider(&render_data.render_passes[rpt_pointer]);
 
-                    rec = rec.begin_render_pass2(
-                        &br::RenderPassBeginInfo::new(
-                            &rp,
-                            &fb,
-                            render_region,
-                            &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 1.0])],
-                        ),
-                        &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-                    );
+                    rec = rec.inject(|r| {
+                        inject_cmd_begin_render_pass2(
+                            r,
+                            subsystem,
+                            &br::RenderPassBeginInfo::new(
+                                &rp,
+                                &fb,
+                                render_region,
+                                &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 1.0])],
+                            ),
+                            &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                        )
+                    });
                 }
                 if !pipeline_bound {
                     pipeline_bound = true;
@@ -1482,15 +1495,19 @@ pub fn populate_composite_render_commands<'x, 'r, X>(
                     let (rp, fb) =
                         render_target_pair_provider(&render_data.render_passes[rpt_pointer]);
 
-                    rec = rec.begin_render_pass2(
-                        &br::RenderPassBeginInfo::new(
-                            &rp,
-                            &fb,
-                            render_region,
-                            &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 1.0])],
-                        ),
-                        &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-                    );
+                    rec = rec.inject(|r| {
+                        inject_cmd_begin_render_pass2(
+                            r,
+                            subsystem,
+                            &br::RenderPassBeginInfo::new(
+                                &rp,
+                                &fb,
+                                render_region,
+                                &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 1.0])],
+                            ),
+                            &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                        )
+                    });
                 }
                 if !pipeline_bound {
                     pipeline_bound = true;
@@ -1538,15 +1555,19 @@ pub fn populate_composite_render_commands<'x, 'r, X>(
                     let (rp, fb) =
                         render_target_pair_provider(&render_data.render_passes[rpt_pointer]);
 
-                    rec = rec.begin_render_pass2(
-                        &br::RenderPassBeginInfo::new(
-                            &rp,
-                            &fb,
-                            render_region,
-                            &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 1.0])],
-                        ),
-                        &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-                    );
+                    rec = rec.inject(|r| {
+                        inject_cmd_begin_render_pass2(
+                            r,
+                            subsystem,
+                            &br::RenderPassBeginInfo::new(
+                                &rp,
+                                &fb,
+                                render_region,
+                                &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 1.0])],
+                            ),
+                            &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                        )
+                    });
                 }
                 if !pipeline_bound {
                     pipeline_bound = true;
@@ -1580,16 +1601,28 @@ pub fn populate_composite_render_commands<'x, 'r, X>(
             }
             CompositeRenderingInstruction::GrabBackdrop => {
                 rec = rec
-                    .end_render_pass2(&br::SubpassEndInfo::new())
-                    .pipeline_barrier_2(&br::DependencyInfo::new(
-                        &[],
-                        &[],
-                        &[br::ImageMemoryBarrier2::new(
-                            grab_buffer.image(),
-                            br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+                    .inject(|r| {
+                        inject_cmd_end_render_pass2(r, subsystem, &br::SubpassEndInfo::new())
+                    })
+                    .inject(|r| {
+                        inject_cmd_pipeline_barrier_2(
+                            r,
+                            subsystem,
+                            &br::DependencyInfo::new(
+                                &[],
+                                &[],
+                                &[br::ImageMemoryBarrier2::new(
+                                    grab_buffer.image(),
+                                    br::ImageSubresourceRange::new(
+                                        br::AspectMask::COLOR,
+                                        0..1,
+                                        0..1,
+                                    ),
+                                )
+                                .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
+                            ),
                         )
-                        .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
-                    ))
+                    })
                     .copy_image(
                         current_rt_image,
                         br::ImageLayout::TransferSrcOpt,
@@ -1611,25 +1644,36 @@ pub fn populate_composite_render_commands<'x, 'r, X>(
                             extent: target_size.with_depth(1),
                         }],
                     )
-                    .pipeline_barrier_2(&br::DependencyInfo::new(
-                        &[],
-                        &[],
-                        &[br::ImageMemoryBarrier2::new(
-                            grab_buffer.image(),
-                            br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+                    .inject(|r| {
+                        inject_cmd_pipeline_barrier_2(
+                            r,
+                            subsystem,
+                            &br::DependencyInfo::new(
+                                &[],
+                                &[],
+                                &[br::ImageMemoryBarrier2::new(
+                                    grab_buffer.image(),
+                                    br::ImageSubresourceRange::new(
+                                        br::AspectMask::COLOR,
+                                        0..1,
+                                        0..1,
+                                    ),
+                                )
+                                .transit_from(
+                                    br::ImageLayout::TransferDestOpt
+                                        .to(br::ImageLayout::ShaderReadOnlyOpt),
+                                )
+                                .from(
+                                    br::PipelineStageFlags2::COPY,
+                                    br::AccessFlags2::TRANSFER.write,
+                                )
+                                .to(
+                                    br::PipelineStageFlags2::FRAGMENT_SHADER,
+                                    br::AccessFlags2::SHADER.read,
+                                )],
+                            ),
                         )
-                        .transit_from(
-                            br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt),
-                        )
-                        .from(
-                            br::PipelineStageFlags2::COPY,
-                            br::AccessFlags2::TRANSFER.write,
-                        )
-                        .to(
-                            br::PipelineStageFlags2::FRAGMENT_SHADER,
-                            br::AccessFlags2::SHADER.read,
-                        )],
-                    ));
+                    });
                 rpt_pointer += 1;
                 in_render_pass = false;
                 pipeline_bound = false;
@@ -1643,21 +1687,25 @@ pub fn populate_composite_render_commands<'x, 'r, X>(
                 // downsample
                 for lv in 0..BLUR_SAMPLE_STEPS {
                     rec = rec
-                        .begin_render_pass2(
-                            &br::RenderPassBeginInfo::new(
-                                backdrop_blur_render_pass,
-                                &backdrop_blur_downsample_fixed_fbs[lv],
-                                br::Rect2D {
-                                    offset: br::Offset2D::ZERO,
-                                    extent: br::Extent2D {
-                                        width: target_size.width >> (lv + 1),
-                                        height: target_size.height >> (lv + 1),
+                        .inject(|r| {
+                            inject_cmd_begin_render_pass2(
+                                r,
+                                subsystem,
+                                &br::RenderPassBeginInfo::new(
+                                    backdrop_blur_render_pass,
+                                    &backdrop_blur_downsample_fixed_fbs[lv],
+                                    br::Rect2D {
+                                        offset: br::Offset2D::ZERO,
+                                        extent: br::Extent2D {
+                                            width: target_size.width >> (lv + 1),
+                                            height: target_size.height >> (lv + 1),
+                                        },
                                     },
-                                },
-                                &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 0.0])],
-                            ),
-                            &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-                        )
+                                    &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 0.0])],
+                                ),
+                                &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                            )
+                        })
                         .bind_pipeline(
                             br::PipelineBindPoint::Graphics,
                             &backdrop_blur_downsample_pipelines[lv],
@@ -1680,30 +1728,37 @@ pub fn populate_composite_render_commands<'x, 'r, X>(
                             &[],
                         )
                         .draw(3, 1, 0, 0)
-                        .end_render_pass2(&br::SubpassEndInfo::new());
+                        .inject(|r| {
+                            inject_cmd_end_render_pass2(r, subsystem, &br::SubpassEndInfo::new())
+                        });
                 }
                 // upsample
                 for lv in (0..BLUR_SAMPLE_STEPS).rev() {
                     rec = rec
-                        .begin_render_pass2(
-                            &br::RenderPassBeginInfo::new(
-                                backdrop_blur_render_pass,
-                                &if lv == 0 {
-                                    // final upsample
-                                    backdrop_blur_destination_fbs[dest_backdrop_buffer]
-                                        .as_transparent_ref()
-                                } else {
-                                    backdrop_blur_upsample_fixed_fbs[lv - 1].as_transparent_ref()
-                                },
-                                br::Extent2D {
-                                    width: target_size.width >> lv,
-                                    height: target_size.height >> lv,
-                                }
-                                .into_rect(br::Offset2D::ZERO),
-                                &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 0.0])],
-                            ),
-                            &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-                        )
+                        .inject(|r| {
+                            inject_cmd_begin_render_pass2(
+                                r,
+                                subsystem,
+                                &br::RenderPassBeginInfo::new(
+                                    backdrop_blur_render_pass,
+                                    &if lv == 0 {
+                                        // final upsample
+                                        backdrop_blur_destination_fbs[dest_backdrop_buffer]
+                                            .as_transparent_ref()
+                                    } else {
+                                        backdrop_blur_upsample_fixed_fbs[lv - 1]
+                                            .as_transparent_ref()
+                                    },
+                                    br::Extent2D {
+                                        width: target_size.width >> lv,
+                                        height: target_size.height >> lv,
+                                    }
+                                    .into_rect(br::Offset2D::ZERO),
+                                    &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 0.0])],
+                                ),
+                                &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                            )
+                        })
                         .bind_pipeline(
                             br::PipelineBindPoint::Graphics,
                             &backdrop_blur_upsample_pipelines[lv],
@@ -1726,7 +1781,9 @@ pub fn populate_composite_render_commands<'x, 'r, X>(
                             &[],
                         )
                         .draw(3, 1, 0, 0)
-                        .end_render_pass2(&br::SubpassEndInfo::new());
+                        .inject(|r| {
+                            inject_cmd_end_render_pass2(r, subsystem, &br::SubpassEndInfo::new())
+                        });
                 }
             }
         };
@@ -1804,9 +1861,11 @@ impl UnboundedCompositionSurfaceAtlas {
         let image = match br::ImageObject::new(
             subsystem,
             &br::ImageCreateInfo::new(br::Extent2D::spread1(size), pixel_format)
-                .as_color_attachment()
-                .sampled()
-                .transfer_dest()
+                .with_usage(
+                    br::ImageUsageFlags::COLOR_ATTACHMENT
+                        | br::ImageUsageFlags::SAMPLED
+                        | br::ImageUsageFlags::TRANSFER_DEST,
+                )
                 .flags(br::ImageFlags::SPARSE_BINDING | br::ImageFlags::SPARSE_RESIDENCY),
         ) {
             Ok(x) => x,

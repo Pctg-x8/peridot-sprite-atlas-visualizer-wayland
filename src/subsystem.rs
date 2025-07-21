@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 
 use bedrock::{self as br, Instance, PhysicalDevice, ResolverInterface, VkHandle};
@@ -15,39 +17,49 @@ impl br::VkHandle for SubsystemInstanceAccess {
     }
 }
 impl br::Instance for SubsystemInstanceAccess {}
-impl br::InstanceExtensions for SubsystemInstanceAccess {
-    fn set_debug_utils_object_name_ext_fn(&self) -> bedrock::vk::PFN_vkSetDebugUtilsObjectNameEXT {
+impl br::InstanceGetPhysicalDeviceProperties2Extension for SubsystemInstanceAccess {
+    #[inline(always)]
+    fn get_physical_device_features2_khr_fn(
+        &self,
+    ) -> bedrock::vk::PFN_vkGetPhysicalDeviceFeatures2KHR {
         unsafe { self.native_ptr().load_function_unconstrainted() }
     }
-
-    unsafe fn new_debug_utils_messenger_raw(
+    #[inline(always)]
+    fn get_physical_device_format_properties2_khr_fn(
         &self,
-        _info: &bedrock::DebugUtilsMessengerCreateInfo,
-        _allocation_callbacks: Option<&bedrock::vk::VkAllocationCallbacks>,
-    ) -> bedrock::Result<bedrock::vk::VkDebugUtilsMessengerEXT> {
+    ) -> bedrock::vk::PFN_vkGetPhysicalDeviceFormatProperties2KHR {
         unimplemented!();
     }
-
-    unsafe fn destroy_debug_utils_messenger_raw(
+    #[inline(always)]
+    fn get_physical_device_properties2_khr_fn(
         &self,
-        _obj: bedrock::vk::VkDebugUtilsMessengerEXT,
-        _allocation_callbacks: Option<&bedrock::vk::VkAllocationCallbacks>,
-    ) {
+    ) -> bedrock::vk::PFN_vkGetPhysicalDeviceProperties2KHR {
         unimplemented!();
     }
-
+}
+impl br::InstanceDebugUtilsExtension for SubsystemInstanceAccess {
+    #[inline(always)]
     fn create_debug_utils_messenger_ext_fn(
         &self,
     ) -> bedrock::vk::PFN_vkCreateDebugUtilsMessengerEXT {
         unimplemented!();
     }
 
+    #[inline(always)]
     fn destroy_debug_utils_messenger_ext_fn(
         &self,
     ) -> bedrock::vk::PFN_vkDestroyDebugUtilsMessengerEXT {
         unimplemented!();
     }
 
+    #[inline(always)]
+    fn set_debug_utils_object_name_ext_fn(&self) -> bedrock::vk::PFN_vkSetDebugUtilsObjectNameEXT {
+        unsafe { self.native_ptr().load_function_unconstrainted() }
+    }
+}
+#[cfg(not(target_os = "macos"))]
+impl br::InstanceExternalFenceCapabilitiesExtension for SubsystemInstanceAccess {
+    #[inline(always)]
     fn get_physical_device_external_fence_properties_khr_fn(
         &self,
     ) -> bedrock::vk::PFN_vkGetPhysicalDeviceExternalFencePropertiesKHR {
@@ -84,6 +96,7 @@ pub struct Subsystem {
     pub graphics_queue_family_index: u32,
     graphics_queue: br::vk::VkQueue,
     pub ft: RwLock<FreeType>,
+    vk_ext_commands: SubsystemExtCommandCache,
 }
 unsafe impl Sync for Subsystem {}
 unsafe impl Send for Subsystem {}
@@ -137,24 +150,43 @@ impl Subsystem {
             instance_layers.push(c"VK_LAYER_KHRONOS_validation".into());
         }
 
-        let instance = match br::InstanceObject::new(&br::InstanceCreateInfo::new(
-            &br::ApplicationInfo::new(
-                c"Peridot SpriteAtlas Visualizer/Editor",
-                br::Version::new(0, 0, 1, 0),
-                c"",
-                br::Version::new(0, 0, 0, 0),
+        let instance = match br::InstanceObject::new(
+            &br::InstanceCreateInfo::new(
+                &br::ApplicationInfo::new(
+                    c"Peridot SpriteAtlas Visualizer/Editor",
+                    br::Version::new(0, 0, 1, 0),
+                    c"",
+                    br::Version::new(0, 0, 0, 0),
+                )
+                .api_version(if cfg!(feature = "platform-macos") {
+                    // MoltenVKは1.3に正しく対応していないため一旦1.2に落とす
+                    br::Version::new(0, 1, 2, 0)
+                } else {
+                    br::Version::new(0, 1, 4, 0)
+                }),
+                &instance_layers,
+                &[
+                    c"VK_KHR_surface".into(),
+                    #[cfg(feature = "platform-linux-wayland")]
+                    c"VK_KHR_wayland_surface".into(),
+                    #[cfg(feature = "platform-windows")]
+                    c"VK_KHR_win32_surface".into(),
+                    #[cfg(feature = "platform-macos")]
+                    c"VK_EXT_metal_surface".into(),
+                    #[cfg(feature = "platform-macos")]
+                    c"VK_KHR_portability_enumeration".into(),
+                    #[cfg(feature = "platform-macos")]
+                    c"VK_KHR_get_physical_device_properties2".into(),
+                    c"VK_EXT_debug_utils".into(),
+                ],
             )
-            .api_version(br::Version::new(0, 1, 4, 0)),
-            &instance_layers,
-            &[
-                c"VK_KHR_surface".into(),
-                #[cfg(feature = "platform-linux-wayland")]
-                c"VK_KHR_wayland_surface".into(),
-                #[cfg(feature = "platform-windows")]
-                c"VK_KHR_win32_surface".into(),
-                c"VK_EXT_debug_utils".into(),
-            ],
-        )) {
+            .flags(
+                #[cfg(feature = "platform-macos")]
+                br::InstanceCreateFlags::ENUMERATE_PORTABILITY,
+                #[cfg(not(feature = "platform-macos"))]
+                br::InstanceCreateFlags::EMPTY,
+            ),
+        ) {
             Ok(x) => x,
             Err(e) => {
                 tracing::error!(reason = ?e, "Failed to create vk instance");
@@ -222,6 +254,7 @@ impl Subsystem {
             {
                 v.push("Lazy Allocated");
             }
+            #[cfg(not(target_os = "macos"))]
             if p.property_flags()
                 .has_any(br::MemoryPropertyFlags::PROTECTED)
             {
@@ -232,6 +265,7 @@ impl Subsystem {
             if h.flags().has_any(br::MemoryHeapFlags::DEVICE_LOCAL) {
                 hv.push("Device Local");
             }
+            #[cfg(not(target_os = "macos"))]
             if h.flags().has_any(br::MemoryHeapFlags::MULTI_INSTANCE) {
                 hv.push("Multi Instance");
             }
@@ -285,6 +319,38 @@ impl Subsystem {
                 "sparse image format property",
             );
         }
+
+        let mut sync_features_sink = br::vk::VkPhysicalDeviceSynchronization2FeaturesKHR {
+            sType:
+                <br::vk::VkPhysicalDeviceSynchronization2FeaturesKHR as br::TypedVulkanStructure>::TYPE,
+            pNext: core::ptr::null_mut(),
+            synchronization2: 0,
+        };
+        let mut features_sink =
+            core::mem::MaybeUninit::<br::vk::VkPhysicalDeviceFeatures2KHR>::uninit();
+        unsafe {
+            core::ptr::addr_of_mut!((*features_sink.as_mut_ptr()).sType).write(
+                <br::vk::VkPhysicalDeviceFeatures2KHR as br::TypedVulkanSinkStructure>::TYPE,
+            );
+            core::ptr::addr_of_mut!((*features_sink.as_mut_ptr()).pNext)
+                .write(&mut sync_features_sink as *mut _ as _);
+        }
+        #[cfg(target_os = "macos")]
+        unsafe {
+            adapter.features2_khr(&mut features_sink);
+        }
+        #[cfg(not(target_os = "macos"))]
+        unsafe {
+            adapter.features2(&mut features_sink);
+        }
+        let supported_features = unsafe { features_sink.assume_init_ref() };
+        if sync_features_sink.synchronization2 == 0 {
+            tracing::error!(
+                feature = "VK_KHR_synchronization2",
+                "required feature not supported"
+            );
+        }
+
         let graphics_queue_family_index = adapter_queue_info
             .find_matching_index(br::QueueFlags::GRAPHICS)
             .unwrap();
@@ -296,17 +362,25 @@ impl Subsystem {
                     &[1.0],
                 )],
                 &[],
-                &[c"VK_KHR_swapchain".into()],
+                &[
+                    c"VK_KHR_swapchain".into(),
+                    #[cfg(feature = "platform-macos")]
+                    c"VK_KHR_portability_subset".into(),
+                    #[cfg(feature = "platform-macos")]
+                    c"VK_KHR_synchronization2".into(),
+                    #[cfg(feature = "platform-macos")]
+                    c"VK_KHR_create_renderpass2".into(),
+                ],
             )
             .with_next(
                 &br::PhysicalDeviceFeatures2::new(br::vk::VkPhysicalDeviceFeatures {
-                    sparseBinding: true as _,
-                    sparseResidencyImage2D: true as _,
+                    sparseBinding: supported_features.features.sparseBinding,
+                    sparseResidencyImage2D: supported_features.features.sparseResidencyImage2D,
                     ..unsafe { core::mem::MaybeUninit::zeroed().assume_init() }
                 })
-                .with_next(&mut br::vk::VkPhysicalDeviceSynchronization2Features {
+                .with_next(&mut br::vk::VkPhysicalDeviceSynchronization2FeaturesKHR {
                     sType:
-                        <br::vk::VkPhysicalDeviceSynchronization2Features as br::TypedVulkanStructure>::TYPE,
+                        <br::vk::VkPhysicalDeviceSynchronization2FeaturesKHR as br::TypedVulkanStructure>::TYPE,
                     pNext: core::ptr::null_mut(),
                     synchronization2: 1,
                 }),
@@ -347,6 +421,7 @@ impl Subsystem {
             adapter_memory_info,
             adapter_properties,
             ft: RwLock::new(ft),
+            vk_ext_commands: SubsystemExtCommandCache::new(),
         }
     }
 
@@ -400,12 +475,27 @@ impl Subsystem {
         &self,
         buffers: &[br::CommandBufferSubmitInfo],
     ) -> br::Result<()> {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            let infos = [br::SubmitInfo2::new(&[], buffers, &[])];
+            (br::DeviceSynchronization2Extension::queue_submit2_khr_fn(self).0)(
+                self.graphics_queue,
+                1,
+                infos.as_ptr() as _,
+                <br::vk::VkFence as br::VkRawHandle>::NULL,
+            )
+            .into_result()?;
+        }
+        #[cfg(not(target_os = "macos"))]
         unsafe {
             br::vkfn_wrapper::queue_submit2(
                 br::VkHandleRefMut::dangling(self.graphics_queue),
                 &[br::SubmitInfo2::new(&[], buffers, &[])],
                 None,
             )?;
+        }
+
+        unsafe {
             br::vkfn_wrapper::queue_wait_idle(self.graphics_queue)?;
         }
 
@@ -418,6 +508,21 @@ impl Subsystem {
         works: &[br::SubmitInfo2],
         fence: Option<br::VkHandleRefMut<br::vk::VkFence>>,
     ) -> br::Result<()> {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            (br::DeviceSynchronization2Extension::queue_submit2_khr_fn(self).0)(
+                self.graphics_queue,
+                works.len() as _,
+                works.as_ptr() as _,
+                fence.map_or_else(
+                    || <br::vk::VkFence as br::VkRawHandle>::NULL,
+                    |f| f.native_ptr(),
+                ),
+            )
+            .into_result()
+            .map(drop)
+        }
+        #[cfg(not(target_os = "macos"))]
         unsafe {
             br::vkfn_wrapper::queue_submit2(
                 br::VkHandleRefMut::dangling(self.graphics_queue),
@@ -445,6 +550,91 @@ impl Subsystem {
                 fence,
             )
         }
+    }
+}
+
+struct SubsystemExtCommandCache {
+    #[cfg(target_os = "macos")]
+    queue_submit2: OnceCell<br::vk::PFN_vkQueueSubmit2KHR>,
+    #[cfg(target_os = "macos")]
+    create_render_pass2: OnceCell<br::vk::PFN_vkCreateRenderPass2KHR>,
+    #[cfg(target_os = "macos")]
+    cmd_pipeline_barrier2: OnceCell<br::vk::PFN_vkCmdPipelineBarrier2KHR>,
+    #[cfg(target_os = "macos")]
+    cmd_begin_render_pass2: OnceCell<br::vk::PFN_vkCmdBeginRenderPass2KHR>,
+    #[cfg(target_os = "macos")]
+    cmd_next_subpass2: OnceCell<br::vk::PFN_vkCmdNextSubpass2KHR>,
+    #[cfg(target_os = "macos")]
+    cmd_end_render_pass2: OnceCell<br::vk::PFN_vkCmdEndRenderPass2KHR>,
+}
+impl SubsystemExtCommandCache {
+    fn new() -> Self {
+        Self {
+            #[cfg(target_os = "macos")]
+            queue_submit2: OnceCell::new(),
+            #[cfg(target_os = "macos")]
+            create_render_pass2: OnceCell::new(),
+            #[cfg(target_os = "macos")]
+            cmd_pipeline_barrier2: OnceCell::new(),
+            #[cfg(target_os = "macos")]
+            cmd_begin_render_pass2: OnceCell::new(),
+            #[cfg(target_os = "macos")]
+            cmd_next_subpass2: OnceCell::new(),
+            #[cfg(target_os = "macos")]
+            cmd_end_render_pass2: OnceCell::new(),
+        }
+    }
+}
+#[cfg(target_os = "macos")]
+impl br::DeviceSynchronization2Extension for Subsystem {
+    #[inline]
+    fn queue_submit2_khr_fn(&self) -> bedrock::vk::PFN_vkQueueSubmit2KHR {
+        *self
+            .vk_ext_commands
+            .queue_submit2
+            .get_or_init(|| unsafe { br::vkfn_wrapper::get_device_proc_addr_pfn(self).unwrap() })
+    }
+
+    #[inline(always)]
+    fn cmd_pipeline_barrier_2_khr_fn(&self) -> bedrock::vk::PFN_vkCmdPipelineBarrier2KHR {
+        *self
+            .vk_ext_commands
+            .cmd_pipeline_barrier2
+            .get_or_init(|| unsafe { br::vkfn_wrapper::get_device_proc_addr_pfn(self).unwrap() })
+    }
+}
+#[cfg(target_os = "macos")]
+impl br::DeviceCreateRenderPass2Extension for Subsystem {
+    #[inline]
+    fn create_render_pass_2_khr_fn(&self) -> bedrock::vk::PFN_vkCreateRenderPass2KHR {
+        *self
+            .vk_ext_commands
+            .create_render_pass2
+            .get_or_init(|| unsafe { br::vkfn_wrapper::get_device_proc_addr_pfn(self).unwrap() })
+    }
+
+    #[inline]
+    fn cmd_begin_render_pass_2_khr_fn(&self) -> br::vk::PFN_vkCmdBeginRenderPass2KHR {
+        *self
+            .vk_ext_commands
+            .cmd_begin_render_pass2
+            .get_or_init(|| unsafe { br::vkfn_wrapper::get_device_proc_addr_pfn(self).unwrap() })
+    }
+
+    #[inline]
+    fn cmd_next_subpass_2_khr_fn(&self) -> br::vk::PFN_vkCmdNextSubpass2KHR {
+        *self
+            .vk_ext_commands
+            .cmd_next_subpass2
+            .get_or_init(|| unsafe { br::vkfn_wrapper::get_device_proc_addr_pfn(self).unwrap() })
+    }
+
+    #[inline]
+    fn cmd_end_render_pass_2_khr_fn(&self) -> br::vk::PFN_vkCmdEndRenderPass2KHR {
+        *self
+            .vk_ext_commands
+            .cmd_end_render_pass2
+            .get_or_init(|| unsafe { br::vkfn_wrapper::get_device_proc_addr_pfn(self).unwrap() })
     }
 }
 

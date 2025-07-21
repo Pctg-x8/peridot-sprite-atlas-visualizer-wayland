@@ -10,7 +10,8 @@ use crate::{
     VI_STATE_FLOAT2_ONLY, ViewInitContext,
     base_system::{
         AppBaseSystem, BufferMapMode, FontType, MemoryBoundBuffer, PixelFormat, RenderPassOptions,
-        RenderTexture, RenderTextureFlags, RenderTextureOptions,
+        RenderTexture, RenderTextureFlags, RenderTextureOptions, create_render_pass2,
+        inject_cmd_begin_render_pass2, inject_cmd_end_render_pass2, inject_cmd_pipeline_barrier_2,
         scratch_buffer::StagingScratchBufferManager,
     },
     composite::{
@@ -107,7 +108,7 @@ impl ToggleButtonView {
         )
         .unwrap();
 
-        let rp = br::RenderPassObject::new(
+        let rp = create_render_pass2(
             base_system.subsystem,
             &br::RenderPassCreateInfo2::new(
                 &[msaa_buffer
@@ -224,15 +225,19 @@ impl ToggleButtonView {
 
         base_system
             .sync_execute_graphics_commands(|rec| {
-                rec.begin_render_pass2(
-                    &br::RenderPassBeginInfo::new(
-                        &rp,
-                        &fb,
-                        msaa_buffer.render_region(),
-                        &[br::ClearValue::color_f32([0.0; 4])],
-                    ),
-                    &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-                )
+                rec.inject(|r| {
+                    inject_cmd_begin_render_pass2(
+                        r,
+                        base_system.subsystem,
+                        &br::RenderPassBeginInfo::new(
+                            &rp,
+                            &fb,
+                            msaa_buffer.render_region(),
+                            &[br::ClearValue::color_f32([0.0; 4])],
+                        ),
+                        &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                    )
+                })
                 .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline)
                 .bind_vertex_buffer_array(0, &[buf.as_transparent_ref()], &[0])
                 .bind_index_buffer(
@@ -241,26 +246,48 @@ impl ToggleButtonView {
                     br::IndexType::U16,
                 )
                 .draw_indexed(Self::ICON_INDICES.len() as _, 1, 0, 0, 0)
-                .end_render_pass2(&br::SubpassEndInfo::new())
-                .begin_render_pass2(
-                    &br::RenderPassBeginInfo::new(
-                        &rp_direct,
-                        &fb_direct,
-                        circle_atlas_rect.vk_rect(),
-                        &[br::ClearValue::color_f32([0.0; 4])],
-                    ),
-                    &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-                )
+                .inject(|r| {
+                    inject_cmd_end_render_pass2(
+                        r,
+                        base_system.subsystem,
+                        &br::SubpassEndInfo::new(),
+                    )
+                })
+                .inject(|r| {
+                    inject_cmd_begin_render_pass2(
+                        r,
+                        base_system.subsystem,
+                        &br::RenderPassBeginInfo::new(
+                            &rp_direct,
+                            &fb_direct,
+                            circle_atlas_rect.vk_rect(),
+                            &[br::ClearValue::color_f32([0.0; 4])],
+                        ),
+                        &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                    )
+                })
                 .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline_circle)
                 .draw(3, 1, 0, 0)
-                .end_render_pass2(&br::SubpassEndInfo::new())
-                .pipeline_barrier_2(&br::DependencyInfo::new(
-                    &[],
-                    &[],
-                    &[base_system
-                        .barrier_for_mask_atlas_resource()
-                        .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
-                ))
+                .inject(|r| {
+                    inject_cmd_end_render_pass2(
+                        r,
+                        base_system.subsystem,
+                        &br::SubpassEndInfo::new(),
+                    )
+                })
+                .inject(|r| {
+                    inject_cmd_pipeline_barrier_2(
+                        r,
+                        base_system.subsystem,
+                        &br::DependencyInfo::new(
+                            &[],
+                            &[],
+                            &[base_system
+                                .barrier_for_mask_atlas_resource()
+                                .transit_to(br::ImageLayout::TransferDestOpt.from_undefined())],
+                        ),
+                    )
+                })
                 .resolve_image(
                     msaa_buffer.as_image(),
                     br::ImageLayout::TransferSrcOpt,
@@ -282,23 +309,30 @@ impl ToggleButtonView {
                         extent: icon_atlas_rect.extent().with_depth(1),
                     }],
                 )
-                .pipeline_barrier_2(&br::DependencyInfo::new(
-                    &[],
-                    &[],
-                    &[base_system
-                        .barrier_for_mask_atlas_resource()
-                        .from(
-                            br::PipelineStageFlags2::RESOLVE,
-                            br::AccessFlags2::TRANSFER.write,
-                        )
-                        .to(
-                            br::PipelineStageFlags2::FRAGMENT_SHADER,
-                            br::AccessFlags2::SHADER_SAMPLED_READ,
-                        )
-                        .transit_from(
-                            br::ImageLayout::TransferDestOpt.to(br::ImageLayout::ShaderReadOnlyOpt),
-                        )],
-                ))
+                .inject(|r| {
+                    inject_cmd_pipeline_barrier_2(
+                        r,
+                        base_system.subsystem,
+                        &br::DependencyInfo::new(
+                            &[],
+                            &[],
+                            &[base_system
+                                .barrier_for_mask_atlas_resource()
+                                .from(
+                                    br::PipelineStageFlags2::RESOLVE,
+                                    br::AccessFlags2::TRANSFER.write,
+                                )
+                                .to(
+                                    br::PipelineStageFlags2::FRAGMENT_SHADER,
+                                    br::AccessFlags2::SHADER_SAMPLED_READ,
+                                )
+                                .transit_from(
+                                    br::ImageLayout::TransferDestOpt
+                                        .to(br::ImageLayout::ShaderReadOnlyOpt),
+                                )],
+                        ),
+                    )
+                })
             })
             .unwrap();
     }
@@ -1030,15 +1064,19 @@ impl FrameView {
 
         base_system
             .sync_execute_graphics_commands(|rec| {
-                rec.begin_render_pass2(
-                    &br::RenderPassBeginInfo::new(
-                        &render_pass,
-                        &title_blurred_work_framebuffer,
-                        work_rt.render_region(),
-                        &[br::ClearValue::color_f32([0.0; 4])],
-                    ),
-                    &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-                )
+                rec.inject(|r| {
+                    inject_cmd_begin_render_pass2(
+                        r,
+                        base_system.subsystem,
+                        &br::RenderPassBeginInfo::new(
+                            &render_pass,
+                            &title_blurred_work_framebuffer,
+                            work_rt.render_region(),
+                            &[br::ClearValue::color_f32([0.0; 4])],
+                        ),
+                        &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                    )
+                })
                 .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline_blur1)
                 .bind_descriptor_sets(
                     br::PipelineBindPoint::Graphics,
@@ -1073,16 +1111,26 @@ impl FrameView {
                     &fsh_h_params,
                 )
                 .draw(3, 1, 0, 0)
-                .end_render_pass2(&br::SubpassEndInfo::new())
-                .begin_render_pass2(
-                    &br::RenderPassBeginInfo::new(
-                        &render_pass,
-                        &framebuffer,
-                        blurred_atlas_rect.vk_rect(),
-                        &[br::ClearValue::color_f32([0.0; 4])],
-                    ),
-                    &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-                )
+                .inject(|r| {
+                    inject_cmd_end_render_pass2(
+                        r,
+                        base_system.subsystem,
+                        &br::SubpassEndInfo::new(),
+                    )
+                })
+                .inject(|r| {
+                    inject_cmd_begin_render_pass2(
+                        r,
+                        base_system.subsystem,
+                        &br::RenderPassBeginInfo::new(
+                            &render_pass,
+                            &framebuffer,
+                            blurred_atlas_rect.vk_rect(),
+                            &[br::ClearValue::color_f32([0.0; 4])],
+                        ),
+                        &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                    )
+                })
                 .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline_blur)
                 .bind_descriptor_sets(
                     br::PipelineBindPoint::Graphics,
@@ -1104,7 +1152,13 @@ impl FrameView {
                     &fsh_v_params,
                 )
                 .draw(3, 1, 0, 0)
-                .end_render_pass2(&br::SubpassEndInfo::new())
+                .inject(|r| {
+                    inject_cmd_end_render_pass2(
+                        r,
+                        base_system.subsystem,
+                        &br::SubpassEndInfo::new(),
+                    )
+                })
             })
             .unwrap();
     }

@@ -2,12 +2,17 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use bedrock::{self as br, Image, ImageChild, MemoryBound, TypedVulkanStructure, VkHandle};
+use bedrock::{
+    self as br, DeviceChildHandle, Image, ImageChild, MemoryBound, ShaderModule,
+    TypedVulkanStructure, VkHandle, VkObject,
+};
 
 use crate::{
-    AppEvent, AppEventBus,
+    AppEvent, AppEventBus, BLEND_STATE_SINGLE_NONE, IA_STATE_TRILIST, MS_STATE_EMPTY,
+    RASTER_STATE_DEFAULT_FILL_NOCULL, VI_STATE_EMPTY,
     base_system::{
-        inject_cmd_begin_render_pass2, inject_cmd_end_render_pass2, inject_cmd_pipeline_barrier_2,
+        AppBaseSystem, create_render_pass2, inject_cmd_begin_render_pass2,
+        inject_cmd_end_render_pass2, inject_cmd_pipeline_barrier_2,
     },
     helper_types::SafeF32,
     mathext::Matrix4,
@@ -1413,13 +1418,8 @@ pub fn populate_composite_render_commands<'x, 'r>(
     backdrop_buffer_descriptor_sets: &[br::DescriptorSet],
     grab_buffer: &(impl br::ImageView + br::ImageChild),
     current_rt_image: &impl br::VkHandle<Handle = br::vk::VkImage>,
-    backdrop_blur_render_pass: &impl br::VkHandle<Handle = br::vk::VkRenderPass>,
-    backdrop_blur_pipeline_layout: &impl br::VkHandle<Handle = br::vk::VkPipelineLayout>,
-    backdrop_blur_downsample_pipelines: &[impl br::VkHandle<Handle = br::vk::VkPipeline>],
-    backdrop_blur_upsample_pipelines: &[impl br::VkHandle<Handle = br::vk::VkPipeline>],
+    backdrop_fx_blur_processor: &BackdropEffectBlurProcessor,
     backdrop_blur_fixed_descriptors: &[br::DescriptorSet],
-    backdrop_blur_downsample_fixed_fbs: &[impl br::VkHandle<Handle = br::vk::VkFramebuffer>],
-    backdrop_blur_upsample_fixed_fbs: &[impl br::VkHandle<Handle = br::vk::VkFramebuffer>],
     backdrop_blur_destination_fbs: &[impl br::VkHandle<Handle = br::vk::VkFramebuffer>],
 ) -> br::CmdRecord<'x> {
     let render_region = target_size.into_rect(br::Offset2D::ZERO);
@@ -1684,112 +1684,538 @@ pub fn populate_composite_render_commands<'x, 'r>(
                 // 本来は必要な範囲だけ処理できれば効率いいんだけど面倒なので全面処理しちゃう
                 ..
             } => {
-                // downsample
-                for lv in 0..BLUR_SAMPLE_STEPS {
-                    rec = rec
-                        .inject(|r| {
-                            inject_cmd_begin_render_pass2(
-                                r,
-                                subsystem,
-                                &br::RenderPassBeginInfo::new(
-                                    backdrop_blur_render_pass,
-                                    &backdrop_blur_downsample_fixed_fbs[lv],
-                                    br::Rect2D {
-                                        offset: br::Offset2D::ZERO,
-                                        extent: br::Extent2D {
-                                            width: target_size.width >> (lv + 1),
-                                            height: target_size.height >> (lv + 1),
-                                        },
-                                    },
-                                    &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 0.0])],
-                                ),
-                                &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-                            )
-                        })
-                        .bind_pipeline(
-                            br::PipelineBindPoint::Graphics,
-                            &backdrop_blur_downsample_pipelines[lv],
-                        )
-                        .push_constant(
-                            backdrop_blur_pipeline_layout,
-                            br::vk::VK_SHADER_STAGE_VERTEX_BIT,
-                            0,
-                            &[
-                                ((target_size.width >> lv) as f32).recip(),
-                                ((target_size.height >> lv) as f32).recip(),
-                                stdev.value(),
-                            ],
-                        )
-                        .bind_descriptor_sets(
-                            br::PipelineBindPoint::Graphics,
-                            backdrop_blur_pipeline_layout,
-                            0,
-                            &[backdrop_blur_fixed_descriptors[lv]],
-                            &[],
-                        )
-                        .draw(3, 1, 0, 0)
-                        .inject(|r| {
-                            inject_cmd_end_render_pass2(r, subsystem, &br::SubpassEndInfo::new())
-                        });
-                }
-                // upsample
-                for lv in (0..BLUR_SAMPLE_STEPS).rev() {
-                    rec = rec
-                        .inject(|r| {
-                            inject_cmd_begin_render_pass2(
-                                r,
-                                subsystem,
-                                &br::RenderPassBeginInfo::new(
-                                    backdrop_blur_render_pass,
-                                    &if lv == 0 {
-                                        // final upsample
-                                        backdrop_blur_destination_fbs[dest_backdrop_buffer]
-                                            .as_transparent_ref()
-                                    } else {
-                                        backdrop_blur_upsample_fixed_fbs[lv - 1]
-                                            .as_transparent_ref()
-                                    },
-                                    br::Extent2D {
-                                        width: target_size.width >> lv,
-                                        height: target_size.height >> lv,
-                                    }
-                                    .into_rect(br::Offset2D::ZERO),
-                                    &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 0.0])],
-                                ),
-                                &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-                            )
-                        })
-                        .bind_pipeline(
-                            br::PipelineBindPoint::Graphics,
-                            &backdrop_blur_upsample_pipelines[lv],
-                        )
-                        .push_constant(
-                            backdrop_blur_pipeline_layout,
-                            br::vk::VK_SHADER_STAGE_VERTEX_BIT,
-                            0,
-                            &[
-                                ((target_size.width >> (lv + 1)) as f32).recip(),
-                                ((target_size.height >> (lv + 1)) as f32).recip(),
-                                stdev.value(),
-                            ],
-                        )
-                        .bind_descriptor_sets(
-                            br::PipelineBindPoint::Graphics,
-                            backdrop_blur_pipeline_layout,
-                            0,
-                            &[backdrop_blur_fixed_descriptors[lv + 1]],
-                            &[],
-                        )
-                        .draw(3, 1, 0, 0)
-                        .inject(|r| {
-                            inject_cmd_end_render_pass2(r, subsystem, &br::SubpassEndInfo::new())
-                        });
-                }
+                rec = backdrop_fx_blur_processor.populate_commands(
+                    rec,
+                    stdev,
+                    &backdrop_blur_destination_fbs[dest_backdrop_buffer],
+                    subsystem,
+                    target_size,
+                    backdrop_blur_fixed_descriptors,
+                );
             }
         };
     }
 
     rec
+}
+
+pub struct BackdropEffectBlurProcessor<'subsystem> {
+    render_pass: br::RenderPassObject<&'subsystem Subsystem>,
+    temporal_buffers: Vec<br::ImageViewObject<br::ImageObject<&'subsystem Subsystem>>>,
+    temporal_buffer_memory: br::DeviceMemoryObject<&'subsystem Subsystem>,
+    downsample_pass_fbs: Vec<br::vk::VkFramebuffer>,
+    upsample_pass_fixed_fbs: Vec<br::vk::VkFramebuffer>,
+    _sampler: br::SamplerObject<&'subsystem Subsystem>,
+    input_dsl: br::DescriptorSetLayoutObject<&'subsystem Subsystem>,
+    pipeline_layout: br::PipelineLayoutObject<&'subsystem Subsystem>,
+    downsample_pipelines: Vec<br::PipelineObject<&'subsystem Subsystem>>,
+    upsample_pipelines: Vec<br::PipelineObject<&'subsystem Subsystem>>,
+}
+impl Drop for BackdropEffectBlurProcessor<'_> {
+    fn drop(&mut self) {
+        self.clear_framebuffers();
+    }
+}
+impl<'subsystem> BackdropEffectBlurProcessor<'subsystem> {
+    pub fn new(
+        base_system: &mut AppBaseSystem<'subsystem>,
+        rt_size: br::Extent2D,
+        rt_format: br::Format,
+    ) -> Self {
+        let render_pass = create_render_pass2(
+            base_system.subsystem,
+            &br::RenderPassCreateInfo2::new(
+                &[br::AttachmentDescription2::new(rt_format)
+                    .with_layout_to(br::ImageLayout::ShaderReadOnlyOpt.from_undefined())
+                    .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store)],
+                &[br::SubpassDescription2::new()
+                    .colors(&[br::AttachmentReference2::color_attachment_opt(0)])],
+                &[br::SubpassDependency2::new(
+                    br::SubpassIndex::Internal(0),
+                    br::SubpassIndex::External,
+                )
+                .of_memory(
+                    br::AccessFlags::COLOR_ATTACHMENT.write,
+                    br::AccessFlags::SHADER.read,
+                )
+                .of_execution(
+                    br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    br::PipelineStageFlags::FRAGMENT_SHADER,
+                )],
+            ),
+        )
+        .unwrap();
+        render_pass
+            .set_name(Some(c"Composite BackdropFx(Blur) ProcessRenderPass"))
+            .unwrap();
+
+        let mut temporal_buffers = Vec::with_capacity(BLUR_SAMPLE_STEPS);
+        let temporal_buffer_memory =
+            Self::create_temporal_buffers(base_system, rt_size, rt_format, &mut temporal_buffers);
+
+        let (downsample_pass_fbs, upsample_pass_fixed_fbs) =
+            Self::create_framebuffers(base_system, &temporal_buffers, &render_pass, rt_size);
+
+        let sampler = br::SamplerObject::new(
+            base_system.subsystem,
+            &br::SamplerCreateInfo::new()
+                .filter(br::FilterMode::Linear, br::FilterMode::Linear)
+                .addressing(
+                    br::AddressingMode::MirroredRepeat,
+                    br::AddressingMode::MirroredRepeat,
+                    br::AddressingMode::MirroredRepeat,
+                ),
+        )
+        .unwrap();
+        let input_dsl = br::DescriptorSetLayoutObject::new(
+            base_system.subsystem,
+            &br::DescriptorSetLayoutCreateInfo::new(&[br::DescriptorType::CombinedImageSampler
+                .make_binding(0, 1)
+                .only_for_fragment()
+                .with_immutable_samplers(&[sampler.as_transparent_ref()])]),
+        )
+        .unwrap();
+
+        let pipeline_layout = br::PipelineLayoutObject::new(
+            base_system.subsystem,
+            &br::PipelineLayoutCreateInfo::new(
+                &[input_dsl.as_transparent_ref()],
+                &[br::PushConstantRange::for_type::<[f32; 3]>(
+                    br::vk::VK_SHADER_STAGE_VERTEX_BIT,
+                    0,
+                )],
+            ),
+        )
+        .unwrap();
+        let (downsample_pipelines, upsample_pipelines) =
+            Self::create_pipelines(base_system, rt_size, &pipeline_layout, &render_pass);
+
+        Self {
+            downsample_pass_fbs: downsample_pass_fbs
+                .into_iter()
+                .map(|x| x.unmanage().0)
+                .collect(),
+            upsample_pass_fixed_fbs: upsample_pass_fixed_fbs
+                .into_iter()
+                .map(|x| x.unmanage().0)
+                .collect(),
+            render_pass,
+            temporal_buffers,
+            temporal_buffer_memory,
+            _sampler: sampler,
+            input_dsl,
+            pipeline_layout,
+            downsample_pipelines,
+            upsample_pipelines,
+        }
+    }
+
+    fn create_pipelines(
+        base_system: &mut AppBaseSystem<'subsystem>,
+        rt_size: br::Extent2D,
+        pipeline_layout: &(impl br::VkHandle<Handle = br::vk::VkPipelineLayout> + ?Sized),
+        render_pass: &(impl br::RenderPass + ?Sized),
+    ) -> (
+        Vec<br::PipelineObject<&'subsystem Subsystem>>,
+        Vec<br::PipelineObject<&'subsystem Subsystem>>,
+    ) {
+        let (downsample_vsh, downsample_fsh) = (
+            base_system.require_shader("resources/dual_kawase_filter/downsample.vert"),
+            base_system.require_shader("resources/dual_kawase_filter/downsample.frag"),
+        );
+        let (upsample_vsh, upsample_fsh) = (
+            base_system.require_shader("resources/dual_kawase_filter/upsample.vert"),
+            base_system.require_shader("resources/dual_kawase_filter/upsample.frag"),
+        );
+        let downsample_stages = [
+            downsample_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+            downsample_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
+        ];
+        let upsample_stages = [
+            upsample_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
+            upsample_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
+        ];
+
+        let viewport_scissors = (0..=BLUR_SAMPLE_STEPS)
+            .map(|lv| {
+                let size = br::Extent2D {
+                    width: rt_size.width >> lv,
+                    height: rt_size.height >> lv,
+                };
+
+                (
+                    [size.into_rect(br::Offset2D::ZERO).make_viewport(0.0..1.0)],
+                    [size.into_rect(br::Offset2D::ZERO)],
+                )
+            })
+            .collect::<Vec<_>>();
+        let viewport_states = viewport_scissors
+            .iter()
+            .map(|(vp, sc)| br::PipelineViewportStateCreateInfo::new(vp, sc))
+            .collect::<Vec<_>>();
+        let downsample_pipelines = base_system
+            .create_graphics_pipelines(
+                &viewport_states[1..]
+                    .iter()
+                    .map(|vp_state| {
+                        br::GraphicsPipelineCreateInfo::new(
+                            &pipeline_layout,
+                            render_pass.subpass(0),
+                            &downsample_stages,
+                            VI_STATE_EMPTY,
+                            IA_STATE_TRILIST,
+                            vp_state,
+                            RASTER_STATE_DEFAULT_FILL_NOCULL,
+                            BLEND_STATE_SINGLE_NONE,
+                        )
+                        .set_multisample_state(MS_STATE_EMPTY)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let upsample_pipelines = base_system
+            .create_graphics_pipelines(
+                &viewport_states[..viewport_states.len() - 1]
+                    .iter()
+                    .map(|vp_state| {
+                        br::GraphicsPipelineCreateInfo::new(
+                            &pipeline_layout,
+                            render_pass.subpass(0),
+                            &upsample_stages,
+                            VI_STATE_EMPTY,
+                            IA_STATE_TRILIST,
+                            vp_state,
+                            RASTER_STATE_DEFAULT_FILL_NOCULL,
+                            BLEND_STATE_SINGLE_NONE,
+                        )
+                        .set_multisample_state(MS_STATE_EMPTY)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+
+        (downsample_pipelines, upsample_pipelines)
+    }
+
+    fn create_temporal_buffers(
+        base_system: &mut AppBaseSystem<'subsystem>,
+        rt_size: br::Extent2D,
+        rt_format: br::Format,
+        object_sink: &mut Vec<br::ImageViewObject<br::ImageObject<&'subsystem Subsystem>>>,
+    ) -> br::DeviceMemoryObject<&'subsystem Subsystem> {
+        let mut resources_offsets = Vec::with_capacity(BLUR_SAMPLE_STEPS);
+        let mut top = 0;
+        let mut memory_index_mask = !0u32;
+        for lv in 1..=BLUR_SAMPLE_STEPS {
+            let r = br::ImageObject::new(
+                base_system.subsystem,
+                &br::ImageCreateInfo::new(
+                    br::Extent2D {
+                        width: rt_size.width >> lv,
+                        height: rt_size.height >> lv,
+                    },
+                    rt_format,
+                )
+                .with_usage(br::ImageUsageFlags::SAMPLED | br::ImageUsageFlags::COLOR_ATTACHMENT),
+            )
+            .unwrap();
+            let req = r.requirements();
+            assert!(req.alignment.is_power_of_two());
+            let offset = (top + req.alignment - 1) & !(req.alignment - 1);
+
+            top = offset + req.size;
+            memory_index_mask &= req.memoryTypeBits;
+            resources_offsets.push((r, offset));
+        }
+        let memory_object = base_system.alloc_device_local_memory(top, memory_index_mask);
+        for (mut r, o) in resources_offsets {
+            r.bind(&memory_object, o as _).unwrap();
+
+            object_sink.push(
+                br::ImageViewBuilder::new(
+                    r,
+                    br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+                )
+                .create()
+                .unwrap(),
+            );
+        }
+
+        memory_object
+    }
+
+    /// returns: (downsample, upsample_fixed(only for temporal buffers))
+    fn create_framebuffers<'r>(
+        base_system: &mut AppBaseSystem<'subsystem>,
+        temporal_buffers: &'r [br::ImageViewObject<br::ImageObject<&'subsystem Subsystem>>],
+        render_pass: &(impl br::VkHandle<Handle = br::vk::VkRenderPass> + ?Sized),
+        rt_size: br::Extent2D,
+    ) -> (
+        Vec<br::FramebufferObject<'r, &'subsystem Subsystem>>,
+        Vec<br::FramebufferObject<'r, &'subsystem Subsystem>>,
+    ) {
+        let mut downsample_pass_fbs = Vec::with_capacity(temporal_buffers.len());
+        let mut upsample_pass_fixed_fbs = Vec::with_capacity(temporal_buffers.len() - 1);
+        for (n, b) in temporal_buffers.iter().enumerate() {
+            let lv = n + 1;
+            let bufsize = br::Extent2D {
+                width: rt_size.width >> lv,
+                height: rt_size.height >> lv,
+            };
+
+            downsample_pass_fbs.push(
+                br::FramebufferObject::new(
+                    base_system.subsystem,
+                    &br::FramebufferCreateInfo::new(
+                        render_pass,
+                        &[b.as_transparent_ref()],
+                        bufsize.width,
+                        bufsize.height,
+                    ),
+                )
+                .unwrap(),
+            );
+            if lv != temporal_buffers.len() {
+                upsample_pass_fixed_fbs.push(
+                    br::FramebufferObject::new(
+                        base_system.subsystem,
+                        &br::FramebufferCreateInfo::new(
+                            render_pass,
+                            &[b.as_transparent_ref()],
+                            bufsize.width,
+                            bufsize.height,
+                        ),
+                    )
+                    .unwrap(),
+                );
+            }
+        }
+
+        (downsample_pass_fbs, upsample_pass_fixed_fbs)
+    }
+
+    fn clear_framebuffers(&mut self) {
+        // assuming that Framebuffer and RenderPass are created from same Device
+        for x in self.downsample_pass_fbs.drain(..) {
+            unsafe {
+                br::vkfn_wrapper::destroy_framebuffer(self.render_pass.device_handle(), x, None);
+            }
+        }
+        for x in self.upsample_pass_fixed_fbs.drain(..) {
+            unsafe {
+                br::vkfn_wrapper::destroy_framebuffer(self.render_pass.device_handle(), x, None);
+            }
+        }
+    }
+
+    pub const fn fixed_descriptor_set_count(&self) -> usize {
+        BLUR_SAMPLE_STEPS + 1
+    }
+
+    pub fn alloc_fixed_descriptor_sets(
+        &self,
+        dp: &mut (impl br::DescriptorPoolMut + ?Sized),
+    ) -> Vec<br::DescriptorSet> {
+        dp.alloc(
+            &core::iter::repeat_n(
+                self.input_dsl.as_transparent_ref(),
+                self.fixed_descriptor_set_count(),
+            )
+            .collect::<Vec<_>>(),
+        )
+        .unwrap()
+    }
+
+    pub fn write_input_descriptor_sets<'s>(
+        &'s self,
+        writes: &mut Vec<br::DescriptorSetWriteInfo<'s>>,
+        first_input: &'s (impl br::VkHandle<Handle = br::vk::VkImageView> + ?Sized),
+        descriptor_sets: &[br::DescriptorSet],
+    ) {
+        writes.reserve(1 + BLUR_SAMPLE_STEPS);
+        self.write_first_input_descriptor_set(writes, first_input, descriptor_sets[0]);
+        writes.extend((0..BLUR_SAMPLE_STEPS).map(|n| {
+            descriptor_sets[n + 1].binding_at(0).write(
+                br::DescriptorContents::CombinedImageSampler(vec![br::DescriptorImageInfo::new(
+                    &self.temporal_buffers[n],
+                    br::ImageLayout::ShaderReadOnlyOpt,
+                )]),
+            )
+        }));
+    }
+
+    pub fn write_first_input_descriptor_set<'s>(
+        &'s self,
+        writes: &mut Vec<br::DescriptorSetWriteInfo<'s>>,
+        first_input: &'s (impl br::VkHandle<Handle = br::vk::VkImageView> + ?Sized),
+        descriptor_set: br::DescriptorSet,
+    ) {
+        writes.push(descriptor_set.binding_at(0).write(
+            br::DescriptorContents::CombinedImageSampler(vec![br::DescriptorImageInfo::new(
+                first_input,
+                br::ImageLayout::ShaderReadOnlyOpt,
+            )]),
+        ));
+    }
+
+    pub const fn final_render_pass(&self) -> &(impl br::RenderPass + use<'subsystem>) {
+        &self.render_pass
+    }
+
+    pub fn populate_commands<'x>(
+        &self,
+        mut rec: br::CmdRecord<'x>,
+        stdev: SafeF32,
+        dest_fb: &(impl br::VkHandle<Handle = br::vk::VkFramebuffer> + ?Sized),
+        subsystem: &'subsystem Subsystem,
+        rt_size: br::Extent2D,
+        input_descriptor_sets: &[br::DescriptorSet],
+    ) -> br::CmdRecord<'x> {
+        // downsample
+        for lv in 1..=BLUR_SAMPLE_STEPS {
+            rec = rec
+                .inject(|r| {
+                    inject_cmd_begin_render_pass2(
+                        r,
+                        subsystem,
+                        &br::RenderPassBeginInfo::new(
+                            &self.render_pass,
+                            &&unsafe {
+                                br::VkHandleRef::dangling(self.downsample_pass_fbs[lv - 1])
+                            },
+                            br::Extent2D {
+                                width: rt_size.width >> lv,
+                                height: rt_size.height >> lv,
+                            }
+                            .into_rect(br::Offset2D::ZERO),
+                            &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 0.0])],
+                        ),
+                        &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                    )
+                })
+                .bind_pipeline(
+                    br::PipelineBindPoint::Graphics,
+                    &self.downsample_pipelines[lv - 1],
+                )
+                .push_constant(
+                    &self.pipeline_layout,
+                    br::vk::VK_SHADER_STAGE_VERTEX_BIT,
+                    0,
+                    &[
+                        ((rt_size.width >> (lv - 1)) as f32).recip(),
+                        ((rt_size.height >> (lv - 1)) as f32).recip(),
+                        stdev.value(),
+                    ],
+                )
+                .bind_descriptor_sets(
+                    br::PipelineBindPoint::Graphics,
+                    &self.pipeline_layout,
+                    0,
+                    &[input_descriptor_sets[lv - 1]],
+                    &[],
+                )
+                .draw(3, 1, 0, 0)
+                .inject(|r| inject_cmd_end_render_pass2(r, subsystem, &br::SubpassEndInfo::new()));
+        }
+        // upsample
+        for lv in (0..BLUR_SAMPLE_STEPS).rev() {
+            rec = rec
+                .inject(|r| {
+                    inject_cmd_begin_render_pass2(
+                        r,
+                        subsystem,
+                        &br::RenderPassBeginInfo::new(
+                            &self.render_pass,
+                            &if lv == 0 {
+                                // final upsample
+                                dest_fb.as_transparent_ref()
+                            } else {
+                                unsafe {
+                                    br::VkHandleRef::dangling(self.upsample_pass_fixed_fbs[lv - 1])
+                                }
+                            },
+                            br::Extent2D {
+                                width: rt_size.width >> lv,
+                                height: rt_size.height >> lv,
+                            }
+                            .into_rect(br::Offset2D::ZERO),
+                            &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 0.0])],
+                        ),
+                        &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                    )
+                })
+                .bind_pipeline(
+                    br::PipelineBindPoint::Graphics,
+                    &self.upsample_pipelines[lv],
+                )
+                .push_constant(
+                    &self.pipeline_layout,
+                    br::vk::VK_SHADER_STAGE_VERTEX_BIT,
+                    0,
+                    &[
+                        ((rt_size.width >> (lv + 1)) as f32).recip(),
+                        ((rt_size.height >> (lv + 1)) as f32).recip(),
+                        stdev.value(),
+                    ],
+                )
+                .bind_descriptor_sets(
+                    br::PipelineBindPoint::Graphics,
+                    &self.pipeline_layout,
+                    0,
+                    &[input_descriptor_sets[lv + 1]],
+                    &[],
+                )
+                .draw(3, 1, 0, 0)
+                .inject(|r| inject_cmd_end_render_pass2(r, subsystem, &br::SubpassEndInfo::new()));
+        }
+
+        rec
+    }
+
+    pub fn recreate_rt_resources(
+        &mut self,
+        base_system: &mut AppBaseSystem<'subsystem>,
+        rt_size: br::Extent2D,
+        rt_format: br::Format,
+    ) {
+        self.clear_framebuffers();
+        self.temporal_buffers.clear();
+        unsafe {
+            // release resources at first
+            core::ptr::drop_in_place(&mut self.temporal_buffer_memory);
+            core::ptr::write(
+                &mut self.temporal_buffer_memory,
+                Self::create_temporal_buffers(
+                    base_system,
+                    rt_size,
+                    rt_format,
+                    &mut self.temporal_buffers,
+                ),
+            );
+        }
+
+        let (downsample_pass_fbs, upsample_pass_fixed_fbs) = Self::create_framebuffers(
+            base_system,
+            &self.temporal_buffers,
+            &self.render_pass,
+            rt_size,
+        );
+        self.downsample_pass_fbs
+            .extend(downsample_pass_fbs.into_iter().map(|x| x.unmanage().0));
+        self.upsample_pass_fixed_fbs
+            .extend(upsample_pass_fixed_fbs.into_iter().map(|x| x.unmanage().0));
+
+        self.downsample_pipelines.clear();
+        self.upsample_pipelines.clear();
+        let (downsample_pipelines, upsample_pipelines) = Self::create_pipelines(
+            base_system,
+            rt_size,
+            &self.pipeline_layout,
+            &self.render_pass,
+        );
+        self.downsample_pipelines.extend(downsample_pipelines);
+        self.upsample_pipelines.extend(upsample_pipelines);
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -53,7 +53,7 @@ use bedrock::{
 };
 use bg_worker::{BackgroundWorker, BackgroundWorkerViewFeedback};
 use composite::{
-    AnimatableColor, AnimatableFloat, AnimationCurve, BLUR_SAMPLE_STEPS,
+    AnimatableColor, AnimatableFloat, AnimationCurve, BackdropEffectBlurProcessor,
     COMPOSITE_PUSH_CONSTANT_RANGES, CompositeInstanceData, CompositeMode, CompositeRect,
     CompositeRenderingData, CompositeStreamingData, CompositeTree, CompositeTreeFloatParameterRef,
     CompositeTreeRef, RenderPassAfterOperation, RenderPassRequirements,
@@ -1527,32 +1527,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     main_rp_continue_final
         .set_name(Some(c"main_rp_continue_final"))
         .unwrap();
-    let composite_backdrop_blur_rp = create_render_pass2(
-        app_system.subsystem,
-        &br::RenderPassCreateInfo2::new(
-            &[br::AttachmentDescription2::new(sc.color_format())
-                .with_layout_to(br::ImageLayout::ShaderReadOnlyOpt.from_undefined())
-                .color_memory_op(br::LoadOp::DontCare, br::StoreOp::Store)],
-            &[br::SubpassDescription2::new()
-                .colors(&[br::AttachmentReference2::color_attachment_opt(0)])],
-            &[br::SubpassDependency2::new(
-                br::SubpassIndex::Internal(0),
-                br::SubpassIndex::External,
-            )
-            .of_memory(
-                br::AccessFlags::COLOR_ATTACHMENT.write,
-                br::AccessFlags::SHADER.read,
-            )
-            .of_execution(
-                br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                br::PipelineStageFlags::FRAGMENT_SHADER,
-            )],
-        ),
-    )
-    .unwrap();
-    composite_backdrop_blur_rp
-        .set_name(Some(c"composite_backdrop_blur_rp"))
-        .unwrap();
 
     let mut main_grabbed_fbs = sc
         .backbuffer_views()
@@ -1615,79 +1589,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         })
         .collect::<Vec<_>>();
 
-    let mut blur_temporal_buffers = Vec::with_capacity(BLUR_SAMPLE_STEPS);
-    let mut resources_offsets = Vec::with_capacity(BLUR_SAMPLE_STEPS);
-    let mut top = 0;
-    let mut memory_index_mask = !0u32;
-    for lv in 0..BLUR_SAMPLE_STEPS {
-        let r = br::ImageObject::new(
-            app_system.subsystem,
-            &br::ImageCreateInfo::new(
-                br::Extent2D {
-                    width: sc.size.width >> (lv + 1),
-                    height: sc.size.height >> (lv + 1),
-                },
-                sc.color_format(),
-            )
-            .with_usage(br::ImageUsageFlags::SAMPLED | br::ImageUsageFlags::COLOR_ATTACHMENT),
-        )
-        .unwrap();
-        let req = r.requirements();
-        assert!(req.alignment.is_power_of_two());
-        let offset = (top + req.alignment - 1) & !(req.alignment - 1);
-
-        top = offset + req.size;
-        memory_index_mask &= req.memoryTypeBits;
-        resources_offsets.push((r, offset));
-    }
-    let mut blur_temporal_buffer_memory =
-        app_system.alloc_device_local_memory(top, memory_index_mask);
-    for (mut r, o) in resources_offsets {
-        r.bind(&blur_temporal_buffer_memory, o as _).unwrap();
-
-        blur_temporal_buffers.push(
-            br::ImageViewBuilder::new(
-                r,
-                br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
-            )
-            .create()
-            .unwrap(),
-        );
-    }
-    let mut blur_downsample_pass_fbs = blur_temporal_buffers
-        .iter()
-        .enumerate()
-        .map(|(lv, b)| {
-            br::FramebufferObject::new(
-                app_system.subsystem,
-                &br::FramebufferCreateInfo::new(
-                    &composite_backdrop_blur_rp,
-                    &[b.as_transparent_ref()],
-                    sc.size.width >> (lv + 1),
-                    sc.size.height >> (lv + 1),
-                ),
-            )
-            .unwrap()
-        })
-        .collect::<Vec<_>>();
-    let mut blur_upsample_pass_fixed_fbs = blur_temporal_buffers
-        .iter()
-        .take(blur_temporal_buffers.len() - 1)
-        .enumerate()
-        .map(|(lv, b)| {
-            br::FramebufferObject::new(
-                app_system.subsystem,
-                &br::FramebufferCreateInfo::new(
-                    &composite_backdrop_blur_rp,
-                    &[b.as_transparent_ref()],
-                    sc.size.width >> (lv + 1),
-                    sc.size.height >> (lv + 1),
-                ),
-            )
-            .unwrap()
-        })
-        .collect::<Vec<_>>();
-
     let composite_sampler =
         br::SamplerObject::new(app_system.subsystem, &br::SamplerCreateInfo::new()).unwrap();
 
@@ -1696,22 +1597,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     let composite_shader_stages = [
         composite_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
         composite_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
-    ];
-    let composite_backdrop_blur_downsample_vsh =
-        app_system.require_shader("resources/dual_kawase_filter/downsample.vert");
-    let composite_backdrop_blur_downsample_fsh =
-        app_system.require_shader("resources/dual_kawase_filter/downsample.frag");
-    let composite_backdrop_blur_upsample_vsh =
-        app_system.require_shader("resources/dual_kawase_filter/upsample.vert");
-    let composite_backdrop_blur_upsample_fsh =
-        app_system.require_shader("resources/dual_kawase_filter/upsample.frag");
-    let composite_backdrop_blur_downsample_stages = [
-        composite_backdrop_blur_downsample_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
-        composite_backdrop_blur_downsample_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
-    ];
-    let composite_backdrop_blur_upsample_stages = [
-        composite_backdrop_blur_upsample_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
-        composite_backdrop_blur_upsample_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
     ];
 
     let composite_descriptor_layout = br::DescriptorSetLayoutObject::new(
@@ -1741,83 +1626,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
             .only_for_fragment()]),
     )
     .unwrap();
-    let composite_backdrop_blur_input_descriptor_layout = br::DescriptorSetLayoutObject::new(
-        app_system.subsystem,
-        &br::DescriptorSetLayoutCreateInfo::new(&[br::DescriptorType::CombinedImageSampler
-            .make_binding(0, 1)
-            .only_for_fragment()
-            .with_immutable_samplers(&[composite_sampler.as_transparent_ref()])]),
-    )
-    .unwrap();
-    let mut descriptor_pool = br::DescriptorPoolObject::new(
-        app_system.subsystem,
-        &br::DescriptorPoolCreateInfo::new(
-            (1 + (BLUR_SAMPLE_STEPS + 1)) as _,
-            &[
-                br::DescriptorType::CombinedImageSampler
-                    .make_size((1 + (BLUR_SAMPLE_STEPS + 1)) as _),
-                br::DescriptorType::UniformBuffer.make_size(1),
-                br::DescriptorType::StorageBuffer.make_size(1),
-            ],
-        ),
-    )
-    .unwrap();
-    let [composite_alphamask_group_descriptor] = descriptor_pool
-        .alloc_array(&[composite_descriptor_layout.as_transparent_ref()])
-        .unwrap();
-    let blur_fixed_descriptors = descriptor_pool
-        .alloc(
-            &core::iter::repeat_n(
-                composite_backdrop_blur_input_descriptor_layout.as_transparent_ref(),
-                BLUR_SAMPLE_STEPS + 1,
-            )
-            .collect::<Vec<_>>(),
-        )
-        .unwrap();
-    let mut descriptor_writes = vec![
-        composite_alphamask_group_descriptor.binding_at(0).write(
-            br::DescriptorContents::storage_buffer(
-                app_system
-                    .composite_instance_manager
-                    .buffer_transparent_ref(),
-                0..(core::mem::size_of::<CompositeInstanceData>() * 1024) as _,
-            ),
-        ),
-        composite_alphamask_group_descriptor.binding_at(1).write(
-            br::DescriptorContents::uniform_buffer(
-                app_system
-                    .composite_instance_manager
-                    .streaming_buffer_transparent_ref(),
-                0..core::mem::size_of::<CompositeStreamingData>() as _,
-            ),
-        ),
-        composite_alphamask_group_descriptor.binding_at(2).write(
-            br::DescriptorContents::CombinedImageSampler(vec![
-                br::DescriptorImageInfo::new(
-                    app_system.mask_atlas_resource_transparent_ref(),
-                    br::ImageLayout::ShaderReadOnlyOpt,
-                )
-                .with_sampler(&composite_sampler),
-            ]),
-        ),
-        blur_fixed_descriptors[0].binding_at(0).write(
-            br::DescriptorContents::CombinedImageSampler(vec![br::DescriptorImageInfo::new(
-                &composite_grab_buffer,
-                br::ImageLayout::ShaderReadOnlyOpt,
-            )]),
-        ),
-    ];
-    descriptor_writes.extend((0..BLUR_SAMPLE_STEPS).map(|n| {
-        blur_fixed_descriptors[n + 1].binding_at(0).write(
-            br::DescriptorContents::CombinedImageSampler(vec![br::DescriptorImageInfo::new(
-                &blur_temporal_buffers[n],
-                br::ImageLayout::ShaderReadOnlyOpt,
-            )]),
-        )
-    }));
-    app_system
-        .subsystem
-        .update_descriptor_sets(&descriptor_writes, &[]);
 
     let mut composite_backdrop_buffer_descriptor_pool = br::DescriptorPoolObject::new(
         app_system.subsystem,
@@ -1852,19 +1660,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     let composite_blend_state = br::PipelineColorBlendStateCreateInfo::new(&[
         br::vk::VkPipelineColorBlendAttachmentState::PREMULTIPLIED,
     ]);
-
-    let blur_pipeline_layout = br::PipelineLayoutObject::new(
-        app_system.subsystem,
-        &br::PipelineLayoutCreateInfo::new(
-            &[composite_backdrop_blur_input_descriptor_layout.as_transparent_ref()],
-            &[br::PushConstantRange::for_type::<[f32; 3]>(
-                br::vk::VK_SHADER_STAGE_VERTEX_BIT,
-                0,
-            )],
-        ),
-    )
-    .unwrap();
-
     let [
         mut composite_pipeline_grabbed,
         mut composite_pipeline_final,
@@ -1938,65 +1733,63 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
             .set_multisample_state(MS_STATE_EMPTY),
         ])
         .unwrap();
-    let blur_sample_viewport_scissors = (0..BLUR_SAMPLE_STEPS + 1)
-        .map(|lv| {
-            let size = br::Extent2D {
-                width: sc.size.width >> lv,
-                height: sc.size.height >> lv,
-            };
 
-            (
-                [size.into_rect(br::Offset2D::ZERO).make_viewport(0.0..1.0)],
-                [size.into_rect(br::Offset2D::ZERO)],
-            )
-        })
-        .collect::<Vec<_>>();
-    let blur_sample_viewport_states = blur_sample_viewport_scissors
-        .iter()
-        .map(|(vp, sc)| br::PipelineViewportStateCreateInfo::new(vp, sc))
-        .collect::<Vec<_>>();
-    let mut blur_downsample_pipelines = app_system
-        .create_graphics_pipelines(
-            &blur_sample_viewport_states
-                .iter()
-                .skip(1)
-                .map(|vp_state| {
-                    br::GraphicsPipelineCreateInfo::new(
-                        &blur_pipeline_layout,
-                        composite_backdrop_blur_rp.subpass(0),
-                        &composite_backdrop_blur_downsample_stages,
-                        VI_STATE_EMPTY,
-                        IA_STATE_TRILIST,
-                        vp_state,
-                        RASTER_STATE_DEFAULT_FILL_NOCULL,
-                        BLEND_STATE_SINGLE_NONE,
-                    )
-                    .set_multisample_state(MS_STATE_EMPTY)
-                })
-                .collect::<Vec<_>>(),
-        )
+    let mut backdrop_fx_blur_processor =
+        BackdropEffectBlurProcessor::new(app_system, sc.size, sc.color_format());
+
+    let mut fixed_descriptor_pool = br::DescriptorPoolObject::new(
+        app_system.subsystem,
+        &br::DescriptorPoolCreateInfo::new(
+            (1 + backdrop_fx_blur_processor.fixed_descriptor_set_count()) as _,
+            &[
+                br::DescriptorType::CombinedImageSampler
+                    .make_size((1 + backdrop_fx_blur_processor.fixed_descriptor_set_count()) as _),
+                br::DescriptorType::UniformBuffer.make_size(1),
+                br::DescriptorType::StorageBuffer.make_size(1),
+            ],
+        ),
+    )
+    .unwrap();
+    let [composite_alphamask_group_descriptor] = fixed_descriptor_pool
+        .alloc_array(&[composite_descriptor_layout.as_transparent_ref()])
         .unwrap();
-    let mut blur_upsample_pipelines = app_system
-        .create_graphics_pipelines(
-            &blur_sample_viewport_states
-                .iter()
-                .take(blur_sample_viewport_states.len() - 1)
-                .map(|vp_state| {
-                    br::GraphicsPipelineCreateInfo::new(
-                        &blur_pipeline_layout,
-                        composite_backdrop_blur_rp.subpass(0),
-                        &composite_backdrop_blur_upsample_stages,
-                        VI_STATE_EMPTY,
-                        IA_STATE_TRILIST,
-                        vp_state,
-                        RASTER_STATE_DEFAULT_FILL_NOCULL,
-                        BLEND_STATE_SINGLE_NONE,
-                    )
-                    .set_multisample_state(MS_STATE_EMPTY)
-                })
-                .collect::<Vec<_>>(),
-        )
-        .unwrap();
+    let blur_fixed_descriptors =
+        backdrop_fx_blur_processor.alloc_fixed_descriptor_sets(&mut fixed_descriptor_pool);
+    let mut descriptor_writes = vec![
+        composite_alphamask_group_descriptor.binding_at(0).write(
+            br::DescriptorContents::storage_buffer(
+                app_system
+                    .composite_instance_manager
+                    .buffer_transparent_ref(),
+                0..(core::mem::size_of::<CompositeInstanceData>() * 1024) as _,
+            ),
+        ),
+        composite_alphamask_group_descriptor.binding_at(1).write(
+            br::DescriptorContents::uniform_buffer(
+                app_system
+                    .composite_instance_manager
+                    .streaming_buffer_transparent_ref(),
+                0..core::mem::size_of::<CompositeStreamingData>() as _,
+            ),
+        ),
+        composite_alphamask_group_descriptor.binding_at(2).write(
+            br::DescriptorContents::CombinedImageSampler(vec![
+                br::DescriptorImageInfo::new(
+                    app_system.mask_atlas_resource_transparent_ref(),
+                    br::ImageLayout::ShaderReadOnlyOpt,
+                )
+                .with_sampler(&composite_sampler),
+            ]),
+        ),
+    ];
+    backdrop_fx_blur_processor.write_input_descriptor_sets(
+        &mut descriptor_writes,
+        &composite_grab_buffer,
+        &blur_fixed_descriptors,
+    );
+    app_system
+        .subsystem
+        .update_descriptor_sets(&descriptor_writes, &[]);
 
     let (
         corner_cutout_atlas_rect,
@@ -2874,132 +2667,27 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         .create()
                         .unwrap();
 
-                        blur_upsample_pass_fixed_fbs.clear();
-                        blur_downsample_pass_fbs.clear();
-                        blur_temporal_buffers.clear();
-                        drop(blur_temporal_buffer_memory);
-                        let mut resources_offsets = Vec::with_capacity(2);
-                        let mut top = 0;
-                        let mut memory_index_mask = !0u32;
-                        for lv in 0..2 {
-                            let r = br::ImageObject::new(
-                                app_system.subsystem,
-                                &br::ImageCreateInfo::new(
-                                    br::Extent2D {
-                                        width: sc.size.width >> (lv + 1),
-                                        height: sc.size.height >> (lv + 1),
-                                    },
-                                    sc.color_format(),
-                                )
-                                .with_usage(
-                                    br::ImageUsageFlags::SAMPLED
-                                        | br::ImageUsageFlags::COLOR_ATTACHMENT,
-                                ),
-                            )
-                            .unwrap();
-                            let req = r.requirements();
-                            assert!(req.alignment.is_power_of_two());
-                            let offset = (top + req.alignment - 1) & !(req.alignment - 1);
-
-                            top = offset + req.size;
-                            memory_index_mask &= req.memoryTypeBits;
-                            resources_offsets.push((r, offset));
-                        }
-                        blur_temporal_buffer_memory =
-                            app_system.alloc_device_local_memory(top, memory_index_mask);
-                        for (mut r, o) in resources_offsets {
-                            r.bind(&blur_temporal_buffer_memory, o as _).unwrap();
-
-                            blur_temporal_buffers.push(
-                                br::ImageViewBuilder::new(
-                                    r,
-                                    br::ImageSubresourceRange::new(
-                                        br::AspectMask::COLOR,
-                                        0..1,
-                                        0..1,
-                                    ),
-                                )
-                                .create()
-                                .unwrap(),
-                            );
-                        }
-                        blur_downsample_pass_fbs.extend(
-                            blur_temporal_buffers.iter().enumerate().map(|(lv, b)| {
-                                br::FramebufferObject::new(
-                                    app_system.subsystem,
-                                    &br::FramebufferCreateInfo::new(
-                                        &composite_backdrop_blur_rp,
-                                        &[b.as_transparent_ref()],
-                                        sc.size.width >> (lv + 1),
-                                        sc.size.height >> (lv + 1),
-                                    ),
-                                )
-                                .unwrap()
-                            }),
-                        );
-                        blur_upsample_pass_fixed_fbs.extend(
-                            blur_temporal_buffers
-                                .iter()
-                                .take(blur_temporal_buffers.len() - 1)
-                                .enumerate()
-                                .map(|(lv, b)| {
-                                    br::FramebufferObject::new(
-                                        app_system.subsystem,
-                                        &br::FramebufferCreateInfo::new(
-                                            &composite_backdrop_blur_rp,
-                                            &[b.as_transparent_ref()],
-                                            sc.size.width >> (lv + 1),
-                                            sc.size.height >> (lv + 1),
-                                        ),
-                                    )
-                                    .unwrap()
-                                }),
+                        backdrop_fx_blur_processor.recreate_rt_resources(
+                            app_system,
+                            sc.size,
+                            sc.color_format(),
                         );
 
-                        app_system.subsystem.update_descriptor_sets(
-                            &std::iter::once(blur_fixed_descriptors[0].binding_at(0).write(
-                                br::DescriptorContents::combined_image_sampler(
-                                    &composite_grab_buffer,
-                                    br::ImageLayout::ShaderReadOnlyOpt,
-                                ),
-                            ))
-                            .chain((0..BLUR_SAMPLE_STEPS).map(|n| {
-                                blur_fixed_descriptors[n + 1].binding_at(0).write(
-                                    br::DescriptorContents::combined_image_sampler(
-                                        &blur_temporal_buffers[n],
-                                        br::ImageLayout::ShaderReadOnlyOpt,
-                                    ),
-                                )
-                            }))
-                            .collect::<Vec<_>>(),
-                            &[],
+                        let mut descriptor_writes = Vec::new();
+                        backdrop_fx_blur_processor.write_input_descriptor_sets(
+                            &mut descriptor_writes,
+                            &composite_grab_buffer,
+                            &blur_fixed_descriptors,
                         );
+                        app_system
+                            .subsystem
+                            .update_descriptor_sets(&descriptor_writes, &[]);
 
                         let composite_vsh = app_system.require_shader("resources/composite.vert");
                         let composite_fsh = app_system.require_shader("resources/composite.frag");
                         let composite_shader_stages = [
                             composite_vsh.on_stage(br::ShaderStage::Vertex, c"main"),
                             composite_fsh.on_stage(br::ShaderStage::Fragment, c"main"),
-                        ];
-                        let composite_backdrop_blur_downsample_vsh = app_system
-                            .require_shader("resources/dual_kawase_filter/downsample.vert");
-                        let composite_backdrop_blur_downsample_fsh = app_system
-                            .require_shader("resources/dual_kawase_filter/downsample.frag");
-                        let composite_backdrop_blur_upsample_vsh =
-                            app_system.require_shader("resources/dual_kawase_filter/upsample.vert");
-                        let composite_backdrop_blur_upsample_fsh =
-                            app_system.require_shader("resources/dual_kawase_filter/upsample.frag");
-                        let composite_backdrop_blur_downsample_stages = [
-                            composite_backdrop_blur_downsample_vsh
-                                .on_stage(br::ShaderStage::Vertex, c"main"),
-                            composite_backdrop_blur_downsample_fsh
-                                .on_stage(br::ShaderStage::Fragment, c"main"),
-                        ];
-                        let composite_backdrop_blur_upsample_stages = [
-                            composite_backdrop_blur_upsample_vsh
-                                .on_stage(br::ShaderStage::Vertex, c"main"),
-                            composite_backdrop_blur_upsample_fsh
-                                .on_stage(br::ShaderStage::Fragment, c"main"),
                         ];
 
                         let screen_viewport = [sc
@@ -3068,68 +2756,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         composite_pipeline_final = composite_pipeline_final1;
                         composite_pipeline_continue_grabbed = composite_pipeline_continue_grabbed1;
                         composite_pipeline_continue_final = composite_pipeline_continue_final1;
-
-                        drop(blur_upsample_pipelines);
-                        drop(blur_downsample_pipelines);
-                        let blur_sample_viewport_scissors = (0..BLUR_SAMPLE_STEPS + 1)
-                            .map(|lv| {
-                                let size = br::Extent2D {
-                                    width: sc.size.width >> lv,
-                                    height: sc.size.height >> lv,
-                                };
-
-                                (
-                                    [size.into_rect(br::Offset2D::ZERO).make_viewport(0.0..1.0)],
-                                    [size.into_rect(br::Offset2D::ZERO)],
-                                )
-                            })
-                            .collect::<Vec<_>>();
-                        let blur_sample_viewport_states = blur_sample_viewport_scissors
-                            .iter()
-                            .map(|(vp, sc)| br::PipelineViewportStateCreateInfo::new(vp, sc))
-                            .collect::<Vec<_>>();
-                        blur_downsample_pipelines = app_system
-                            .create_graphics_pipelines(
-                                &blur_sample_viewport_states
-                                    .iter()
-                                    .skip(1)
-                                    .map(|vp_state| {
-                                        br::GraphicsPipelineCreateInfo::new(
-                                            &blur_pipeline_layout,
-                                            composite_backdrop_blur_rp.subpass(0),
-                                            &composite_backdrop_blur_downsample_stages,
-                                            VI_STATE_EMPTY,
-                                            IA_STATE_TRILIST,
-                                            vp_state,
-                                            RASTER_STATE_DEFAULT_FILL_NOCULL,
-                                            BLEND_STATE_SINGLE_NONE,
-                                        )
-                                        .set_multisample_state(MS_STATE_EMPTY)
-                                    })
-                                    .collect::<Vec<_>>(),
-                            )
-                            .unwrap();
-                        blur_upsample_pipelines = app_system
-                            .create_graphics_pipelines(
-                                &blur_sample_viewport_states
-                                    .iter()
-                                    .take(blur_sample_viewport_states.len() - 1)
-                                    .map(|vp_state| {
-                                        br::GraphicsPipelineCreateInfo::new(
-                                            &blur_pipeline_layout,
-                                            composite_backdrop_blur_rp.subpass(0),
-                                            &composite_backdrop_blur_upsample_stages,
-                                            VI_STATE_EMPTY,
-                                            IA_STATE_TRILIST,
-                                            vp_state,
-                                            RASTER_STATE_DEFAULT_FILL_NOCULL,
-                                            BLEND_STATE_SINGLE_NONE,
-                                        )
-                                        .set_multisample_state(MS_STATE_EMPTY)
-                                    })
-                                    .collect::<Vec<_>>(),
-                            )
-                            .unwrap();
 
                         if corner_cutout_render_pipeline.is_some() {
                             let vsh =
@@ -3401,7 +3027,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                 br::FramebufferObject::new(
                                     app_system.subsystem,
                                     &br::FramebufferCreateInfo::new(
-                                        &composite_backdrop_blur_rp,
+                                        backdrop_fx_blur_processor.final_render_pass(),
                                         &[b.as_transparent_ref()],
                                         sc.size.width,
                                         sc.size.height,
@@ -3655,13 +3281,8 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                         &composite_backdrop_buffer_descriptor_sets,
                                         &composite_grab_buffer,
                                         &sc.backbuffer_image(n),
-                                        &composite_backdrop_blur_rp,
-                                        &blur_pipeline_layout,
-                                        &blur_downsample_pipelines,
-                                        &blur_upsample_pipelines,
+                                        &backdrop_fx_blur_processor,
                                         &blur_fixed_descriptors,
-                                        &blur_downsample_pass_fbs,
-                                        &blur_upsample_pass_fixed_fbs,
                                         &composite_backdrop_blur_destination_fbs,
                                     )
                                 })

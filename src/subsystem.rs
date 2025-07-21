@@ -2,7 +2,7 @@
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 
-use bedrock::{self as br, Instance, PhysicalDevice, ResolverInterface, VkHandle};
+use bedrock::{self as br, Device, Instance, PhysicalDevice, ResolverInterface, VkHandle};
 use freetype::FreeType;
 use parking_lot::RwLock;
 
@@ -427,6 +427,16 @@ impl Subsystem {
 
     pub const fn adapter(&self) -> &impl PhysicalDevice {
         unsafe { core::mem::transmute::<_, &SubsystemAdapterAccess>(self) }
+    }
+
+    pub fn dbg_set_name(
+        &self,
+        obj: &(impl br::VkObject + br::VkHandle<Handle: br::VkRawHandle> + ?Sized),
+        name: &core::ffi::CStr,
+    ) {
+        if let Err(e) = self.set_object_name(&br::DebugUtilsObjectNameInfo::new(obj, Some(name))) {
+            tracing::warn!(reason = ?e, "dbg_set_name failed");
+        }
     }
 
     #[tracing::instrument(skip(self), ret(level = tracing::Level::TRACE))]

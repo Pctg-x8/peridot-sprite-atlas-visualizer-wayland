@@ -1717,6 +1717,7 @@ impl Drop for BackdropEffectBlurProcessor<'_> {
     }
 }
 impl<'subsystem> BackdropEffectBlurProcessor<'subsystem> {
+    #[tracing::instrument(name = "BackdropEffectBlurProcessor::new", skip(base_system))]
     pub fn new(
         base_system: &mut AppBaseSystem<'subsystem>,
         rt_size: br::Extent2D,
@@ -1745,9 +1746,10 @@ impl<'subsystem> BackdropEffectBlurProcessor<'subsystem> {
             ),
         )
         .unwrap();
-        render_pass
-            .set_name(Some(c"Composite BackdropFx(Blur) ProcessRenderPass"))
-            .unwrap();
+        base_system.subsystem.dbg_set_name(
+            &render_pass,
+            c"Composite BackdropFx(Blur) ProcessRenderPass",
+        );
 
         let mut temporal_buffers = Vec::with_capacity(BLUR_SAMPLE_STEPS);
         let temporal_buffer_memory =
@@ -1756,7 +1758,7 @@ impl<'subsystem> BackdropEffectBlurProcessor<'subsystem> {
         let (downsample_pass_fbs, upsample_pass_fixed_fbs) =
             Self::create_framebuffers(base_system, &temporal_buffers, &render_pass, rt_size);
 
-        let sampler = br::SamplerObject::new(
+        let sampler = match br::SamplerObject::new(
             base_system.subsystem,
             &br::SamplerCreateInfo::new()
                 .filter(br::FilterMode::Linear, br::FilterMode::Linear)
@@ -1765,18 +1767,28 @@ impl<'subsystem> BackdropEffectBlurProcessor<'subsystem> {
                     br::AddressingMode::MirroredRepeat,
                     br::AddressingMode::MirroredRepeat,
                 ),
-        )
-        .unwrap();
-        let input_dsl = br::DescriptorSetLayoutObject::new(
+        ) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "blur sampler creation failed");
+                std::process::abort();
+            }
+        };
+        let input_dsl = match br::DescriptorSetLayoutObject::new(
             base_system.subsystem,
             &br::DescriptorSetLayoutCreateInfo::new(&[br::DescriptorType::CombinedImageSampler
                 .make_binding(0, 1)
                 .only_for_fragment()
                 .with_immutable_samplers(&[sampler.as_transparent_ref()])]),
-        )
-        .unwrap();
+        ) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "blur input dsl creation failed");
+                std::process::abort();
+            }
+        };
 
-        let pipeline_layout = br::PipelineLayoutObject::new(
+        let pipeline_layout = match br::PipelineLayoutObject::new(
             base_system.subsystem,
             &br::PipelineLayoutCreateInfo::new(
                 &[input_dsl.as_transparent_ref()],
@@ -1785,8 +1797,14 @@ impl<'subsystem> BackdropEffectBlurProcessor<'subsystem> {
                     0,
                 )],
             ),
-        )
-        .unwrap();
+        ) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "pipeline layout creation failed");
+                std::process::abort();
+            }
+        };
+
         let (downsample_pipelines, upsample_pipelines) =
             Self::create_pipelines(base_system, rt_size, &pipeline_layout, &render_pass);
 
@@ -2172,6 +2190,10 @@ impl<'subsystem> BackdropEffectBlurProcessor<'subsystem> {
         rec
     }
 
+    #[tracing::instrument(
+        name = "BackdropEffectBlurProcessor::recreate_rt_resources",
+        skip(self, base_system)
+    )]
     pub fn recreate_rt_resources(
         &mut self,
         base_system: &mut AppBaseSystem<'subsystem>,

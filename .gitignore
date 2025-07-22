@@ -7,3 +7,5 @@
 /.flatpak-builder
 /package
 /vcpkg_installed
+/.vscode
+/.zed

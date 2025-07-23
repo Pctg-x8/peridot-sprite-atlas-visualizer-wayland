@@ -664,7 +664,6 @@ pub struct AppShell<'a, 'subsystem> {
     cursor_shape_device: core::ptr::NonNull<wl::WpCursorShapeDeviceV1>,
     frame_callback: Cell<core::ptr::NonNull<wl::Callback>>,
     _gtk_surface: Option<core::ptr::NonNull<wl::GtkSurface1>>,
-    data_device: Option<core::ptr::NonNull<wl::DataDevice>>,
     has_server_side_decoration: bool,
 }
 impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
@@ -1097,6 +1096,9 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
         if let Some(x) = data_device_manager {
             x.leak();
         }
+        if let Some(x) = data_device {
+            x.leak();
+        }
         let has_server_side_decoration = zxdg_decoration_manager_v1.is_some();
         if let Some(zxdg_decoration_manager_v1) = zxdg_decoration_manager_v1 {
             zxdg_decoration_manager_v1.leak();
@@ -1112,7 +1114,6 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             frame_callback: Cell::new(frame.unwrap()),
             zxdg_exporter_v2: zxdg_exporter_v2.map(|x| x.unwrap()),
             _gtk_surface: gtk_surface.map(|x| x.unwrap()),
-            data_device: data_device.map(|x| x.unwrap()),
             has_server_side_decoration,
         }
     }
@@ -1321,7 +1322,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
         self.sync();
 
         Some(ExportedShellData {
-            object,
+            _object: object,
             handle: match handler.handle {
                 Some(x) => x,
                 None => {
@@ -1375,6 +1376,89 @@ fn try_create_shm_random_suffix(
     Ok(None)
 }
 
+struct AppShellDecorationShadow {
+    surface: core::ptr::NonNull<wl::Surface>,
+    subsurface: core::ptr::NonNull<wl::Subsurface>,
+    viewport: Option<core::ptr::NonNull<wl::WpViewport>>,
+}
+impl AppShellDecorationShadow {
+    #[inline]
+    fn set_buffer_scale(&self, scale: i32) {
+        if let Err(e) = unsafe { self.surface.as_ref() }.set_buffer_scale(scale) {
+            tracing::warn!(reason = ?e, "set_buffer_scale failed");
+        }
+    }
+
+    #[inline]
+    fn attach_buffer(&self, buffer: &wl::Buffer) {
+        if let Err(e) = unsafe { self.surface.as_ref() }.attach(Some(buffer), 0, 0) {
+            tracing::warn!(reason = ?e, "attaching buffer failed");
+        }
+    }
+
+    #[inline]
+    fn full_damage(&self) {
+        if let Err(e) = unsafe { self.surface.as_ref() }.damage(0, 0, i32::MAX, i32::MAX) {
+            tracing::warn!(reason = ?e, "damaging entire surface failed");
+        }
+    }
+
+    #[inline]
+    fn set_position(&self, x: i32, y: i32) {
+        if let Err(e) = unsafe { self.subsurface.as_ref() }.set_position(x, y) {
+            tracing::warn!(reason = ?e, "setting shadow position failed");
+        }
+    }
+
+    #[inline]
+    fn set_size(&self, width: i32, height: i32) {
+        let Some(ref vp) = self.viewport else {
+            return;
+        };
+
+        if let Err(e) = unsafe { vp.as_ref() }.set_destination(width, height) {
+            tracing::warn!(reason = ?e, "setting viewport destination failed");
+        }
+    }
+
+    #[tracing::instrument(
+        name = "AppShellDecorationShadow::set_input_region",
+        skip(self, compositor)
+    )]
+    fn set_input_region(
+        &self,
+        compositor: &wl::Compositor,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) {
+        let r = match compositor.create_region() {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::warn!(reason = ?e, "creating region failed");
+                return;
+            }
+        };
+        if let Err(e) = r.add(x, y, width, height) {
+            tracing::warn!(reason = ?e, "setup region failed");
+            return;
+        }
+
+        if let Err(e) = unsafe { self.surface.as_ref() }.set_input_region(Some(&r)) {
+            tracing::warn!(reason = ?e, "attaching input region failed");
+            return;
+        }
+    }
+
+    #[inline]
+    fn commit(&self) {
+        if let Err(e) = unsafe { self.surface.as_ref() }.commit() {
+            tracing::warn!(reason = ?e, "committing decoration surface failed");
+        }
+    }
+}
+
 struct AppShellDecorator {
     compositor: core::ptr::NonNull<wl::Compositor>,
     shm: core::ptr::NonNull<wl::Shm>,
@@ -1384,23 +1468,14 @@ struct AppShellDecorator {
     buffer_scale: i32,
     shadow_corner_buf: core::ptr::NonNull<wl::Buffer>,
     shadow_straight_buf: core::ptr::NonNull<wl::Buffer>,
-    shadow_lt_surface: core::ptr::NonNull<wl::Surface>,
-    shadow_lb_surface: core::ptr::NonNull<wl::Surface>,
-    shadow_lb_subsurface: core::ptr::NonNull<wl::Subsurface>,
-    shadow_rt_surface: core::ptr::NonNull<wl::Surface>,
-    shadow_rt_subsurface: core::ptr::NonNull<wl::Subsurface>,
-    shadow_rb_surface: core::ptr::NonNull<wl::Surface>,
-    shadow_rb_subsurface: core::ptr::NonNull<wl::Subsurface>,
-    shadow_left_surface: core::ptr::NonNull<wl::Surface>,
-    shadow_left_viewport: core::ptr::NonNull<wl::WpViewport>,
-    shadow_right_surface: core::ptr::NonNull<wl::Surface>,
-    shadow_right_subsurface: core::ptr::NonNull<wl::Subsurface>,
-    shadow_right_viewport: core::ptr::NonNull<wl::WpViewport>,
-    shadow_top_surface: core::ptr::NonNull<wl::Surface>,
-    shadow_top_viewport: core::ptr::NonNull<wl::WpViewport>,
-    shadow_bottom_surface: core::ptr::NonNull<wl::Surface>,
-    shadow_bottom_subsurface: core::ptr::NonNull<wl::Subsurface>,
-    shadow_bottom_viewport: core::ptr::NonNull<wl::WpViewport>,
+    shadow_lt: AppShellDecorationShadow,
+    shadow_lb: AppShellDecorationShadow,
+    shadow_rt: AppShellDecorationShadow,
+    shadow_rb: AppShellDecorationShadow,
+    shadow_left: AppShellDecorationShadow,
+    shadow_right: AppShellDecorationShadow,
+    shadow_top: AppShellDecorationShadow,
+    shadow_bottom: AppShellDecorationShadow,
 }
 impl AppShellDecorator {
     const SHADOW_SIZE: usize = 16;
@@ -1562,10 +1637,6 @@ impl AppShellDecorator {
             .unwrap();
         shadow_bottom_surface.commit().unwrap();
 
-        shadow_lt_subsurface.leak();
-        shadow_left_subsurface.leak();
-        shadow_top_subsurface.leak();
-
         Self {
             compositor: unsafe { compositor.copy_ptr() },
             shm: shm.unwrap(),
@@ -1575,23 +1646,46 @@ impl AppShellDecorator {
             buffer_scale: 1,
             shadow_corner_buf: shadow_corner_buf.unwrap(),
             shadow_straight_buf: shadow_straight_buf.unwrap(),
-            shadow_lt_surface: shadow_lt_surface.unwrap(),
-            shadow_lb_surface: shadow_lb_surface.unwrap(),
-            shadow_lb_subsurface: shadow_lb_subsurface.unwrap(),
-            shadow_rt_surface: shadow_rt_surface.unwrap(),
-            shadow_rt_subsurface: shadow_rt_subsurface.unwrap(),
-            shadow_rb_surface: shadow_rb_surface.unwrap(),
-            shadow_rb_subsurface: shadow_rb_subsurface.unwrap(),
-            shadow_left_surface: shadow_left_surface.unwrap(),
-            shadow_left_viewport: shadow_left_viewport.unwrap(),
-            shadow_right_surface: shadow_right_surface.unwrap(),
-            shadow_right_subsurface: shadow_right_subsurface.unwrap(),
-            shadow_right_viewport: shadow_right_viewport.unwrap(),
-            shadow_top_surface: shadow_top_surface.unwrap(),
-            shadow_top_viewport: shadow_top_viewport.unwrap(),
-            shadow_bottom_surface: shadow_bottom_surface.unwrap(),
-            shadow_bottom_subsurface: shadow_bottom_subsurface.unwrap(),
-            shadow_bottom_viewport: shadow_bottom_viewport.unwrap(),
+            shadow_lt: AppShellDecorationShadow {
+                surface: shadow_lt_surface.unwrap(),
+                subsurface: shadow_lt_subsurface.unwrap(),
+                viewport: None,
+            },
+            shadow_lb: AppShellDecorationShadow {
+                surface: shadow_lb_surface.unwrap(),
+                subsurface: shadow_lb_subsurface.unwrap(),
+                viewport: None,
+            },
+            shadow_rt: AppShellDecorationShadow {
+                surface: shadow_rt_surface.unwrap(),
+                subsurface: shadow_rt_subsurface.unwrap(),
+                viewport: None,
+            },
+            shadow_rb: AppShellDecorationShadow {
+                surface: shadow_rb_surface.unwrap(),
+                subsurface: shadow_rb_subsurface.unwrap(),
+                viewport: None,
+            },
+            shadow_left: AppShellDecorationShadow {
+                surface: shadow_left_surface.unwrap(),
+                subsurface: shadow_left_subsurface.unwrap(),
+                viewport: Some(shadow_left_viewport.unwrap()),
+            },
+            shadow_right: AppShellDecorationShadow {
+                surface: shadow_right_surface.unwrap(),
+                subsurface: shadow_right_subsurface.unwrap(),
+                viewport: Some(shadow_right_viewport.unwrap()),
+            },
+            shadow_top: AppShellDecorationShadow {
+                surface: shadow_top_surface.unwrap(),
+                subsurface: shadow_top_subsurface.unwrap(),
+                viewport: Some(shadow_top_viewport.unwrap()),
+            },
+            shadow_bottom: AppShellDecorationShadow {
+                surface: shadow_bottom_surface.unwrap(),
+                subsurface: shadow_bottom_subsurface.unwrap(),
+                viewport: Some(shadow_bottom_viewport.unwrap()),
+            },
         }
     }
 
@@ -1628,72 +1722,40 @@ impl AppShellDecorator {
             .unwrap()
             .unwrap();
 
-        unsafe { self.shadow_lt_surface.as_ref() }
-            .attach(Some(unsafe { self.shadow_corner_buf.as_ref() }), 0, 0)
-            .unwrap();
-        unsafe { self.shadow_lb_surface.as_ref() }
-            .attach(Some(unsafe { self.shadow_corner_buf.as_ref() }), 0, 0)
-            .unwrap();
-        unsafe { self.shadow_rb_surface.as_ref() }
-            .attach(Some(unsafe { self.shadow_corner_buf.as_ref() }), 0, 0)
-            .unwrap();
-        unsafe { self.shadow_rt_surface.as_ref() }
-            .attach(Some(unsafe { self.shadow_corner_buf.as_ref() }), 0, 0)
-            .unwrap();
-        unsafe { self.shadow_left_surface.as_ref() }
-            .attach(Some(unsafe { self.shadow_straight_buf.as_ref() }), 0, 0)
-            .unwrap();
-        unsafe { self.shadow_right_surface.as_ref() }
-            .attach(Some(unsafe { self.shadow_straight_buf.as_ref() }), 0, 0)
-            .unwrap();
-        unsafe { self.shadow_top_surface.as_ref() }
-            .attach(Some(unsafe { self.shadow_straight_buf.as_ref() }), 0, 0)
-            .unwrap();
-        unsafe { self.shadow_bottom_surface.as_ref() }
-            .attach(Some(unsafe { self.shadow_straight_buf.as_ref() }), 0, 0)
-            .unwrap();
+        self.shadow_lt
+            .attach_buffer(unsafe { self.shadow_corner_buf.as_ref() });
+        self.shadow_lb
+            .attach_buffer(unsafe { self.shadow_corner_buf.as_ref() });
+        self.shadow_rt
+            .attach_buffer(unsafe { self.shadow_corner_buf.as_ref() });
+        self.shadow_rb
+            .attach_buffer(unsafe { self.shadow_corner_buf.as_ref() });
+        self.shadow_left
+            .attach_buffer(unsafe { self.shadow_straight_buf.as_ref() });
+        self.shadow_right
+            .attach_buffer(unsafe { self.shadow_straight_buf.as_ref() });
+        self.shadow_top
+            .attach_buffer(unsafe { self.shadow_straight_buf.as_ref() });
+        self.shadow_bottom
+            .attach_buffer(unsafe { self.shadow_straight_buf.as_ref() });
 
-        unsafe { self.shadow_lt_surface.as_ref() }
-            .set_buffer_scale(scale)
-            .unwrap();
-        unsafe { self.shadow_lb_surface.as_ref() }
-            .set_buffer_scale(scale)
-            .unwrap();
-        unsafe { self.shadow_rt_surface.as_ref() }
-            .set_buffer_scale(scale)
-            .unwrap();
-        unsafe { self.shadow_rb_surface.as_ref() }
-            .set_buffer_scale(scale)
-            .unwrap();
-        unsafe { self.shadow_left_surface.as_ref() }
-            .set_buffer_scale(scale)
-            .unwrap();
-        unsafe { self.shadow_right_surface.as_ref() }
-            .set_buffer_scale(scale)
-            .unwrap();
-        unsafe { self.shadow_top_surface.as_ref() }
-            .set_buffer_scale(scale)
-            .unwrap();
-        unsafe { self.shadow_bottom_surface.as_ref() }
-            .set_buffer_scale(scale)
-            .unwrap();
+        self.shadow_lt.set_buffer_scale(scale);
+        self.shadow_lb.set_buffer_scale(scale);
+        self.shadow_rt.set_buffer_scale(scale);
+        self.shadow_rb.set_buffer_scale(scale);
+        self.shadow_left.set_buffer_scale(scale);
+        self.shadow_right.set_buffer_scale(scale);
+        self.shadow_top.set_buffer_scale(scale);
+        self.shadow_bottom.set_buffer_scale(scale);
 
-        unsafe { self.shadow_lt_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_lb_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_rb_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_rt_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_left_surface.as_ref() }
-            .commit()
-            .unwrap();
-        unsafe { self.shadow_right_surface.as_ref() }
-            .commit()
-            .unwrap();
-        unsafe { self.shadow_top_surface.as_ref() }
-            .commit()
-            .unwrap();
-        unsafe { self.shadow_bottom_surface.as_ref() }
-            .commit()
-            .unwrap();
+        self.shadow_lt.commit();
+        self.shadow_lb.commit();
+        self.shadow_rb.commit();
+        self.shadow_rt.commit();
+        self.shadow_left.commit();
+        self.shadow_right.commit();
+        self.shadow_top.commit();
+        self.shadow_bottom.commit();
     }
 
     fn render_content(&self, base_alpha_u8: f32) {
@@ -1742,47 +1804,23 @@ impl AppShellDecorator {
     }
 
     fn refresh_surface_contents(&self) {
-        unsafe { self.shadow_lt_surface.as_ref() }
-            .damage(0, 0, i32::MAX, i32::MAX)
-            .unwrap();
-        unsafe { self.shadow_lb_surface.as_ref() }
-            .damage(0, 0, i32::MAX, i32::MAX)
-            .unwrap();
-        unsafe { self.shadow_rb_surface.as_ref() }
-            .damage(0, 0, i32::MAX, i32::MAX)
-            .unwrap();
-        unsafe { self.shadow_rt_surface.as_ref() }
-            .damage(0, 0, i32::MAX, i32::MAX)
-            .unwrap();
-        unsafe { self.shadow_left_surface.as_ref() }
-            .damage(0, 0, i32::MAX, i32::MAX)
-            .unwrap();
-        unsafe { self.shadow_right_surface.as_ref() }
-            .damage(0, 0, i32::MAX, i32::MAX)
-            .unwrap();
-        unsafe { self.shadow_top_surface.as_ref() }
-            .damage(0, 0, i32::MAX, i32::MAX)
-            .unwrap();
-        unsafe { self.shadow_bottom_surface.as_ref() }
-            .damage(0, 0, i32::MAX, i32::MAX)
-            .unwrap();
+        self.shadow_lt.full_damage();
+        self.shadow_lb.full_damage();
+        self.shadow_rt.full_damage();
+        self.shadow_rb.full_damage();
+        self.shadow_left.full_damage();
+        self.shadow_right.full_damage();
+        self.shadow_top.full_damage();
+        self.shadow_bottom.full_damage();
 
-        unsafe { self.shadow_lt_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_lb_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_rb_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_rt_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_left_surface.as_ref() }
-            .commit()
-            .unwrap();
-        unsafe { self.shadow_right_surface.as_ref() }
-            .commit()
-            .unwrap();
-        unsafe { self.shadow_top_surface.as_ref() }
-            .commit()
-            .unwrap();
-        unsafe { self.shadow_bottom_surface.as_ref() }
-            .commit()
-            .unwrap();
+        self.shadow_lt.commit();
+        self.shadow_lb.commit();
+        self.shadow_rt.commit();
+        self.shadow_rb.commit();
+        self.shadow_left.commit();
+        self.shadow_right.commit();
+        self.shadow_top.commit();
+        self.shadow_bottom.commit();
     }
 
     pub fn active(&self) {
@@ -1797,183 +1835,137 @@ impl AppShellDecorator {
 
     pub fn adjust_for_main_surface_size(&self, width: i32, height: i32) {
         // corner positioning
-        unsafe { self.shadow_lb_subsurface.as_ref() }
-            .set_position(
-                -(Self::SHADOW_SIZE as i32),
-                height - (Self::SHADOW_SIZE as i32),
-            )
-            .unwrap();
-        unsafe { self.shadow_rt_subsurface.as_ref() }
-            .set_position(
-                width - (Self::SHADOW_SIZE as i32),
-                -(Self::SHADOW_SIZE as i32),
-            )
-            .unwrap();
-        unsafe { self.shadow_rb_subsurface.as_ref() }
-            .set_position(
-                width - (Self::SHADOW_SIZE as i32),
-                height - (Self::SHADOW_SIZE as i32),
-            )
-            .unwrap();
+        self.shadow_lb.set_position(
+            -(Self::SHADOW_SIZE as i32),
+            height - (Self::SHADOW_SIZE as i32),
+        );
+        self.shadow_rt.set_position(
+            width - (Self::SHADOW_SIZE as i32),
+            -(Self::SHADOW_SIZE as i32),
+        );
+        self.shadow_rb.set_position(
+            width - (Self::SHADOW_SIZE as i32),
+            height - (Self::SHADOW_SIZE as i32),
+        );
 
         // ltrb stretch
-        unsafe { self.shadow_left_viewport.as_ref() }
-            .set_destination(
-                (Self::SHADOW_SIZE * 2) as i32,
-                height - (Self::SHADOW_SIZE * 2) as i32,
-            )
-            .unwrap();
-        unsafe { self.shadow_right_viewport.as_ref() }
-            .set_destination(
-                (Self::SHADOW_SIZE * 2) as i32,
-                height - (Self::SHADOW_SIZE * 2) as i32,
-            )
-            .unwrap();
-        unsafe { self.shadow_top_viewport.as_ref() }
-            .set_destination(
-                width - (Self::SHADOW_SIZE * 2) as i32,
-                (Self::SHADOW_SIZE * 2) as i32,
-            )
-            .unwrap();
-        unsafe { self.shadow_bottom_viewport.as_ref() }
-            .set_destination(
-                width - (Self::SHADOW_SIZE * 2) as i32,
-                (Self::SHADOW_SIZE * 2) as i32,
-            )
-            .unwrap();
+        self.shadow_left.set_size(
+            (Self::SHADOW_SIZE * 2) as i32,
+            height - (Self::SHADOW_SIZE * 2) as i32,
+        );
+        self.shadow_right.set_size(
+            (Self::SHADOW_SIZE * 2) as i32,
+            height - (Self::SHADOW_SIZE * 2) as i32,
+        );
+        self.shadow_top.set_size(
+            width - (Self::SHADOW_SIZE * 2) as i32,
+            (Self::SHADOW_SIZE * 2) as i32,
+        );
+        self.shadow_bottom.set_size(
+            width - (Self::SHADOW_SIZE * 2) as i32,
+            (Self::SHADOW_SIZE * 2) as i32,
+        );
 
         // rb positioning
-        unsafe { self.shadow_right_subsurface.as_ref() }
-            .set_position(width - (Self::SHADOW_SIZE as i32), Self::SHADOW_SIZE as i32)
-            .unwrap();
-        unsafe { self.shadow_bottom_subsurface.as_ref() }
-            .set_position(
-                Self::SHADOW_SIZE as i32,
-                height - (Self::SHADOW_SIZE as i32),
-            )
-            .unwrap();
+        self.shadow_right
+            .set_position(width - (Self::SHADOW_SIZE as i32), Self::SHADOW_SIZE as i32);
+        self.shadow_bottom.set_position(
+            Self::SHADOW_SIZE as i32,
+            height - (Self::SHADOW_SIZE as i32),
+        );
 
         // input region
-        let r = unsafe { self.compositor.as_ref() }.create_region().unwrap();
-        r.add(
+        self.shadow_left.set_input_region(
+            unsafe { self.compositor.as_ref() },
             (Self::SHADOW_SIZE - Self::INPUT_SIZE) as _,
             0,
             Self::INPUT_SIZE as _,
             height,
-        )
-        .unwrap();
-        unsafe { self.shadow_left_surface.as_ref() }
-            .set_input_region(Some(&r))
-            .unwrap();
-        let r = unsafe { self.compositor.as_ref() }.create_region().unwrap();
-        r.add(Self::SHADOW_SIZE as _, 0, Self::INPUT_SIZE as _, height)
-            .unwrap();
-        unsafe { self.shadow_right_surface.as_ref() }
-            .set_input_region(Some(&r))
-            .unwrap();
-        let r = unsafe { self.compositor.as_ref() }.create_region().unwrap();
-        r.add(
+        );
+        self.shadow_right.set_input_region(
+            unsafe { self.compositor.as_ref() },
+            Self::SHADOW_SIZE as _,
+            0,
+            Self::INPUT_SIZE as _,
+            height,
+        );
+        self.shadow_top.set_input_region(
+            unsafe { self.compositor.as_ref() },
             0,
             (Self::SHADOW_SIZE - Self::INPUT_SIZE) as _,
             width,
             Self::INPUT_SIZE as _,
-        )
-        .unwrap();
-        unsafe { self.shadow_top_surface.as_ref() }
-            .set_input_region(Some(&r))
-            .unwrap();
-        let r = unsafe { self.compositor.as_ref() }.create_region().unwrap();
-        r.add(0, Self::SHADOW_SIZE as _, width, Self::INPUT_SIZE as _)
-            .unwrap();
-        unsafe { self.shadow_bottom_surface.as_ref() }
-            .set_input_region(Some(&r))
-            .unwrap();
-        let r = unsafe { self.compositor.as_ref() }.create_region().unwrap();
-        r.add(
+        );
+        self.shadow_bottom.set_input_region(
+            unsafe { self.compositor.as_ref() },
+            0,
+            Self::SHADOW_SIZE as _,
+            width,
+            Self::INPUT_SIZE as _,
+        );
+        self.shadow_lt.set_input_region(
+            unsafe { self.compositor.as_ref() },
             (Self::SHADOW_SIZE - Self::INPUT_SIZE) as _,
             (Self::SHADOW_SIZE - Self::INPUT_SIZE) as _,
             (Self::INPUT_SIZE + Self::SHADOW_SIZE) as _,
             (Self::INPUT_SIZE + Self::SHADOW_SIZE) as _,
-        )
-        .unwrap();
-        unsafe { self.shadow_lt_surface.as_ref() }
-            .set_input_region(Some(&r))
-            .unwrap();
-        let r = unsafe { self.compositor.as_ref() }.create_region().unwrap();
-        r.add(
+        );
+        self.shadow_lb.set_input_region(
+            unsafe { self.compositor.as_ref() },
             (Self::SHADOW_SIZE - Self::INPUT_SIZE) as _,
             0,
             (Self::INPUT_SIZE + Self::SHADOW_SIZE) as _,
             (Self::INPUT_SIZE + Self::SHADOW_SIZE) as _,
-        )
-        .unwrap();
-        unsafe { self.shadow_lb_surface.as_ref() }
-            .set_input_region(Some(&r))
-            .unwrap();
-        let r = unsafe { self.compositor.as_ref() }.create_region().unwrap();
-        r.add(
+        );
+        self.shadow_rt.set_input_region(
+            unsafe { self.compositor.as_ref() },
             0,
             (Self::SHADOW_SIZE - Self::INPUT_SIZE) as _,
             (Self::INPUT_SIZE + Self::SHADOW_SIZE) as _,
             (Self::INPUT_SIZE + Self::SHADOW_SIZE) as _,
-        )
-        .unwrap();
-        unsafe { self.shadow_rt_surface.as_ref() }
-            .set_input_region(Some(&r))
-            .unwrap();
-        let r = unsafe { self.compositor.as_ref() }.create_region().unwrap();
-        r.add(
+        );
+        self.shadow_rb.set_input_region(
+            unsafe { self.compositor.as_ref() },
             0,
             0,
             (Self::INPUT_SIZE + Self::SHADOW_SIZE) as _,
             (Self::INPUT_SIZE + Self::SHADOW_SIZE) as _,
-        )
-        .unwrap();
-        unsafe { self.shadow_rb_surface.as_ref() }
-            .set_input_region(Some(&r))
-            .unwrap();
+        );
 
         // commit
-        unsafe { self.shadow_lb_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_rt_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_rb_surface.as_ref() }.commit().unwrap();
-        unsafe { self.shadow_left_surface.as_ref() }
-            .commit()
-            .unwrap();
-        unsafe { self.shadow_right_surface.as_ref() }
-            .commit()
-            .unwrap();
-        unsafe { self.shadow_top_surface.as_ref() }
-            .commit()
-            .unwrap();
-        unsafe { self.shadow_bottom_surface.as_ref() }
-            .commit()
-            .unwrap();
+        self.shadow_lt.commit();
+        self.shadow_lb.commit();
+        self.shadow_rt.commit();
+        self.shadow_rb.commit();
+        self.shadow_left.commit();
+        self.shadow_right.commit();
+        self.shadow_top.commit();
+        self.shadow_bottom.commit();
     }
 
     pub fn resize_edge(&self, enter_surface: &wl::Surface) -> Option<wl::XdgToplevelResizeEdge> {
-        if core::ptr::addr_eq(enter_surface, self.shadow_left_surface.as_ptr()) {
+        if core::ptr::addr_eq(enter_surface, self.shadow_left.surface.as_ptr()) {
             return Some(wl::XdgToplevelResizeEdge::Left);
         }
-        if core::ptr::addr_eq(enter_surface, self.shadow_right_surface.as_ptr()) {
+        if core::ptr::addr_eq(enter_surface, self.shadow_right.surface.as_ptr()) {
             return Some(wl::XdgToplevelResizeEdge::Right);
         }
-        if core::ptr::addr_eq(enter_surface, self.shadow_top_surface.as_ptr()) {
+        if core::ptr::addr_eq(enter_surface, self.shadow_top.surface.as_ptr()) {
             return Some(wl::XdgToplevelResizeEdge::Top);
         }
-        if core::ptr::addr_eq(enter_surface, self.shadow_bottom_surface.as_ptr()) {
+        if core::ptr::addr_eq(enter_surface, self.shadow_bottom.surface.as_ptr()) {
             return Some(wl::XdgToplevelResizeEdge::Bottom);
         }
-        if core::ptr::addr_eq(enter_surface, self.shadow_lt_surface.as_ptr()) {
+        if core::ptr::addr_eq(enter_surface, self.shadow_lt.surface.as_ptr()) {
             return Some(wl::XdgToplevelResizeEdge::TopLeft);
         }
-        if core::ptr::addr_eq(enter_surface, self.shadow_lb_surface.as_ptr()) {
+        if core::ptr::addr_eq(enter_surface, self.shadow_lb.surface.as_ptr()) {
             return Some(wl::XdgToplevelResizeEdge::BottomLeft);
         }
-        if core::ptr::addr_eq(enter_surface, self.shadow_rt_surface.as_ptr()) {
+        if core::ptr::addr_eq(enter_surface, self.shadow_rt.surface.as_ptr()) {
             return Some(wl::XdgToplevelResizeEdge::TopRight);
         }
-        if core::ptr::addr_eq(enter_surface, self.shadow_rb_surface.as_ptr()) {
+        if core::ptr::addr_eq(enter_surface, self.shadow_rb.surface.as_ptr()) {
             return Some(wl::XdgToplevelResizeEdge::BottomRight);
         }
 
@@ -2004,6 +1996,6 @@ impl AppShellDecorator {
 }
 
 pub struct ExportedShellData {
-    pub object: wl::Owned<wl::ZxdgExportedV2>,
+    pub _object: wl::Owned<wl::ZxdgExportedV2>,
     pub handle: std::ffi::CString,
 }

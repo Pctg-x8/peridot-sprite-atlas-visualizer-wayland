@@ -81,7 +81,7 @@ impl DynamicAtlasManager {
         {
             Ok(exact) => exact,
             Err(large_enough) if large_enough >= self.available_regions.len() => {
-                tracing::warn!(
+                tracing::error!(
                     phase = "matching width",
                     available = ?self.available_regions.iter().map(|&(x, _)| x).collect::<Vec<_>>(),
                     "not found"
@@ -99,7 +99,7 @@ impl DynamicAtlasManager {
                 Err(large_enough)
                     if large_enough >= self.available_regions[match_index_by_width].1.len() =>
                 {
-                    tracing::warn!(
+                    tracing::trace!(
                         phase = "matching height",
                         available = ?self.available_regions[match_index_by_width].1.iter().map(|&(x, _)| x).collect::<Vec<_>>(),
                         "not found, trying more wider"

@@ -424,40 +424,30 @@ impl UnsafeStagingScratchBufferManagerRaw {
 }
 
 pub struct BufferedStagingScratchBuffer<'subsystem> {
-    buffers: Vec<RwLock<StagingScratchBufferManager<'subsystem>>>,
+    buffers: Vec<StagingScratchBufferManager<'subsystem>>,
     active_index: usize,
 }
 impl<'subsystem> BufferedStagingScratchBuffer<'subsystem> {
     pub fn new(subsystem: &'subsystem Subsystem, count: usize) -> Self {
         Self {
-            buffers: core::iter::repeat_with(|| {
-                RwLock::new(StagingScratchBufferManager::new(subsystem))
-            })
-            .take(count)
-            .collect(),
+            buffers: core::iter::repeat_with(|| StagingScratchBufferManager::new(subsystem))
+                .take(count)
+                .collect(),
             active_index: 0,
         }
     }
 
     pub fn flip_next_and_ready(&mut self) {
         self.active_index = (self.active_index + 1) % self.buffers.len();
-        self.buffers[self.active_index].get_mut().reset();
+        self.buffers[self.active_index].reset();
     }
 
-    pub fn active_buffer<'s>(
-        &'s self,
-    ) -> parking_lot::RwLockReadGuard<'s, StagingScratchBufferManager<'subsystem>> {
-        self.buffers[self.active_index].read()
+    pub fn active_buffer<'s>(&'s self) -> &'s StagingScratchBufferManager<'subsystem> {
+        &self.buffers[self.active_index]
     }
 
     pub fn active_buffer_mut<'s>(&'s mut self) -> &'s mut StagingScratchBufferManager<'subsystem> {
-        self.buffers[self.active_index].get_mut()
-    }
-
-    pub fn active_buffer_locked<'s>(
-        &'s self,
-    ) -> parking_lot::RwLockWriteGuard<'s, StagingScratchBufferManager<'subsystem>> {
-        self.buffers[self.active_index].write()
+        &mut self.buffers[self.active_index]
     }
 }
 

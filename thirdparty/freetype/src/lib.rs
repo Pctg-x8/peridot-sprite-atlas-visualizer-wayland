@@ -5,6 +5,7 @@ use std::{
 
 use bitflags::bitflags;
 use freetype2::{
+    errors::FT_Error_String,
     modapi::{FT_Property_Get, FT_Property_Set},
     *,
 };
@@ -217,18 +218,18 @@ impl Face {
     }
 
     #[inline]
-    pub fn load_glyph(&mut self, glyph: FT_UInt, load_flags: LoadFlags) -> Result<(), FT_Error> {
+    pub fn load_glyph(&mut self, glyph: FT_UInt, load_flags: LoadFlags) -> Result<(), Error> {
         match unsafe { FT_Load_Glyph(self as *mut _ as _, glyph, load_flags.bits()) } {
             0 => Ok(()),
-            r => Err(r),
+            r => Err(Error(r)),
         }
     }
 
     #[inline]
-    pub fn render_glyph(&mut self, render_mode: RenderMode) -> Result<(), FT_Error> {
+    pub fn render_glyph(&mut self, render_mode: RenderMode) -> Result<(), Error> {
         let r = unsafe { FT_Render_Glyph(self.0.glyph, render_mode as _) };
         if r != 0 {
-            return Err(r);
+            return Err(Error(r));
         }
 
         Ok(())
@@ -236,5 +237,15 @@ impl Face {
 
     pub const fn glyph_slot(&self) -> Option<&FT_GlyphSlotRec> {
         unsafe { self.0.glyph.as_ref() }
+    }
+}
+
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Error(FT_Error);
+impl core::fmt::Debug for Error {
+    #[inline]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        unsafe { core::ffi::CStr::from_ptr(FT_Error_String(self.0)) }.fmt(f)
     }
 }

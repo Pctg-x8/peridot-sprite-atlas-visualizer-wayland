@@ -367,7 +367,7 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
         }
 
         if msg == WM_DPICHANGED {
-            Self::ui_scale_factor_cell(hwnd).set((wparam.0 & 0xffff) as u16 as _);
+            Self::ui_scale_factor_cell(hwnd).set((wparam.0 & 0xffff) as u16 as f32 / 96.0);
             return LRESULT(0);
         }
 

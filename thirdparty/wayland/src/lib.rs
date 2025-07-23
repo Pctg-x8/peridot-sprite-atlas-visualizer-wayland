@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use core::{
     ops::{Deref, DerefMut},
     ptr::NonNull,

@@ -3317,6 +3317,8 @@ async fn app_menu_on_add_sprite<'sys, 'subsystem>(
                 .into_iter()
                 .filter_map(|e| e.ok())
             {
+                use crate::app_state::SpriteInfo;
+
                 let path = entry.path();
                 if !path.is_file() {
                     // 自分自身を含むみたいなのでその場合は見逃す
@@ -3337,6 +3339,8 @@ async fn app_menu_on_add_sprite<'sys, 'subsystem>(
                 ));
             }
         } else {
+            use crate::app_state::SpriteInfo;
+
             let mut fs = std::fs::File::open(&path).unwrap();
             let png_meta = match source_reader::png::Metadata::try_read(&mut fs) {
                 Some(x) => x,
@@ -3358,7 +3362,9 @@ async fn app_menu_on_add_sprite<'sys, 'subsystem>(
     app_state.borrow_mut().add_sprites(added_sprites);
 }
 
+#[cfg(unix)]
 struct DesktopPortal;
+#[cfg(unix)]
 impl DesktopPortal {
     #[tracing::instrument(name = "DesktopPortal::try_get_file_chooser", skip(dbus))]
     pub async fn try_get_file_chooser(dbus: &DBusLink) -> Option<DesktopPortalFileChooser> {
@@ -3410,7 +3416,9 @@ impl DesktopPortal {
     }
 }
 
+#[cfg(unix)]
 struct DesktopPortalFileChooser;
+#[cfg(unix)]
 impl DesktopPortalFileChooser {
     pub async fn get_version(&self, dbus: &DBusLink) -> Result<u32, dbus::Error> {
         let reply_msg = dbus
@@ -3492,9 +3500,11 @@ impl DesktopPortalFileChooser {
     }
 }
 
+#[cfg(unix)]
 pub struct DesktopPortalRequestObject {
     object_path: std::ffi::CString,
 }
+#[cfg(unix)]
 impl DesktopPortalRequestObject {
     pub fn new(object_path: std::ffi::CString) -> Self {
         Self { object_path }

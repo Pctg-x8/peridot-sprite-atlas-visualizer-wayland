@@ -2,7 +2,6 @@ use std::{
     cell::{Cell, UnsafeCell},
     path::PathBuf,
     pin::Pin,
-    sync::Arc,
 };
 
 use bedrock::{self as br, SurfaceCreateInfo};
@@ -11,7 +10,7 @@ use windows::{
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM},
         Graphics::{
-            Dwm::{DwmDefWindowProc, DwmExtendFrameIntoClientArea},
+            Dwm::DwmExtendFrameIntoClientArea,
             Gdi::{
                 DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, GetMonitorInfoW, HBRUSH,
                 MONITOR_DEFAULTTOPRIMARY, MONITORINFOEXW, MapWindowPoints, MonitorFromWindow,
@@ -402,12 +401,12 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
         }
 
         if msg == WM_LBUTTONDOWN || msg == WM_NCLBUTTONDOWN {
-            Self::app_event_bus(hwnd).push(AppEvent::MainWindowPointerLeftDown { enter_serial: 0 });
+            Self::app_event_bus(hwnd).push(AppEvent::MainWindowPointerLeftDown);
             return LRESULT(0);
         }
 
         if msg == WM_LBUTTONUP || msg == WM_NCLBUTTONUP {
-            Self::app_event_bus(hwnd).push(AppEvent::MainWindowPointerLeftUp { enter_serial: 0 });
+            Self::app_event_bus(hwnd).push(AppEvent::MainWindowPointerLeftUp);
             return LRESULT(0);
         }
 
@@ -415,7 +414,6 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
             let ui_scale_factor = Self::ui_scale_factor_cell(hwnd).get();
 
             Self::app_event_bus(hwnd).push(AppEvent::MainWindowPointerMove {
-                enter_serial: 0,
                 surface_x: (lparam.0 & 0xffff) as i16 as f32 / ui_scale_factor,
                 surface_y: ((lparam.0 >> 16) & 0xffff) as i16 as f32 / ui_scale_factor,
             });
@@ -434,7 +432,6 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
             let ui_scale_factor = Self::ui_scale_factor_cell(hwnd).get();
 
             Self::app_event_bus(hwnd).push(AppEvent::MainWindowPointerMove {
-                enter_serial: 0,
                 surface_x: p[0].x as f32 / ui_scale_factor,
                 surface_y: p[0].y as f32 / ui_scale_factor,
             });
@@ -544,7 +541,7 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
     }
 
     #[tracing::instrument(skip(self))]
-    pub fn set_cursor_shape(&self, _enter_serial: u32, shape: CursorShape) {
+    pub fn set_cursor_shape(&self, shape: CursorShape) {
         unsafe {
             SetCursor(match shape {
                 // TODO: 必要ならキャッシュする

@@ -3,6 +3,8 @@ name = "harfbuzz"
 version = "0.1.0"
 edition = "2024"
 
+build = "build.rs"
+
 [dependencies]
 freetype2.workspace = true
 freetype = { path = "../freetype" }

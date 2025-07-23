@@ -30,6 +30,16 @@ impl Cache {
 
             PathBuf::from(url.file_system_representation().to_str().unwrap())
         };
+        #[cfg(windows)]
+        let base_path = {
+            let base = PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("no %LOCALAPPDATA%"));
+            let p = base.join("peridot/sprite-atlas-visualizer");
+            if let Err(e) = std::fs::create_dir_all(&p) {
+                tracing::warn!(reason = ?e, path = %p.display(), "creating cachedir failed");
+            }
+
+            p
+        };
 
         tracing::info!(path = %base_path.display(), "cache initialized");
         Self { base_path }

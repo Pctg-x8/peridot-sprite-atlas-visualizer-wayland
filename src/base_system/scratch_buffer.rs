@@ -234,7 +234,7 @@ impl UnsafeStagingScratchBufferManagerRaw {
         self.total_reserve_amount
     }
 
-    pub fn reset(&mut self) {
+    fn reset(&mut self) {
         // TODO: ここbuffer blockの再利用はどうするかあとで考える
         self.buffer_blocks.shrink_to(1);
         self.buffer_blocks[0].next_suitable_index = None;
@@ -479,7 +479,7 @@ impl<'g> StagingScratchBufferManager<'g> {
     }
 
     #[inline(always)]
-    pub fn reset(&mut self) {
+    fn reset(&mut self) {
         self.raw.reset();
     }
 

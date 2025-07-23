@@ -1360,34 +1360,34 @@ impl FrameView {
     fn update(&self, app_system: &mut AppBaseSystem, current_sec: f32) {
         if let Some(shown) = self.shown.get_if_triggered() {
             if shown {
-                app_system.composite_tree.get_mut(self.ct_root).offset[0] =
-                    AnimatableFloat::Animated {
-                        from_value: -self.width.get() * self.ui_scale_factor.get(),
-                        to_value: Self::FLOATING_MARGIN * self.ui_scale_factor.get(),
-                        start_sec: current_sec,
-                        end_sec: current_sec + 0.25,
-                        curve: AnimationCurve::CubicBezier {
-                            p1: (0.4, 1.25),
-                            p2: (0.5, 1.0),
-                        },
-                        event_on_complete: None,
-                    };
-                app_system.composite_tree.mark_dirty(self.ct_root);
+                self.ct_root
+                    .entity_mut_dirtified(&mut app_system.composite_tree)
+                    .offset[0] = AnimatableFloat::Animated {
+                    from_value: -self.width.get(),
+                    to_value: Self::FLOATING_MARGIN,
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.25,
+                    curve: AnimationCurve::CubicBezier {
+                        p1: (0.4, 1.25),
+                        p2: (0.5, 1.0),
+                    },
+                    event_on_complete: None,
+                };
                 app_system.hit_tree.get_data_mut(self.ht_frame).left = Self::FLOATING_MARGIN;
             } else {
-                app_system.composite_tree.get_mut(self.ct_root).offset[0] =
-                    AnimatableFloat::Animated {
-                        from_value: Self::FLOATING_MARGIN * self.ui_scale_factor.get(),
-                        to_value: -self.width.get() * self.ui_scale_factor.get(),
-                        start_sec: current_sec,
-                        end_sec: current_sec + 0.25,
-                        curve: AnimationCurve::CubicBezier {
-                            p1: (0.4, 1.25),
-                            p2: (0.5, 1.0),
-                        },
-                        event_on_complete: None,
-                    };
-                app_system.composite_tree.mark_dirty(self.ct_root);
+                self.ct_root
+                    .entity_mut_dirtified(&mut app_system.composite_tree)
+                    .offset[0] = AnimatableFloat::Animated {
+                    from_value: Self::FLOATING_MARGIN,
+                    to_value: -self.width.get(),
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.25,
+                    curve: AnimationCurve::CubicBezier {
+                        p1: (0.4, 1.25),
+                        p2: (0.5, 1.0),
+                    },
+                    event_on_complete: None,
+                };
                 app_system.hit_tree.get_data_mut(self.ht_frame).left = -self.width.get();
             }
         }

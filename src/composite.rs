@@ -2391,8 +2391,8 @@ impl UnboundedCompositionSurfaceAtlas {
         region_manager.free(AtlasRect {
             left: 0,
             top: 0,
-            right: size,
-            bottom: size,
+            right: Self::GRANULARITY,
+            bottom: Self::GRANULARITY,
         });
 
         let (memory, _) = memory.unmanage();

@@ -79,16 +79,11 @@ pub enum AppEvent {
     ToplevelWindowMinimizeRequest,
     ToplevelWindowMaximizeRequest,
     MainWindowPointerMove {
-        enter_serial: u32,
         surface_x: f32,
         surface_y: f32,
     },
-    MainWindowPointerLeftDown {
-        enter_serial: u32,
-    },
-    MainWindowPointerLeftUp {
-        enter_serial: u32,
-    },
+    MainWindowPointerLeftDown,
+    MainWindowPointerLeftUp,
     UIPopupClose {
         id: uuid::Uuid,
     },
@@ -3148,7 +3143,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     }
                 }
                 AppEvent::MainWindowPointerMove {
-                    enter_serial,
                     surface_x,
                     surface_y,
                 } => {
@@ -3165,14 +3159,13 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         HitTestTreeManager::ROOT,
                     );
                     app_shell.set_cursor_shape(
-                        enter_serial,
                         unsafe { &mut *app_shell.pointer_input_manager().get() }
                             .cursor_shape(&mut app_system.hit_tree, &mut app_update_context),
                     );
 
                     last_pointer_pos = (surface_x, surface_y);
                 }
-                AppEvent::MainWindowPointerLeftDown { enter_serial } => {
+                AppEvent::MainWindowPointerLeftDown => {
                     app_update_context.ui_scale_factor = app_shell.ui_scale_factor();
                     let (cw, ch) = client_size.get();
 
@@ -3188,12 +3181,11 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                             HitTestTreeManager::ROOT,
                         );
                     app_shell.set_cursor_shape(
-                        enter_serial,
                         unsafe { &mut *app_shell.pointer_input_manager().get() }
                             .cursor_shape(&mut app_system.hit_tree, &mut app_update_context),
                     );
                 }
-                AppEvent::MainWindowPointerLeftUp { enter_serial } => {
+                AppEvent::MainWindowPointerLeftUp => {
                     app_update_context.ui_scale_factor = app_shell.ui_scale_factor();
                     let (cw, ch) = client_size.get();
 
@@ -3208,7 +3200,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         HitTestTreeManager::ROOT,
                     );
                     app_shell.set_cursor_shape(
-                        enter_serial,
                         unsafe { &mut *app_shell.pointer_input_manager().get() }
                             .cursor_shape(&mut app_system.hit_tree, &mut app_update_context),
                     );

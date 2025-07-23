@@ -482,7 +482,7 @@ impl ToggleButtonView {
             }
 
             let ct_icon = app_system.composite_tree.get_mut(self.ct_icon);
-            ct_icon.texatlas_rect = self.icon_atlas_rect.clone();
+            ct_icon.texatlas_rect = self.icon_atlas_rect;
             if !place_inner {
                 // flip icon when placed outer
                 core::mem::swap(

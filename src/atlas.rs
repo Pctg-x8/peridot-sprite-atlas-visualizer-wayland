@@ -1,6 +1,6 @@
 use bedrock as br;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AtlasRect {
     pub left: u32,
     pub top: u32,
@@ -74,6 +74,7 @@ impl DynamicAtlasManager {
 
     #[tracing::instrument(name = "DynamicAtlasManager::alloc", skip(self))]
     pub fn alloc(&mut self, width: u32, height: u32) -> Option<AtlasRect> {
+        tracing::debug!(available_regions = ?self.available_regions, "alloc state");
         // find best match
         let mut match_index_by_width = match self
             .available_regions
@@ -114,51 +115,106 @@ impl DynamicAtlasManager {
             }
         };
 
-        let match_rects_by_width = &mut self.available_regions[match_index_by_width].1;
-        let (_, mut rect) = match_rects_by_width.remove(match_index_by_height);
-        if match_rects_by_width.is_empty() {
-            // remove width line
-            self.available_regions.remove(match_index_by_width);
+        let mut rect = self.available_regions[match_index_by_width].1[match_index_by_height].1;
+        assert!(rect.width() >= width);
+        assert!(rect.height() >= height);
+        rect.right = rect.left + width;
+        rect.bottom = rect.top + height;
+
+        // for all regions, overlapped rects needs to be splitted
+        'split_loop: loop {
+            let modification_target = 'find_overlap: {
+                for (nw, (_, xs)) in self.available_regions.iter().enumerate() {
+                    for (nh, (_, r)) in xs.iter().enumerate() {
+                        if r == &rect {
+                            // exact match rect
+                            break 'find_overlap (nw, nh);
+                        }
+
+                        let h_contact = r.left < rect.right && rect.left < r.right;
+                        let v_contact = r.top < rect.bottom && rect.top < r.bottom;
+
+                        if h_contact && v_contact {
+                            // overlap
+                            // tracing::trace!(?r, ?rect, "overlap found");
+                            break 'find_overlap (nw, nh);
+                        }
+                    }
+                }
+
+                // no overlap found
+                break 'split_loop;
+            };
+
+            let (overlap_rect, _) =
+                self.unregister_rect_by_index(modification_target.0, modification_target.1);
+            if overlap_rect == rect {
+                // exact match: take all
+                continue;
+            }
+
+            let left_gap = if overlap_rect.left < rect.left {
+                Some(rect.left - overlap_rect.left)
+            } else {
+                None
+            };
+            let right_gap = if overlap_rect.right > rect.right {
+                Some(overlap_rect.right - rect.right)
+            } else {
+                None
+            };
+            let top_gap = if overlap_rect.top < rect.top {
+                Some(rect.top - overlap_rect.top)
+            } else {
+                None
+            };
+            let bottom_gap = if overlap_rect.bottom > rect.bottom {
+                Some(overlap_rect.bottom - rect.bottom)
+            } else {
+                None
+            };
+
+            // tracing::trace!(left = ?left_gap, right = ?right_gap, top = ?top_gap, bottom = ?bottom_gap, "gaps");
+
+            if let Some(w) = left_gap {
+                self.register_rect(AtlasRect {
+                    left: overlap_rect.left,
+                    right: overlap_rect.left + w,
+                    top: overlap_rect.top,
+                    bottom: overlap_rect.bottom,
+                });
+            }
+            if let Some(w) = right_gap {
+                self.register_rect(AtlasRect {
+                    left: overlap_rect.right - w,
+                    right: overlap_rect.right,
+                    top: overlap_rect.top,
+                    bottom: overlap_rect.bottom,
+                });
+            }
+            if let Some(h) = top_gap {
+                self.register_rect(AtlasRect {
+                    left: overlap_rect.left,
+                    right: overlap_rect.right,
+                    top: overlap_rect.top,
+                    bottom: overlap_rect.top + h,
+                });
+            }
+            if let Some(h) = bottom_gap {
+                self.register_rect(AtlasRect {
+                    left: overlap_rect.left,
+                    right: overlap_rect.right,
+                    top: overlap_rect.bottom - h,
+                    bottom: overlap_rect.bottom,
+                });
+            }
         }
 
-        match (rect.width() == width, rect.height() == height) {
-            (true, true) => {
-                // exact match
-                return Some(rect);
-            }
-            (true, false) => {
-                // split horizontally
-                self.insert_rect_simple(rect.hsplit(height));
-                Some(rect)
-            }
-            (false, true) => {
-                // split vertically
-                self.insert_rect_simple(rect.vsplit(width));
-                Some(rect)
-            }
-            (false, false) => {
-                // shrink
-                self.insert_rect_simple(AtlasRect {
-                    left: rect.left,
-                    right: rect.right,
-                    top: rect.top + height,
-                    bottom: rect.bottom,
-                });
-                self.insert_rect_simple(AtlasRect {
-                    left: rect.left + width,
-                    right: rect.right,
-                    top: rect.top,
-                    bottom: rect.bottom,
-                });
-                rect.right = rect.left + width;
-                rect.bottom = rect.top + height;
-                Some(rect)
-            }
-        }
+        Some(rect)
     }
 
     pub fn free(&mut self, rect: AtlasRect) {
-        let inserted_indices = self.insert_rect_simple(rect);
+        let inserted_indices = self.register_rect(rect);
         self.merge_recursively(inserted_indices);
     }
 
@@ -231,7 +287,7 @@ impl DynamicAtlasManager {
                     // completely overlapped
                     self.unregister_rect_by_index(target_nw, target_nh);
                 }
-                let inserted_index = self.insert_rect_simple(merged_rect);
+                let inserted_index = self.register_rect(merged_rect);
                 self.merge_recursively(inserted_index);
             }
             MergeOperation::ToRight(mut target_nw, mut target_nh) => {
@@ -256,7 +312,7 @@ impl DynamicAtlasManager {
                     // completely overlapped
                     self.unregister_rect_by_index(target_nw, target_nh);
                 }
-                let inserted_index = self.insert_rect_simple(merged_rect);
+                let inserted_index = self.register_rect(merged_rect);
                 self.merge_recursively(inserted_index);
             }
             MergeOperation::ToTop(mut target_nw, mut target_nh) => {
@@ -281,7 +337,7 @@ impl DynamicAtlasManager {
                     // completely overlapped
                     self.unregister_rect_by_index(target_nw, target_nh);
                 }
-                let inserted_index = self.insert_rect_simple(merged_rect);
+                let inserted_index = self.register_rect(merged_rect);
                 self.merge_recursively(inserted_index);
             }
             MergeOperation::ToBottom(mut target_nw, mut target_nh) => {
@@ -306,7 +362,7 @@ impl DynamicAtlasManager {
                     // completely overlapped
                     self.unregister_rect_by_index(target_nw, target_nh);
                 }
-                let inserted_index = self.insert_rect_simple(merged_rect);
+                let inserted_index = self.register_rect(merged_rect);
                 self.merge_recursively(inserted_index);
             }
         }
@@ -324,13 +380,19 @@ impl DynamicAtlasManager {
     }
 
     /// simply insert a rect into correct position(no merging performed)
-    fn insert_rect_simple(&mut self, rect: AtlasRect) -> (usize, usize) {
+    fn register_rect(&mut self, rect: AtlasRect) -> (usize, usize) {
+        tracing::trace!(?rect, "insrect");
         match self
             .available_regions
             .binary_search_by_key(&rect.width(), |&(w, _)| w)
         {
             Ok(width_index) => {
                 let width_line = &mut self.available_regions[width_index].1;
+                if let Some(nh) = width_line.iter().position(|(_, r)| r == &rect) {
+                    // already registered
+                    return (width_index, nh);
+                }
+
                 let height_insert_point = width_line
                     .binary_search_by_key(&rect.height(), |&(h, _)| h)
                     .map_or_else(|x| x, |x| x);

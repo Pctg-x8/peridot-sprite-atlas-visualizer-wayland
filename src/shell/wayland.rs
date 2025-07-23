@@ -249,9 +249,8 @@ impl wl::PointerEventListener for WaylandShellEventHandler<'_, '_> {
                     )
                     .unwrap();
             }
-            PointerOnSurface::Main { serial } => {
+            PointerOnSurface::Main { .. } => {
                 self.app_event_bus.push(AppEvent::MainWindowPointerMove {
-                    enter_serial: serial,
                     surface_x: surface_x.to_f32() * self.buffer_scale as f32 / self.ui_scale_factor,
                     surface_y: surface_y.to_f32() * self.buffer_scale as f32 / self.ui_scale_factor,
                 })
@@ -284,12 +283,11 @@ impl wl::PointerEventListener for WaylandShellEventHandler<'_, '_> {
         match self.pointer_on_surface {
             PointerOnSurface::None => (),
             PointerOnSurface::ResizeEdge { .. } => (),
-            PointerOnSurface::Main { serial } => {
+            PointerOnSurface::Main { .. } => {
                 // TODO: pointer recognition
                 self.pointer_last_surface_pos = (surface_x, surface_y);
 
                 self.app_event_bus.push(AppEvent::MainWindowPointerMove {
-                    enter_serial: serial,
                     surface_x: surface_x.to_f32() * self.buffer_scale as f32 / self.ui_scale_factor,
                     surface_y: surface_y.to_f32() * self.buffer_scale as f32 / self.ui_scale_factor,
                 })
@@ -315,9 +313,7 @@ impl wl::PointerEventListener for WaylandShellEventHandler<'_, '_> {
                         .unwrap();
                 }
             }
-            PointerOnSurface::Main {
-                serial: enter_serial,
-            } => {
+            PointerOnSurface::Main { .. } => {
                 if button == BTN_LEFT && state == wl::PointerButtonState::Pressed {
                     // TODO: detect whether floating window system and client side decorated
                     let role = self
@@ -344,11 +340,9 @@ impl wl::PointerEventListener for WaylandShellEventHandler<'_, '_> {
                         _ => (),
                     }
 
-                    self.app_event_bus
-                        .push(AppEvent::MainWindowPointerLeftDown { enter_serial });
+                    self.app_event_bus.push(AppEvent::MainWindowPointerLeftDown);
                 } else if button == BTN_LEFT && state == wl::PointerButtonState::Released {
-                    self.app_event_bus
-                        .push(AppEvent::MainWindowPointerLeftUp { enter_serial });
+                    self.app_event_bus.push(AppEvent::MainWindowPointerLeftUp);
                 } else if button == BTN_RIGHT && state == wl::PointerButtonState::Pressed {
                     // TODO: detect whether floating window system and client side decorated
                     let role = self
@@ -1266,8 +1260,19 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
         unsafe { &*self.shell_event_handler.get() }.tiled
     }
 
-    #[tracing::instrument(skip(self))]
-    pub fn set_cursor_shape(&self, enter_serial: u32, shape: CursorShape) {
+    #[tracing::instrument(skip(self), fields(enter_serial))]
+    pub fn set_cursor_shape(&self, shape: CursorShape) {
+        let PointerOnSurface::Main {
+            serial: enter_serial,
+        } = unsafe { &*self.shell_event_handler.get() }.pointer_on_surface
+        else {
+            // not entered
+            tracing::warn!("Pointer not entered on main surface!");
+            return;
+        };
+
+        tracing::Span::current().record("enter_serial", tracing::field::display(enter_serial));
+
         if let Err(e) = unsafe { self.cursor_shape_device.as_ref() }.set_shape(
             enter_serial,
             match shape {
@@ -1332,48 +1337,6 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             },
         })
     }
-}
-
-fn try_create_shm_random_suffix(
-    prefix: String,
-) -> Result<Option<TemporalSharedMemory>, std::io::Error> {
-    let mut path_cstr_bytes = prefix.into_bytes();
-    path_cstr_bytes.extend(b"XXXXXX\0");
-    // random name gen: https://wayland-book.com/surfaces/shared-memory.html
-    for _ in 0..100 {
-        let mut ts = core::mem::MaybeUninit::uninit();
-        if unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, ts.as_mut_ptr()) } < 0 {
-            continue;
-        }
-        let ts = unsafe { ts.assume_init_ref() };
-        let mut r = ts.tv_nsec;
-        for p in 0..6 {
-            let fplen = path_cstr_bytes.len();
-            path_cstr_bytes[fplen - p - 2] = b'A' + (r & 15) as u8 + (r & 16) as u8 * 2;
-            r >>= 5;
-        }
-
-        match TemporalSharedMemory::create(
-            unsafe { std::ffi::CString::from_vec_with_nul_unchecked(path_cstr_bytes) },
-            OpenFlags::READ_WRITE | OpenFlags::EXCLUSIVE,
-            0o600,
-        ) {
-            Ok(x) => {
-                return Ok(Some(x));
-            }
-            Err((e, name)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // name conflict: retry
-                path_cstr_bytes = name.into_bytes_with_nul();
-                continue;
-            }
-            Err((e, _)) => {
-                return Err(e);
-            }
-        }
-    }
-
-    tracing::error!("shm creation failed(similar names already exists, try limit reached)");
-    Ok(None)
 }
 
 struct AppShellDecorationShadow {
@@ -1998,4 +1961,46 @@ impl AppShellDecorator {
 pub struct ExportedShellData {
     pub _object: wl::Owned<wl::ZxdgExportedV2>,
     pub handle: std::ffi::CString,
+}
+
+fn try_create_shm_random_suffix(
+    prefix: String,
+) -> Result<Option<TemporalSharedMemory>, std::io::Error> {
+    let mut path_cstr_bytes = prefix.into_bytes();
+    path_cstr_bytes.extend(b"XXXXXX\0");
+    // random name gen: https://wayland-book.com/surfaces/shared-memory.html
+    for _ in 0..100 {
+        let mut ts = core::mem::MaybeUninit::uninit();
+        if unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, ts.as_mut_ptr()) } < 0 {
+            continue;
+        }
+        let ts = unsafe { ts.assume_init_ref() };
+        let mut r = ts.tv_nsec;
+        for p in 0..6 {
+            let fplen = path_cstr_bytes.len();
+            path_cstr_bytes[fplen - p - 2] = b'A' + (r & 15) as u8 + (r & 16) as u8 * 2;
+            r >>= 5;
+        }
+
+        match TemporalSharedMemory::create(
+            unsafe { std::ffi::CString::from_vec_with_nul_unchecked(path_cstr_bytes) },
+            OpenFlags::READ_WRITE | OpenFlags::EXCLUSIVE,
+            0o600,
+        ) {
+            Ok(x) => {
+                return Ok(Some(x));
+            }
+            Err((e, name)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // name conflict: retry
+                path_cstr_bytes = name.into_bytes_with_nul();
+                continue;
+            }
+            Err((e, _)) => {
+                return Err(e);
+            }
+        }
+    }
+
+    tracing::error!("shm creation failed(similar names already exists, try limit reached)");
+    Ok(None)
 }

@@ -251,7 +251,7 @@ impl CommonFrameView {
             curve: AnimationCurve::Linear,
             event_on_complete: None,
         };
-        ct.get_mut(self.ct_root).offset[1] = AnimatableFloat::Animated {
+        /*ct.get_mut(self.ct_root).offset[1] = AnimatableFloat::Animated {
             from_value: (-0.5 * self.height + 8.0) * self.ui_scale_factor,
             to_value: (-0.5 * self.height) * self.ui_scale_factor,
             start_sec: current_sec,
@@ -261,7 +261,7 @@ impl CommonFrameView {
                 p2: (0.5, 0.9),
             },
             event_on_complete: None,
-        };
+        };*/
         ct.get_mut(self.ct_root).scale_x = AnimatableFloat::Animated {
             from_value: 0.9,
             to_value: 1.0,

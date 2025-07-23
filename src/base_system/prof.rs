@@ -52,18 +52,6 @@ impl ProfilingFrameContext {
 
     #[inline(always)]
     pub fn record(&mut self, _marker: ProfileMarker, _cat: ProfileMarkerCategory) {}
-
-    #[inline(always)]
-    pub fn begin_resize(&mut self) {}
-
-    #[inline(always)]
-    pub fn end_resize(&mut self) {}
-
-    #[inline(always)]
-    pub fn begin_populate_composite_instances(&mut self) {}
-
-    #[inline(always)]
-    pub fn end_populate_composite_instances(&mut self) {}
 }
 
 pub struct ProfilingContext {

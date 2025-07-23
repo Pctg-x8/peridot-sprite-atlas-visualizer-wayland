@@ -862,6 +862,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a282da65faaf38286cf3be983213fcf1d2e2a58700e808f83f4ea9a4804bc0"
 
 [[package]]
+name = "microsoft-sdk-locator"
+version = "0.1.0"
+dependencies = [
+ "win32-registry",
+ "windows 0.61.3",
+]
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1037,6 +1045,7 @@ dependencies = [
  "image",
  "libc",
  "lyon_geom",
+ "microsoft-sdk-locator",
  "objc-rt",
  "parking_lot",
  "quick-xml",
@@ -1795,6 +1804,13 @@ name = "weezl"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a751b3277700db47d3e574514de2eced5e54dc8a5436a3bf7a0b248b2cee16f3"
+
+[[package]]
+name = "win32-registry"
+version = "0.1.0"
+dependencies = [
+ "windows 0.61.3",
+]
 
 [[package]]
 name = "winapi"

@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use bedrock::{
     self as br, DeviceChildHandle, Image, ImageChild, MemoryBound, ShaderModule,
-    TypedVulkanStructure, VkHandle, VkObject,
+    TypedVulkanStructure, VkHandle,
 };
 
 use crate::{

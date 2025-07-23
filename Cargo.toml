@@ -1,12 +1,14 @@
 [workspace]
 members = [
     "devtools/perflog-printer",
+    "platform/win32/registry",
     "shared/ffi-common",
     "shared/perflog-proto",
     "thirdparty/dbus",
     "thirdparty/fontconfig",
     "thirdparty/freetype",
     "thirdparty/harfbuzz",
+    "thirdparty/microsoft-sdk-locator",
     "thirdparty/objc-rt",
     "thirdparty/wayland",
 ]
@@ -40,6 +42,7 @@ bitflags = "2.9.0"
 quick-xml = "0.37.5"
 thiserror = "2.0.12"
 freetype2 = { git = "https://github.com/Pctg-x8/ft2-rs" }
+windows = "0.61"
 
 [dependencies]
 # Note: MoltenVKが正しくVulkan 1.3以上に対応してないので（promoteされたシンボルの一部がないらしい）Allow1_4APIsはプラットフォームfeature側で有効にする
@@ -70,12 +73,15 @@ wayland = { path = "./thirdparty/wayland", optional = true }
 dbus = { path = "./thirdparty/dbus" }
 fontconfig = { path = "./thirdparty/fontconfig" }
 
+[target.'cfg(windows)'.build-dependencies]
+microsoft-sdk-locator.path = "./thirdparty/microsoft-sdk-locator"
+
 [target.'cfg(windows)'.dependencies]
 windows-future = "0.2.1"
 windows-core = "0.61.2"
 
 [target.'cfg(windows)'.dependencies.windows]
-version = "0.61"
+workspace = true
 features = [
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Dwm",

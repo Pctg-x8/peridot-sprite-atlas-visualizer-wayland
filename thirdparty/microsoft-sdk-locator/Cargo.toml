@@ -1,0 +1,8 @@
+[package]
+name = "microsoft-sdk-locator"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+win32-registry.path = "../../platform/win32/registry"
+windows = { workspace = true, features = [] }

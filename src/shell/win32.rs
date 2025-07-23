@@ -22,10 +22,7 @@ use windows::{
         },
         UI::{
             Controls::MARGINS,
-            HiDpi::{
-                DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow,
-                SetProcessDpiAwarenessContext,
-            },
+            HiDpi::GetDpiForWindow,
             Input::KeyboardAndMouse::{ReleaseCapture, SetCapture},
             Shell::IInitializeWithWindow,
             WindowsAndMessaging::{
@@ -71,10 +68,6 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
         let hinstance =
             unsafe { core::mem::transmute::<_, HINSTANCE>(GetModuleHandleW(None).unwrap()) };
 
-        unsafe {
-            // TODO: マニフェストで設定する
-            SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2).unwrap();
-        }
         let ui_scale_factor = Box::pin(Cell::new(1.0f32));
         let current_display_refresh_rate_hz = Box::pin(Cell::new(60.0f32));
 
@@ -512,11 +505,6 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
     }
 
     #[tracing::instrument(skip(self))]
-    pub fn prepare_read_events(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
     pub fn request_next_frame(&self) {
         unsafe {
             QueryPerformanceCounter(self.next_target_frame_timing.as_ptr()).unwrap_unchecked();
@@ -554,11 +542,6 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
     #[inline]
     pub fn ui_scale_factor(&self) -> f32 {
         self.ui_scale_factor.get()
-    }
-
-    #[inline]
-    pub fn refresh_rate_hz(&self) -> f32 {
-        self.current_display_refresh_rate_hz.get()
     }
 
     #[inline]

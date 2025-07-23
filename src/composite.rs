@@ -10,6 +10,7 @@ use bedrock::{
 use crate::{
     AppEvent, AppEventBus, BLEND_STATE_SINGLE_NONE, IA_STATE_TRILIST, MS_STATE_EMPTY,
     RASTER_STATE_DEFAULT_FILL_NOCULL, VI_STATE_EMPTY,
+    atlas::{AtlasRect, DynamicAtlasManager},
     base_system::{
         AppBaseSystem, create_render_pass2, inject_cmd_begin_render_pass2,
         inject_cmd_end_render_pass2, inject_cmd_pipeline_barrier_2,
@@ -2240,41 +2241,6 @@ impl<'subsystem> BackdropEffectBlurProcessor<'subsystem> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct AtlasRect {
-    pub left: u32,
-    pub top: u32,
-    pub right: u32,
-    pub bottom: u32,
-}
-impl AtlasRect {
-    pub const fn width(&self) -> u32 {
-        self.right.abs_diff(self.left)
-    }
-
-    pub const fn height(&self) -> u32 {
-        self.bottom.abs_diff(self.top)
-    }
-
-    pub const fn lt_offset(&self) -> br::Offset2D {
-        br::Offset2D {
-            x: self.left as _,
-            y: self.top as _,
-        }
-    }
-
-    pub const fn extent(&self) -> br::Extent2D {
-        br::Extent2D {
-            width: self.width(),
-            height: self.height(),
-        }
-    }
-
-    pub const fn vk_rect(&self) -> br::Rect2D {
-        self.extent().into_rect(self.lt_offset())
-    }
-}
-
 /// unbounded with gfx_device(must be externally managed)
 pub struct UnboundedCompositionSurfaceAtlas {
     resource: br::vk::VkImage,
@@ -2283,9 +2249,7 @@ pub struct UnboundedCompositionSurfaceAtlas {
     residency_bitmap: Vec<u8>,
     format: br::Format,
     size: u32,
-    used_left: u32,
-    used_top: u32,
-    current_line_top: u32,
+    region_manager: DynamicAtlasManager,
 }
 impl UnboundedCompositionSurfaceAtlas {
     pub unsafe fn drop_with_gfx_device(&mut self, gfx_device: &Subsystem) {
@@ -2422,6 +2386,15 @@ impl UnboundedCompositionSurfaceAtlas {
         }
         residency_bitmap[0] = 0x01;
 
+        let mut region_manager = DynamicAtlasManager::new();
+        // free entire region
+        region_manager.free(AtlasRect {
+            left: 0,
+            top: 0,
+            right: size,
+            bottom: size,
+        });
+
         let (memory, _) = memory.unmanage();
         let (resource_view, resource) = resource.unmanage();
         let (resource, _, _, _, _) = resource.unmanage();
@@ -2433,9 +2406,7 @@ impl UnboundedCompositionSurfaceAtlas {
             residency_bitmap,
             size,
             format: pixel_format,
-            used_left: 0,
-            used_top: 0,
-            current_line_top: 0,
+            region_manager,
         }
     }
 
@@ -2465,37 +2436,16 @@ impl UnboundedCompositionSurfaceAtlas {
 
     #[tracing::instrument(skip(self), ret(level = tracing::Level::TRACE))]
     pub fn alloc(&mut self, required_width: u32, required_height: u32) -> AtlasRect {
-        if self.used_left + required_width > Self::GRANULARITY {
-            tracing::trace!(
-                left = Self::GRANULARITY - self.used_left,
-                "wrapping occured"
-            );
-
-            // 横が越える
-            // TODO: 本当はこのあたりでタイルを拡張しないといけない
-            self.used_left = 0;
-            self.used_top += self.current_line_top;
-            self.current_line_top = 0;
-
-            if self.used_top > Self::GRANULARITY {
+        match self.region_manager.alloc(required_width, required_height) {
+            Some(x) => x,
+            None => {
                 todo!("alloc new tile");
             }
-        }
-
-        let l = self.used_left;
-        self.used_left += required_width;
-        self.current_line_top = self.current_line_top.max(required_height);
-
-        AtlasRect {
-            left: l,
-            top: self.used_top,
-            right: l + required_width,
-            bottom: self.used_top + required_height,
         }
     }
 
     pub fn free(&mut self, rect: AtlasRect) {
-        tracing::warn!(?rect, "TODO: free atlas rect");
+        self.region_manager.free(rect);
     }
 }
 

@@ -8,6 +8,7 @@ use crate::{
     AppUpdateContext, BLEND_STATE_SINGLE_NONE, FillcolorRConstants, IA_STATE_TRILIST,
     MS_STATE_EMPTY, PresenterInitContext, RASTER_STATE_DEFAULT_FILL_NOCULL, VI_STATE_EMPTY,
     VI_STATE_FLOAT2_ONLY, ViewInitContext,
+    atlas::AtlasRect,
     base_system::{
         AppBaseSystem, BufferMapMode, FontType, MemoryBoundBuffer, PixelFormat, RenderPassOptions,
         RenderTexture, RenderTextureFlags, RenderTextureOptions, create_render_pass2,
@@ -15,8 +16,8 @@ use crate::{
         scratch_buffer::StagingScratchBufferManager,
     },
     composite::{
-        AnimatableColor, AnimatableFloat, AnimationCurve, AtlasRect, ClipConfig, CompositeMode,
-        CompositeRect, CompositeTree, CompositeTreeRef,
+        AnimatableColor, AnimatableFloat, AnimationCurve, ClipConfig, CompositeMode, CompositeRect,
+        CompositeTree, CompositeTreeRef,
     },
     const_subpass_description_2_single_color_write_only,
     helper_types::SafeF32,

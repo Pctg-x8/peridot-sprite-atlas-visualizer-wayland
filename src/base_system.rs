@@ -11,9 +11,10 @@ use crate::{
     BLEND_STATE_SINGLE_NONE, FillcolorRConstants, IA_STATE_TRIFAN, IA_STATE_TRILIST,
     MS_STATE_EMPTY, RASTER_STATE_DEFAULT_FILL_NOCULL, RoundedRectConstants, VI_STATE_EMPTY,
     VI_STATE_FLOAT2_ONLY,
+    atlas::AtlasRect,
     base_system::svg::SinglePathSVG,
     composite::{
-        AtlasRect, CompositeInstanceManager, CompositeRect, CompositeTree, CompositeTreeRef,
+        CompositeInstanceManager, CompositeRect, CompositeTree, CompositeTreeRef,
         CompositionSurfaceAtlas, UnboundedCompositeInstanceManager,
         UnboundedCompositionSurfaceAtlas,
     },

@@ -16,6 +16,7 @@ use crate::{
     BLEND_STATE_SINGLE_NONE, BLEND_STATE_SINGLE_PREMULTIPLIED, IA_STATE_TRILIST, IA_STATE_TRISTRIP,
     MS_STATE_EMPTY, RASTER_STATE_DEFAULT_FILL_NOCULL, VI_STATE_EMPTY, VI_STATE_FLOAT4_ONLY,
     app_state::SpriteInfo,
+    atlas::{AtlasRect, DynamicAtlasManager},
     base_system::{
         AppBaseSystem, inject_cmd_pipeline_barrier_2,
         scratch_buffer::{
@@ -36,9 +37,7 @@ struct GridParams {
 struct LoadedSpriteSourceAtlas<'subsystem> {
     resource: br::ImageViewObject<br::ImageObject<&'subsystem Subsystem>>,
     memory: br::DeviceMemoryObject<&'subsystem Subsystem>,
-    left: u32,
-    top: u32,
-    max_height: u32,
+    region_manager: DynamicAtlasManager,
 }
 impl<'subsystem> LoadedSpriteSourceAtlas<'subsystem> {
     const SIZE: u32 = 4096;
@@ -74,43 +73,33 @@ impl<'subsystem> LoadedSpriteSourceAtlas<'subsystem> {
         .create()
         .unwrap();
 
+        let mut region_manager = DynamicAtlasManager::new();
+        region_manager.free(AtlasRect {
+            left: 0,
+            top: 0,
+            right: Self::SIZE,
+            bottom: Self::SIZE,
+        });
+
         Self {
             resource,
             memory,
-            left: 0,
-            top: 0,
-            max_height: 0,
+            region_manager,
         }
     }
 
-    fn alloc(&mut self, width: u32, height: u32) -> Option<(u32, u32)> {
-        if width > Self::SIZE || self.top + height > Self::SIZE {
+    fn alloc(&mut self, width: u32, height: u32) -> Option<AtlasRect> {
+        if width > Self::SIZE || height > Self::SIZE {
             // でかすぎ
             return None;
         }
 
-        if self.left + width <= Self::SIZE {
-            // まだ横にはいる
-            let p = (self.left, self.top);
-            self.left += width;
-            self.max_height = self.max_height.max(height);
-
-            return Some(p);
-        }
-
-        // 改行
-        let p = (self.left, self.top);
-        self.top += self.max_height;
-        if self.top + height > Self::SIZE {
-            // 結局はいらん
-            return None;
-        }
-        self.left = width;
-        self.max_height = height;
-        Some(p)
+        self.region_manager.alloc(width, height)
     }
 
-    // TODO: 解放処理どうする？
+    fn free(&mut self, rect: AtlasRect) {
+        self.region_manager.free(rect);
+    }
 }
 
 #[repr(C)]
@@ -630,11 +619,12 @@ impl<'d> EditingAtlasRenderer<'d> {
                         (ox, oy)
                     }
                     std::collections::hash_map::Entry::Vacant(v) => {
-                        let Some((ox, oy)) = atlas_mref.alloc(x.width, x.height) else {
+                        let Some(r) = atlas_mref.alloc(x.width, x.height) else {
                             tracing::error!(path = ?x.source_path, width = x.width, height = x.height, "no space for sprite(TODO: add page or resize atlas...)");
                             continue;
                         };
-                        v.insert((ox, oy, x.width, x.height));
+                        v.insert((r.left, r.top, x.width, x.height));
+                        let (ox, oy) = (r.left, r.top);
 
                         bg_worker_access.enqueue(BackgroundWork::LoadSpriteSource(
                             x.source_path.clone(),

@@ -1,4 +1,5 @@
 mod app_state;
+mod atlas;
 mod base_system;
 mod bg_worker;
 mod composite;

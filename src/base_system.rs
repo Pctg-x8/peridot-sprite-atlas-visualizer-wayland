@@ -266,9 +266,10 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
                     .unwrap();
             }
             if !uifont_exists.as_bool() {
-                tracing::error!("no ui font found in the system");
-                // TODO: alternative font
-                std::process::abort();
+                tracing::error!(
+                    "no Segoe UI font found in the system, using first enumerated font family..."
+                );
+                uifont_index = 0;
             }
             let uifontfamily = unsafe { sysfonts.GetFontFamily(uifont_index).unwrap() };
             let uifont = unsafe {

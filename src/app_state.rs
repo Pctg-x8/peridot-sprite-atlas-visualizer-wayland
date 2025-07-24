@@ -81,28 +81,24 @@ impl<'subsystem> AppState<'subsystem> {
         }
     }
 
-    pub fn add_sprites_by_uri_list(&mut self, uris: Vec<CString>) {
-        let mut added_sprites = Vec::with_capacity(uris.len());
-        for x in uris {
-            let path = std::path::PathBuf::from(match x.to_str() {
-                Ok(x) => match x.strip_prefix("file://") {
-                    Some(x) => x,
-                    None => {
-                        tracing::warn!(?x, "not started by file://");
-                        x
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(reason = ?e, "invalid path");
-                    continue;
-                }
-            });
+    pub fn add_sprites_from_file_paths(
+        &mut self,
+        paths: impl IntoIterator<Item = impl AsRef<Path>>,
+    ) {
+        let paths = paths.into_iter();
+        let (lb, ub) = paths.size_hint();
+        let mut added_sprites = Vec::with_capacity(ub.unwrap_or(lb));
+        for path in paths {
+            let path = path.as_ref();
+
             if path.is_dir() {
                 // process all files in directory(rec)
                 for entry in walkdir::WalkDir::new(&path)
                     .into_iter()
                     .filter_map(|e| e.ok())
                 {
+                    use crate::app_state::SpriteInfo;
+
                     let path = entry.path();
                     if !path.is_file() {
                         // 自分自身を含むみたいなのでその場合は見逃す
@@ -123,6 +119,8 @@ impl<'subsystem> AppState<'subsystem> {
                     ));
                 }
             } else {
+                use crate::app_state::SpriteInfo;
+
                 let mut fs = std::fs::File::open(&path).unwrap();
                 let png_meta = match source_reader::png::Metadata::try_read(&mut fs) {
                     Some(x) => x,
@@ -142,6 +140,25 @@ impl<'subsystem> AppState<'subsystem> {
         }
 
         self.add_sprites(added_sprites);
+    }
+
+    // TODO: uri_listを別途正しく解析してfrom_file_pathsのほうにまとめたい
+    pub fn add_sprites_by_uri_list(&mut self, uris: Vec<CString>) {
+        self.add_sprites_from_file_paths(uris.into_iter().filter_map(|x| {
+            Some(std::path::PathBuf::from(match x.to_str() {
+                Ok(x) => match x.strip_prefix("file://") {
+                    Some(x) => x,
+                    None => {
+                        tracing::warn!(?x, "not started by file://");
+                        x
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(reason = ?e, "invalid path");
+                    return None;
+                }
+            }))
+        }));
     }
 
     pub fn add_sprites(&mut self, sprites: impl IntoIterator<Item = SpriteInfo>) {

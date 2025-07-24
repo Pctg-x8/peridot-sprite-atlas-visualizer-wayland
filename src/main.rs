@@ -1265,42 +1265,6 @@ impl<'s> PrimaryRenderTarget<'s> {
     }
 }
 
-const CORNER_CUTOUT_RENDER_PIPELINE_VI_STATE: &'static br::PipelineVertexInputStateCreateInfo<
-    'static,
-> = &br::PipelineVertexInputStateCreateInfo::new(
-    &[const { br::VertexInputBindingDescription::per_instance_typed::<[[f32; 2]; 2]>(0) }],
-    &[
-        br::VertexInputAttributeDescription {
-            location: 0,
-            binding: 0,
-            format: br::vk::VK_FORMAT_R32G32_SFLOAT,
-            offset: 0,
-        },
-        br::VertexInputAttributeDescription {
-            location: 1,
-            binding: 0,
-            format: br::vk::VK_FORMAT_R32G32_SFLOAT,
-            offset: core::mem::size_of::<[f32; 2]>() as _,
-        },
-    ],
-);
-const CORNER_CUTOUT_RENDER_PIPELINE_BLEND_STATE: &'static br::PipelineColorBlendStateCreateInfo<
-    'static,
-> = &br::PipelineColorBlendStateCreateInfo::new(&[br::vk::VkPipelineColorBlendAttachmentState {
-    // simply overwrite alpha
-    blendEnable: true as _,
-    srcColorBlendFactor: br::vk::VK_BLEND_FACTOR_ZERO,
-    dstColorBlendFactor: br::vk::VK_BLEND_FACTOR_SRC_ALPHA,
-    colorBlendOp: br::vk::VK_BLEND_OP_ADD,
-    srcAlphaBlendFactor: br::vk::VK_BLEND_FACTOR_ONE,
-    dstAlphaBlendFactor: br::vk::VK_BLEND_FACTOR_ZERO,
-    alphaBlendOp: br::vk::VK_BLEND_OP_ADD,
-    colorWriteMask: br::vk::VK_COLOR_COMPONENT_A_BIT
-        | br::vk::VK_COLOR_COMPONENT_B_BIT
-        | br::vk::VK_COLOR_COMPONENT_G_BIT
-        | br::vk::VK_COLOR_COMPONENT_R_BIT,
-}]);
-
 fn main() {
     tracing_subscriber::fmt()
         .pretty()
@@ -3322,58 +3286,9 @@ async fn app_menu_on_add_sprite<'sys, 'subsystem>(
     app_state: &'sys RefCell<AppState<'subsystem>>,
 ) {
     let added_paths = shell.select_added_sprites().await;
-
-    let mut added_sprites = Vec::with_capacity(added_paths.len());
-    for path in added_paths {
-        if path.is_dir() {
-            // process all files in directory(rec)
-            for entry in walkdir::WalkDir::new(&path)
-                .into_iter()
-                .filter_map(|e| e.ok())
-            {
-                use crate::app_state::SpriteInfo;
-
-                let path = entry.path();
-                if !path.is_file() {
-                    // 自分自身を含むみたいなのでその場合は見逃す
-                    continue;
-                }
-
-                let mut fs = std::fs::File::open(&path).unwrap();
-                let Some(png_meta) = source_reader::png::Metadata::try_read(&mut fs) else {
-                    // PNGじゃないのは一旦見逃す
-                    continue;
-                };
-
-                added_sprites.push(SpriteInfo::new(
-                    path.file_stem().unwrap().to_str().unwrap().into(),
-                    path.to_path_buf(),
-                    png_meta.width,
-                    png_meta.height,
-                ));
-            }
-        } else {
-            use crate::app_state::SpriteInfo;
-
-            let mut fs = std::fs::File::open(&path).unwrap();
-            let png_meta = match source_reader::png::Metadata::try_read(&mut fs) {
-                Some(x) => x,
-                None => {
-                    tracing::warn!(?path, "not a png?");
-                    continue;
-                }
-            };
-
-            added_sprites.push(SpriteInfo::new(
-                path.file_stem().unwrap().to_str().unwrap().into(),
-                path.to_path_buf(),
-                png_meta.width,
-                png_meta.height,
-            ));
-        }
-    }
-
-    app_state.borrow_mut().add_sprites(added_sprites);
+    app_state
+        .borrow_mut()
+        .add_sprites_from_file_paths(added_paths);
 }
 
 #[cfg(unix)]
@@ -4063,6 +3978,42 @@ struct WindowCornerCutoutRenderer<'subsystem> {
     input_descriptor_set: br::DescriptorSet,
 }
 impl<'subsystem> WindowCornerCutoutRenderer<'subsystem> {
+    const VI_STATE: &'static br::PipelineVertexInputStateCreateInfo<'static> =
+        &br::PipelineVertexInputStateCreateInfo::new(
+            &[const { br::VertexInputBindingDescription::per_instance_typed::<[[f32; 2]; 2]>(0) }],
+            &[
+                br::VertexInputAttributeDescription {
+                    location: 0,
+                    binding: 0,
+                    format: br::vk::VK_FORMAT_R32G32_SFLOAT,
+                    offset: 0,
+                },
+                br::VertexInputAttributeDescription {
+                    location: 1,
+                    binding: 0,
+                    format: br::vk::VK_FORMAT_R32G32_SFLOAT,
+                    offset: core::mem::size_of::<[f32; 2]>() as _,
+                },
+            ],
+        );
+    const BLEND_STATE: &'static br::PipelineColorBlendStateCreateInfo<'static> =
+        &br::PipelineColorBlendStateCreateInfo::new(&[
+            br::vk::VkPipelineColorBlendAttachmentState {
+                // simply overwrite alpha
+                blendEnable: true as _,
+                srcColorBlendFactor: br::vk::VK_BLEND_FACTOR_ZERO,
+                dstColorBlendFactor: br::vk::VK_BLEND_FACTOR_SRC_ALPHA,
+                colorBlendOp: br::vk::VK_BLEND_OP_ADD,
+                srcAlphaBlendFactor: br::vk::VK_BLEND_FACTOR_ONE,
+                dstAlphaBlendFactor: br::vk::VK_BLEND_FACTOR_ZERO,
+                alphaBlendOp: br::vk::VK_BLEND_OP_ADD,
+                colorWriteMask: br::vk::VK_COLOR_COMPONENT_A_BIT
+                    | br::vk::VK_COLOR_COMPONENT_B_BIT
+                    | br::vk::VK_COLOR_COMPONENT_G_BIT
+                    | br::vk::VK_COLOR_COMPONENT_R_BIT,
+            },
+        ]);
+
     #[tracing::instrument(
         name = "WindowCornerCutoutRenderer::new",
         skip(base_system, sampler, rendered_subpass, rendered_subpass_cont)
@@ -4180,22 +4131,22 @@ impl<'subsystem> WindowCornerCutoutRenderer<'subsystem> {
                     &pipeline_layout,
                     rendered_subpass,
                     &shader_stages,
-                    CORNER_CUTOUT_RENDER_PIPELINE_VI_STATE,
+                    Self::VI_STATE,
                     IA_STATE_TRISTRIP,
                     &viewport_state,
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
-                    CORNER_CUTOUT_RENDER_PIPELINE_BLEND_STATE,
+                    Self::BLEND_STATE,
                 )
                 .set_multisample_state(MS_STATE_EMPTY),
                 br::GraphicsPipelineCreateInfo::new(
                     &pipeline_layout,
                     rendered_subpass_cont,
                     &shader_stages,
-                    CORNER_CUTOUT_RENDER_PIPELINE_VI_STATE,
+                    Self::VI_STATE,
                     IA_STATE_TRISTRIP,
                     &viewport_state,
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
-                    CORNER_CUTOUT_RENDER_PIPELINE_BLEND_STATE,
+                    Self::BLEND_STATE,
                 )
                 .set_multisample_state(MS_STATE_EMPTY),
             ])
@@ -4313,22 +4264,22 @@ impl<'subsystem> WindowCornerCutoutRenderer<'subsystem> {
                     &self.pipeline_layout,
                     rendered_subpass,
                     &shader_stages,
-                    CORNER_CUTOUT_RENDER_PIPELINE_VI_STATE,
+                    Self::VI_STATE,
                     IA_STATE_TRISTRIP,
                     &viewport_state,
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
-                    CORNER_CUTOUT_RENDER_PIPELINE_BLEND_STATE,
+                    Self::BLEND_STATE,
                 )
                 .set_multisample_state(MS_STATE_EMPTY),
                 br::GraphicsPipelineCreateInfo::new(
                     &self.pipeline_layout,
                     rendered_subpass_cont,
                     &shader_stages,
-                    CORNER_CUTOUT_RENDER_PIPELINE_VI_STATE,
+                    Self::VI_STATE,
                     IA_STATE_TRISTRIP,
                     &viewport_state,
                     RASTER_STATE_DEFAULT_FILL_NOCULL,
-                    CORNER_CUTOUT_RENDER_PIPELINE_BLEND_STATE,
+                    Self::BLEND_STATE,
                 )
                 .set_multisample_state(MS_STATE_EMPTY),
             ])

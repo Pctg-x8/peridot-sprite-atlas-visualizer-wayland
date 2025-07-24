@@ -233,11 +233,106 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
             primary_face_path = path;
             primary_face_index = index;
         }
-        // TODO: mock
         #[cfg(windows)]
         {
-            primary_face_path = c"C:\\Windows\\Fonts\\YuGothR.ttc";
-            primary_face_index = 0;
+            use std::os::windows::ffi::OsStringExt;
+
+            use windows::{
+                Win32::Graphics::DirectWrite::{
+                    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
+                    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL, DWriteCreateFactory,
+                    IDWriteFactory, IDWriteLocalFontFileLoader,
+                },
+                core::Interface,
+            };
+
+            let dwf: IDWriteFactory =
+                unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).unwrap() };
+            let mut sysfonts = core::mem::MaybeUninit::uninit();
+            unsafe {
+                dwf.GetSystemFontCollection(sysfonts.as_mut_ptr(), false)
+                    .unwrap();
+            }
+            let sysfonts = unsafe { sysfonts.assume_init().unwrap_unchecked() };
+            let mut uifont_index = 0;
+            let mut uifont_exists = windows::core::BOOL(0);
+            unsafe {
+                sysfonts
+                    .FindFamilyName(
+                        windows::core::w!("Segoe UI"),
+                        &mut uifont_index,
+                        &mut uifont_exists,
+                    )
+                    .unwrap();
+            }
+            if !uifont_exists.as_bool() {
+                tracing::error!("no ui font found in the system");
+                // TODO: alternative font
+                std::process::abort();
+            }
+            let uifontfamily = unsafe { sysfonts.GetFontFamily(uifont_index).unwrap() };
+            let uifont = unsafe {
+                uifontfamily
+                    .GetFirstMatchingFont(
+                        DWRITE_FONT_WEIGHT_NORMAL,
+                        DWRITE_FONT_STRETCH_NORMAL,
+                        DWRITE_FONT_STYLE_NORMAL,
+                    )
+                    .unwrap()
+            };
+            let uifontface = unsafe { uifont.CreateFontFace().unwrap() };
+            let mut uifontface_file_count = 0;
+            unsafe {
+                uifontface
+                    .GetFiles(&mut uifontface_file_count, None)
+                    .unwrap()
+            };
+            let mut uifontface_files = Vec::with_capacity(uifontface_file_count as _);
+            unsafe {
+                uifontface_files.set_len(uifontface_files.capacity());
+                uifontface
+                    .GetFiles(
+                        &mut uifontface_file_count,
+                        Some(uifontface_files.as_mut_ptr()),
+                    )
+                    .unwrap();
+            }
+            let uifontface_index = unsafe { uifontface.GetIndex() };
+            if uifontface_files.len() != 1 {
+                unimplemented!("multiple font files in one face");
+            }
+            let file0 = uifontface_files[0].as_ref().unwrap();
+            let floader = unsafe { file0.GetLoader().unwrap() };
+            let mut frk = core::mem::MaybeUninit::uninit();
+            let mut frk_size = core::mem::MaybeUninit::uninit();
+            unsafe {
+                file0
+                    .GetReferenceKey(frk.as_mut_ptr(), frk_size.as_mut_ptr())
+                    .unwrap();
+            }
+            let frk = unsafe { frk.assume_init() };
+            let frk_size = unsafe { frk_size.assume_init() };
+            let floader_local = floader.cast::<IDWriteLocalFontFileLoader>().unwrap();
+            let pathlength = unsafe {
+                floader_local
+                    .GetFilePathLengthFromKey(frk, frk_size)
+                    .unwrap()
+            };
+            let mut path = Vec::with_capacity((pathlength + 1) as _);
+            unsafe {
+                path.set_len(path.capacity());
+                floader_local
+                    .GetFilePathFromKey(frk, frk_size, &mut path)
+                    .unwrap();
+            }
+
+            primary_face_path = std::ffi::CString::new(
+                std::ffi::OsString::from_wide(&path[..path.len() - 1])
+                    .into_string()
+                    .unwrap(),
+            )
+            .unwrap();
+            primary_face_index = uifontface_index;
         }
         // TODO: mock
         #[cfg(target_os = "macos")]

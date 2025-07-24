@@ -11,6 +11,7 @@ use fontconfig::{
     FcResultNoId, FcResultNoMatch, FcResultOutOfMemory, FcResultTypeMismatch, FcTrue,
 };
 
+#[inline(always)]
 pub fn init() {
     unsafe {
         FcInit();
@@ -57,18 +58,20 @@ impl ErrorResultValue {
 #[repr(transparent)]
 pub struct Config(FcConfig);
 impl Config {
-    pub fn current<'a>() -> Option<&'a mut Self> {
-        let ptr = unsafe { FcConfigGetCurrent() };
-
-        unsafe { (ptr as *mut Self).as_mut() }
+    #[inline(always)]
+    pub fn current<'a>() -> &'a mut Self {
+        // Note: FcConfigGetCurrent never returns null
+        unsafe { &mut *(FcConfigGetCurrent() as *mut Self) }
     }
 
+    #[inline]
     pub fn substitute(&mut self, pat: &mut Pattern, kind: MatchKind) {
         unsafe {
             FcConfigSubstitute(self as *mut _ as _, pat as *mut _ as _, kind as _);
         }
     }
 
+    #[inline]
     pub fn sort(
         &mut self,
         pat: &mut Pattern,
@@ -133,42 +136,48 @@ impl<T: FcObjectDroppable> DerefMut for Owned<T> {
 #[repr(transparent)]
 pub struct Pattern(FcPattern);
 impl FcObjectDroppable for Pattern {
+    #[inline(always)]
     unsafe fn drop_internal(this: *mut Self) {
         unsafe { FcPatternDestroy(this as _) }
     }
 }
 impl FcObjectCloneable for Pattern {
+    #[inline(always)]
     unsafe fn clone_internal(this: *mut Self) {
         unsafe { FcPatternReference(this as _) }
     }
 }
 impl Pattern {
+    #[inline]
     pub fn new() -> Owned<Self> {
-        let ptr = unsafe { FcPatternCreate() };
-
-        Owned(unsafe { core::ptr::NonNull::new_unchecked(ptr as _) })
+        Owned(unsafe { core::ptr::NonNull::new_unchecked(FcPatternCreate() as _) })
     }
 
+    #[inline]
     pub fn add_string(&mut self, object: &core::ffi::CStr, value: &core::ffi::CStr) {
         unsafe {
             FcPatternAddString(self as *mut _ as _, object.as_ptr(), value.as_ptr() as _);
         }
     }
 
+    #[inline]
     pub fn add_integer(&mut self, object: &core::ffi::CStr, value: core::ffi::c_int) {
         unsafe {
             FcPatternAddInteger(self as *mut _ as _, object.as_ptr(), value);
         }
     }
 
+    #[inline(always)]
     pub fn add_family_name(&mut self, value: &core::ffi::CStr) {
         self.add_string(FC_FAMILY, value)
     }
 
+    #[inline(always)]
     pub fn add_weight(&mut self, weight: core::ffi::c_int) {
         self.add_integer(FC_WEIGHT, weight)
     }
 
+    #[inline]
     pub fn default_substitute(&mut self) {
         unsafe {
             FcDefaultSubstitute(self as *mut _ as _);
@@ -224,6 +233,7 @@ impl Pattern {
 #[repr(transparent)]
 pub struct FontSet(FcFontSet);
 impl FcObjectDroppable for FontSet {
+    #[inline(always)]
     unsafe fn drop_internal(this: *mut Self) {
         unsafe {
             FcFontSetDestroy(this as _);
@@ -231,7 +241,7 @@ impl FcObjectDroppable for FontSet {
     }
 }
 impl FontSet {
-    pub fn fonts(&self) -> &[&Pattern] {
+    pub const fn fonts(&self) -> &[&Pattern] {
         unsafe { core::slice::from_raw_parts_mut(self.0.fonts as _, self.0.nfont as _) }
     }
 }

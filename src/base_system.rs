@@ -202,24 +202,19 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         let fs_cache = Cache::new();
         let pipeline_cache = Self::load_or_create_pipeline_cache(subsystem, &fs_cache);
 
-        // initialize font systems
-        #[cfg(all(unix, not(target_os = "macos")))]
-        fontconfig::init();
-
+        // initialize typeface
         let (primary_face_path, primary_face_index);
         #[cfg(all(unix, not(target_os = "macos")))]
         {
+            fontconfig::init();
+            let fc = fontconfig::Config::current();
+
             let mut fc_pat = fontconfig::Pattern::new();
             fc_pat.add_family_name(c"system-ui");
             fc_pat.add_weight(80);
-            fontconfig::Config::current()
-                .unwrap()
-                .substitute(&mut fc_pat, fontconfig::MatchKind::Pattern);
+            fc.substitute(&mut fc_pat, fontconfig::MatchKind::Pattern);
             fc_pat.default_substitute();
-            let fc_set = fontconfig::Config::current()
-                .unwrap()
-                .sort(&mut fc_pat, true)
-                .unwrap();
+            let fc_set = fc.sort(&mut fc_pat, true).unwrap();
             let mut primary_face_info = None;
             for &f in fc_set.fonts() {
                 let file_path = f.get_file_path(0).unwrap();

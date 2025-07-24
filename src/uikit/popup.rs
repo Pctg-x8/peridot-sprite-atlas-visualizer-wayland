@@ -364,8 +364,6 @@ impl PopupManager {
             self.hit_base_layer,
             current_sec,
         );
-        // TODO: ここでRECOMPUTE_POINTER_ENTER相当の処理をしないといけない(ポインタを動かさないかぎりEnter状態が続くのでマスクを貫通できる)
-        // クローズしたときも同じ
 
         self.instance_by_id.insert(id, presenter);
         id

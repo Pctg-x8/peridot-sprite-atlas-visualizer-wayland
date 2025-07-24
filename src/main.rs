@@ -3222,9 +3222,23 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         t.elapsed().as_secs_f32(),
                         &content,
                     );
+                    unsafe { &mut *app_shell.pointer_input_manager().get() }.recompute_enter_leave(
+                        client_size.get().0,
+                        client_size.get().1,
+                        &mut app_system.hit_tree,
+                        &mut app_update_context,
+                        HitTestTreeManager::ROOT,
+                    );
                 }
                 AppEvent::UIPopupClose { id } => {
                     popup_manager.close(app_system, t.elapsed().as_secs_f32(), &id);
+                    unsafe { &mut *app_shell.pointer_input_manager().get() }.recompute_enter_leave(
+                        client_size.get().0,
+                        client_size.get().1,
+                        &mut app_system.hit_tree,
+                        &mut app_update_context,
+                        HitTestTreeManager::ROOT,
+                    );
                 }
                 AppEvent::UIPopupUnmount { id } => {
                     popup_manager.remove(app_system, &id);

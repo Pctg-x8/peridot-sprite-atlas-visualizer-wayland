@@ -625,6 +625,29 @@ impl PointerInputManager {
         }
     }
 
+    pub fn recompute_enter_leave(
+        &mut self,
+        client_width: f32,
+        client_height: f32,
+        ht: &mut HitTestTreeManager,
+        action_context: &mut AppUpdateContext,
+        ht_root: HitTestTreeRef,
+    ) {
+        let Some((last_client_x, last_client_y)) = self.last_client_pointer_pos else {
+            return;
+        };
+
+        self.handle_mouse_enter_leave(
+            last_client_x,
+            last_client_y,
+            client_width,
+            client_height,
+            ht,
+            action_context,
+            ht_root,
+        );
+    }
+
     pub fn cursor_shape(
         &self,
         ht: &mut HitTestTreeManager,

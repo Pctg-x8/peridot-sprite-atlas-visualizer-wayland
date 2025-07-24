@@ -310,7 +310,7 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         if let Err(e) =
             self.fonts
                 .ui_extra_large
-                .set_char_size((80.0 * 64.0) as _, 0, (96.0 * scale) as _, 0)
+                .set_char_size((64.0 * 64.0) as _, 0, (96.0 * scale) as _, 0)
         {
             tracing::warn!(reason = ?e, "Failed to set char size");
         }

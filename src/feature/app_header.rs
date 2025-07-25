@@ -1,5 +1,8 @@
 use bedrock::{self as br, RenderPass, ShaderModule, VkHandle};
-use std::{cell::Cell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 use crate::{
     AppEvent, AppUpdateContext, BLEND_STATE_SINGLE_NONE, FillcolorRConstants, IA_STATE_TRILIST,
@@ -692,12 +695,17 @@ struct BaseView {
     height: f32,
     ct_root: CompositeTreeRef,
     ct_title: CompositeTreeRef,
+    ct_active_file_name: CompositeTreeRef,
     ht_root: HitTestTreeRef,
     text_atlas_rect: Cell<AtlasRect>,
+    active_file_name: RefCell<Option<String>>,
+    has_active_file_name_changed: Cell<bool>,
 }
 impl BaseView {
     const TITLE_SPACING: f32 = 16.0;
     const TITLE_LEFT_OFFSET: f32 = 48.0;
+    const ACTIVE_FILE_NAME_LEFT_MARGIN: f32 = 16.0;
+    const ACTIVE_FILE_NAME_COLOR: [f32; 4] = [0.75, 0.75, 0.75, 0.75];
 
     #[tracing::instrument(name = "BaseView::new", skip(ctx))]
     fn new(ctx: &mut ViewInitContext) -> Self {
@@ -811,8 +819,27 @@ impl BaseView {
             has_bitmap: true,
             ..Default::default()
         });
+        let ct_active_file_name = ctx.base_system.register_composite_rect(CompositeRect {
+            base_scale_factor: ctx.ui_scale_factor,
+            size: [AnimatableFloat::Value(0.0), AnimatableFloat::Value(0.0)],
+            offset: [
+                AnimatableFloat::Value(
+                    Self::TITLE_LEFT_OFFSET
+                        + text_atlas_rect.width() as f32 / ctx.ui_scale_factor
+                        + Self::ACTIVE_FILE_NAME_LEFT_MARGIN,
+                ),
+                AnimatableFloat::Value(Self::TITLE_SPACING),
+            ],
+            // これだけ先に設定しておく
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value(
+                Self::ACTIVE_FILE_NAME_COLOR,
+            )),
+            ..Default::default()
+        });
 
         ctx.base_system.set_composite_tree_parent(ct_title, ct_root);
+        ctx.base_system
+            .set_composite_tree_parent(ct_active_file_name, ct_root);
 
         let ht_root = ctx.base_system.create_hit_tree(HitTestTreeData {
             height,
@@ -824,8 +851,11 @@ impl BaseView {
             height,
             ct_root,
             ct_title,
+            ct_active_file_name,
             ht_root,
             text_atlas_rect: Cell::new(text_atlas_rect),
+            active_file_name: RefCell::new(None),
+            has_active_file_name_changed: Cell::new(false),
         }
     }
 
@@ -864,8 +894,77 @@ impl BaseView {
             .composite_tree
             .get_mut(self.ct_title)
             .texatlas_rect = self.text_atlas_rect.get();
+        let ct = self
+            .ct_active_file_name
+            .entity_mut_dirtified(&mut base_system.composite_tree);
+        ct.base_scale_factor = ui_scale_factor;
         base_system.composite_tree.mark_dirty(self.ct_root);
         base_system.composite_tree.mark_dirty(self.ct_title);
+
+        self.rebuild_active_file_name_surface(base_system, staging_scratch_buffer);
+    }
+
+    fn rebuild_active_file_name_surface(
+        &self,
+        base_system: &mut AppBaseSystem,
+        staging_scratch_buffer: &mut StagingScratchBufferManager,
+    ) {
+        if self
+            .ct_active_file_name
+            .entity(&base_system.composite_tree)
+            .has_bitmap
+        {
+            base_system.free_mask_atlas_rect(
+                self.ct_active_file_name
+                    .entity(&base_system.composite_tree)
+                    .texatlas_rect,
+            );
+        }
+
+        if let Some(ref t) = *self.active_file_name.borrow() {
+            let atlas = base_system
+                .text_mask(staging_scratch_buffer, FontType::UI, t)
+                .unwrap();
+            let ct = self
+                .ct_active_file_name
+                .entity_mut_dirtified(&mut base_system.composite_tree);
+            ct.has_bitmap = true;
+            ct.texatlas_rect = atlas;
+            ct.size = [
+                AnimatableFloat::Value(atlas.width() as f32 / ct.base_scale_factor),
+                AnimatableFloat::Value(atlas.height() as f32 / ct.base_scale_factor),
+            ];
+        } else {
+            self.ct_active_file_name
+                .entity_mut_dirtified(&mut base_system.composite_tree)
+                .has_bitmap = false;
+        }
+    }
+
+    fn update(
+        &self,
+        base_system: &mut AppBaseSystem,
+        staging_scratch_buffer: &mut StagingScratchBufferManager,
+    ) {
+        if self.has_active_file_name_changed.replace(false) {
+            self.rebuild_active_file_name_surface(base_system, staging_scratch_buffer);
+        }
+    }
+
+    fn set_active_file_name(&self, new_file_name: &str) {
+        let mut afn_locked = self.active_file_name.borrow_mut();
+        if afn_locked.as_ref().is_none_or(|x| x != new_file_name) {
+            *afn_locked = Some(new_file_name.into());
+            self.has_active_file_name_changed.set(true);
+        }
+    }
+
+    fn clear_active_file_name(&self) {
+        let mut afn_locked = self.active_file_name.borrow_mut();
+        if afn_locked.is_some() {
+            *afn_locked = None;
+            self.has_active_file_name_changed.set(true);
+        }
     }
 }
 
@@ -1013,12 +1112,12 @@ impl HitTestTreeActionHandler for ActionHandler {
 }
 
 pub struct Presenter {
-    base_view: BaseView,
+    base_view: Rc<BaseView>,
     action_handler: Rc<ActionHandler>,
 }
 impl Presenter {
     pub fn new(init: &mut PresenterInitContext) -> Self {
-        let base_view = BaseView::new(&mut init.for_view);
+        let base_view = Rc::new(BaseView::new(&mut init.for_view));
         let menu_button_view = MenuButtonView::new(&mut init.for_view, base_view.height);
         let close_button_view =
             SystemCommandButtonView::new(&mut init.for_view, 0.0, SystemCommand::Close);
@@ -1077,6 +1176,21 @@ impl Presenter {
                 .set_action_handler(x.ht_root, &action_handler);
         }
 
+        init.app_state.register_current_open_path_view_feedback({
+            let base_view_ref = Rc::downgrade(&base_view);
+
+            move |path| {
+                let Some(base_view) = base_view_ref.upgrade() else {
+                    return;
+                };
+
+                match path {
+                    Some(x) => base_view.set_active_file_name(x.to_str().unwrap()),
+                    None => base_view.clear_active_file_name(),
+                }
+            }
+        });
+
         Self {
             base_view,
             action_handler,
@@ -1108,14 +1222,22 @@ impl Presenter {
         }
     }
 
-    pub fn update(&self, ct: &mut CompositeTree, current_sec: f32) {
-        self.action_handler.menu_button_view.update(ct, current_sec);
+    pub fn update(
+        &self,
+        base_system: &mut AppBaseSystem,
+        staging_scratch_buffer: &mut StagingScratchBufferManager,
+        current_sec: f32,
+    ) {
+        self.base_view.update(base_system, staging_scratch_buffer);
+        self.action_handler
+            .menu_button_view
+            .update(&mut base_system.composite_tree, current_sec);
         for x in self.action_handler.system_command_button_views.iter() {
-            x.update(ct, current_sec);
+            x.update(&mut base_system.composite_tree, current_sec);
         }
     }
 
-    pub const fn height(&self) -> f32 {
+    pub fn height(&self) -> f32 {
         self.base_view.height
     }
 }

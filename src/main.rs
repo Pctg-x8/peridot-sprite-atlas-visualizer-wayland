@@ -2547,16 +2547,21 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         );
                     }
 
+                    let mut staging_scratch_buffer_locked =
+                        parking_lot::RwLockWriteGuard::map(staging_scratch_buffers.write(), |x| {
+                            x.active_buffer_mut()
+                        });
                     current_selected_sprite_marker_view
                         .update(&mut app_system.composite_tree, current_sec);
-                    app_header.update(&mut app_system.composite_tree, current_sec);
+                    app_header.update(app_system, &mut staging_scratch_buffer_locked, current_sec);
                     app_menu.update(app_system, current_sec);
                     sprite_list_pane.update(
                         app_system,
                         current_sec,
-                        &mut staging_scratch_buffers.write().active_buffer_mut(),
+                        &mut staging_scratch_buffer_locked,
                     );
                     popup_manager.update(app_system, current_sec);
+                    drop(staging_scratch_buffer_locked);
 
                     {
                         let _pf = _pf.scoped(ProfileMarker::PopulateCompositeInstances);
@@ -3312,7 +3317,7 @@ async fn app_menu_on_save<'sys, 'subsystem>(
         return;
     };
 
-    if let Err(e) = app_state.borrow().save(path) {
+    if let Err(e) = app_state.borrow_mut().save(path) {
         tracing::error!(reason = ?e, "save failed");
         event_bus.push(AppEvent::UIMessageDialogRequest {
             content: "Saving failed".into(),

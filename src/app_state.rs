@@ -251,7 +251,7 @@ impl<'subsystem> AppState<'subsystem> {
         self.visible_menu
     }
 
-    pub fn save(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
+    pub fn save(&mut self, path: impl AsRef<Path>) -> std::io::Result<()> {
         let mut asset = peridot::SpriteAtlasAsset {
             width: self.atlas_size.width,
             height: self.atlas_size.height,
@@ -280,8 +280,11 @@ impl<'subsystem> AppState<'subsystem> {
                 .create(true)
                 .write(true)
                 .truncate(true)
-                .open(path)?,
-        )
+                .open(&path)?,
+        )?;
+
+        self.update_current_open_path(path);
+        Ok(())
     }
 
     pub fn load(
@@ -310,7 +313,7 @@ impl<'subsystem> AppState<'subsystem> {
             }));
         self.atlas_size.width = asset.width;
         self.atlas_size.height = asset.height;
-        self.current_open_path = Some(path.as_ref().into());
+        self.update_current_open_path(path);
 
         for cb in self.atlas_size_view_feedbacks.iter_mut() {
             cb(&self.atlas_size);
@@ -320,11 +323,15 @@ impl<'subsystem> AppState<'subsystem> {
             cb(&self.sprites);
         }
 
+        Ok(())
+    }
+
+    fn update_current_open_path(&mut self, path: impl AsRef<Path>) {
+        self.current_open_path = Some(path.as_ref().into());
+
         for cb in self.current_open_path_view_feedbacks.iter_mut() {
             cb(&self.current_open_path);
         }
-
-        Ok(())
     }
 
     /// synchronizes views with the state: notifies current state to all view feedback receivers
@@ -370,7 +377,6 @@ impl<'subsystem> AppState<'subsystem> {
         &mut self,
         mut fb: impl FnMut(&Option<PathBuf>) + 'subsystem,
     ) {
-        fb(&self.current_open_path);
         self.current_open_path_view_feedbacks.push(Box::new(fb));
     }
 }

@@ -77,8 +77,9 @@ fontconfig = { path = "./thirdparty/fontconfig" }
 microsoft-sdk-locator.path = "./thirdparty/microsoft-sdk-locator"
 
 [target.'cfg(windows)'.dependencies]
-windows-future = "0.2.1"
-windows-core = "0.61.2"
+windows-future = "*"
+windows-core = "*"
+windows-collections = "*"
 
 [target.'cfg(windows)'.dependencies.windows]
 workspace = true

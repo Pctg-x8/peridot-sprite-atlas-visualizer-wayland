@@ -611,17 +611,12 @@ impl HitTestTreeActionHandler for ActionHandler {
     ) -> EventContinueControl {
         for v in self.item_views.iter() {
             if sender == v.ht_root {
-                // TODO: click action
                 match v.command {
                     Command::AddSprite => {
-                        println!("Add Sprite");
                         context.event_queue.push(AppEvent::AppMenuRequestAddSprite);
                     }
                     Command::Save => {
-                        println!("Save");
-                        context.event_queue.push(AppEvent::UIMessageDialogRequest {
-                            content: "Save not implemented".into(),
-                        });
+                        context.event_queue.push(AppEvent::AppMenuRequestSave);
                     }
                 }
 

@@ -6,9 +6,9 @@ use std::{
 
 use bedrock::{self as br, SurfaceCreateInfo};
 use windows::{
-    Storage::Pickers::FileOpenPicker,
+    Storage::Pickers::{FileOpenPicker, FileSavePicker},
     Win32::{
-        Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM},
+        Foundation::{E_NOTIMPL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM},
         Graphics::{
             Dwm::DwmExtendFrameIntoClientArea,
             Gdi::{
@@ -43,6 +43,8 @@ use windows::{
     },
     core::{Interface, PCWSTR, h, w},
 };
+use windows_collections::{IIterable_Impl, IVector, IVector_Impl};
+use windows_core::{HSTRING, implement};
 
 use crate::{
     AppEvent, AppEventBus,
@@ -614,5 +616,108 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
         }
 
         paths
+    }
+
+    pub async fn select_save_path(&self) -> Option<PathBuf> {
+        let picker = FileSavePicker::new().unwrap();
+        unsafe {
+            picker
+                .cast::<IInitializeWithWindow>()
+                .unwrap()
+                .Initialize(self.hwnd)
+                .unwrap();
+        }
+        picker
+            .FileTypeChoices()
+            .unwrap()
+            .Insert(
+                h!("Peridot Sprite Atlas asset"),
+                &IVector::from(VectorWrapper(&[HSTRING::from(".psa")])),
+            )
+            .unwrap();
+
+        let file = match picker.PickSaveFileAsync().unwrap().await {
+            Ok(x) => x,
+            Err(e) if e.code() == windows::Win32::Foundation::S_OK => {
+                // operation was cancelled
+                return None;
+            }
+            Err(e) => {
+                tracing::error!(reason = ?e, "FileSavePicker.PickSaveFileAsync failed");
+                panic!("cannot continue");
+            }
+        };
+        Some(file.Path().unwrap().to_os_string().into())
+    }
+}
+
+#[implement(IVector<T>)]
+#[repr(transparent)]
+struct VectorWrapper<'xs, T>(&'xs [T])
+where
+    T: windows_core::RuntimeType + 'static;
+impl<'xs, T: windows_core::RuntimeType + 'static> IIterable_Impl<T> for VectorWrapper_Impl<'xs, T> {
+    fn First(&self) -> windows_core::Result<windows_collections::IIterator<T>> {
+        Err(E_NOTIMPL.into())
+    }
+}
+impl<'xs, T: windows_core::RuntimeType + 'static> IVector_Impl<T> for VectorWrapper_Impl<'xs, T> {
+    fn Append(&self, _value: windows_core::Ref<'_, T>) -> windows_core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn Clear(&self) -> windows_core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn GetAt(&self, index: u32) -> windows_core::Result<T> {
+        Ok(self.0[index as usize].clone())
+    }
+
+    fn GetMany(
+        &self,
+        _start_index: u32,
+        _items: &mut [<T as windows_core::Type<T>>::Default],
+    ) -> windows_core::Result<u32> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn GetView(&self) -> windows_core::Result<windows_collections::IVectorView<T>> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn IndexOf(
+        &self,
+        _value: windows_core::Ref<'_, T>,
+        _index: &mut u32,
+    ) -> windows_core::Result<bool> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn InsertAt(&self, _index: u32, _value: windows_core::Ref<'_, T>) -> windows_core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn RemoveAt(&self, _index: u32) -> windows_core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn RemoveAtEnd(&self) -> windows_core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn ReplaceAll(
+        &self,
+        _items: &[<T as windows_core::Type<T>>::Default],
+    ) -> windows_core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn SetAt(&self, _index: u32, _value: windows_core::Ref<'_, T>) -> windows_core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn Size(&self) -> windows_core::Result<u32> {
+        Ok(self.0.len() as _)
     }
 }

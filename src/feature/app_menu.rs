@@ -500,7 +500,7 @@ impl BaseView {
 
 struct ActionHandler {
     base_view: Rc<BaseView>,
-    item_views: Vec<Rc<CommandButtonView>>,
+    item_views: Rc<[CommandButtonView]>,
     shown: Cell<bool>,
 }
 impl HitTestTreeActionHandler for ActionHandler {
@@ -643,62 +643,54 @@ pub struct Presenter {
 impl Presenter {
     pub fn new(init: &mut PresenterInitContext, header_height: f32) -> Self {
         let base_view = Rc::new(BaseView::new(&mut init.for_view));
-        let add_button = Rc::new(CommandButtonView::new(
-            &mut init.for_view,
-            "Add Sprite",
-            "resources/icons/add.svg",
-            64.0,
-            header_height + 32.0,
-            0.0,
-            Command::AddSprite,
-        ));
-        let open_button = Rc::new(CommandButtonView::new(
-            &mut init.for_view,
-            "Open",
-            "resources/icons/open.svg",
-            64.0,
-            header_height + 32.0 + CommandButtonView::BUTTON_HEIGHT + 16.0,
-            0.05,
-            Command::Open,
-        ));
-        let save_button = Rc::new(CommandButtonView::new(
-            &mut init.for_view,
-            "Save",
-            "resources/icons/save.svg",
-            64.0,
-            header_height + 32.0 + (CommandButtonView::BUTTON_HEIGHT + 16.0) * 2.0,
-            0.05 * 2.0,
-            Command::Save,
-        ));
+        let item_views: Rc<[CommandButtonView]> = Rc::new([
+            CommandButtonView::new(
+                &mut init.for_view,
+                "Add Sprite",
+                "resources/icons/add.svg",
+                64.0,
+                header_height + 32.0,
+                0.0,
+                Command::AddSprite,
+            ),
+            CommandButtonView::new(
+                &mut init.for_view,
+                "Open",
+                "resources/icons/open.svg",
+                64.0,
+                header_height + 32.0 + CommandButtonView::BUTTON_HEIGHT + 16.0,
+                0.05,
+                Command::Open,
+            ),
+            CommandButtonView::new(
+                &mut init.for_view,
+                "Save",
+                "resources/icons/save.svg",
+                64.0,
+                header_height + 32.0 + (CommandButtonView::BUTTON_HEIGHT + 16.0) * 2.0,
+                0.05 * 2.0,
+                Command::Save,
+            ),
+        ]);
 
-        add_button.mount(
-            init.for_view.base_system,
-            base_view.ct_root,
-            base_view.ht_root,
-        );
-        open_button.mount(
-            init.for_view.base_system,
-            base_view.ct_root,
-            base_view.ht_root,
-        );
-        save_button.mount(
-            init.for_view.base_system,
-            base_view.ct_root,
-            base_view.ht_root,
-        );
+        for v in item_views.iter() {
+            v.mount(
+                init.for_view.base_system,
+                base_view.ct_root,
+                base_view.ht_root,
+            );
+        }
 
         let action_handler = Rc::new(ActionHandler {
             base_view: base_view.clone(),
-            item_views: vec![add_button.clone(), open_button.clone(), save_button.clone()],
+            item_views,
             shown: Cell::new(false),
         });
 
         init.app_state.register_visible_menu_view_feedback({
             let base_view = Rc::downgrade(&base_view);
+            let item_views = Rc::downgrade(&action_handler.item_views);
             let action_handler = Rc::downgrade(&action_handler);
-            let add_button = Rc::downgrade(&add_button);
-            let open_button = Rc::downgrade(&open_button);
-            let save_button = Rc::downgrade(&save_button);
 
             move |visible| {
                 let Some(base_view) = base_view.upgrade() else {
@@ -709,29 +701,21 @@ impl Presenter {
                     // app teardown-ed
                     return;
                 };
-                let Some(add_button) = add_button.upgrade() else {
-                    // app teardown-ed
-                    return;
-                };
-                let Some(open_button) = open_button.upgrade() else {
-                    // app teardown-ed
-                    return;
-                };
-                let Some(save_button) = save_button.upgrade() else {
+                let Some(item_views) = item_views.upgrade() else {
                     // app teardown-ed
                     return;
                 };
 
                 if visible {
                     base_view.show();
-                    add_button.show();
-                    open_button.show();
-                    save_button.show();
+                    for v in item_views.iter() {
+                        v.show();
+                    }
                 } else {
                     base_view.hide();
-                    add_button.hide();
-                    open_button.hide();
-                    save_button.hide();
+                    for v in item_views.iter() {
+                        v.hide();
+                    }
                 }
 
                 action_handler.shown.set(visible);
@@ -741,18 +725,12 @@ impl Presenter {
             .base_system
             .hit_tree
             .set_action_handler(base_view.ht_root, &action_handler);
-        init.for_view
-            .base_system
-            .hit_tree
-            .set_action_handler(add_button.ht_root, &action_handler);
-        init.for_view
-            .base_system
-            .hit_tree
-            .set_action_handler(open_button.ht_root, &action_handler);
-        init.for_view
-            .base_system
-            .hit_tree
-            .set_action_handler(save_button.ht_root, &action_handler);
+        for v in action_handler.item_views.iter() {
+            init.for_view
+                .base_system
+                .hit_tree
+                .set_action_handler(v.ht_root, &action_handler);
+        }
 
         Self {
             base_view,

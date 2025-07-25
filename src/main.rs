@@ -95,6 +95,7 @@ pub enum AppEvent {
     },
     AppMenuToggle,
     AppMenuRequestAddSprite,
+    AppMenuRequestOpen,
     AppMenuRequestSave,
     BeginBackgroundWork {
         thread_number: usize,
@@ -3229,6 +3230,16 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         content: "[DEBUG] app_menu_on_add_sprite not implemented".into(),
                     });
                 }
+                AppEvent::AppMenuRequestOpen => {
+                    #[cfg(windows)]
+                    task_worker
+                        .spawn(app_menu_on_open(app_shell, app_state, events))
+                        .detach();
+                    #[cfg(not(windows))]
+                    events.push(AppEvent::UIMessageDialogRequest {
+                        content: "[TODO] open asset".into(),
+                    });
+                }
                 AppEvent::AppMenuRequestSave => {
                     #[cfg(windows)]
                     task_worker
@@ -3307,6 +3318,24 @@ async fn app_menu_on_add_sprite<'sys, 'subsystem>(
 }
 
 #[cfg(windows)]
+async fn app_menu_on_open<'sys, 'subsystem>(
+    shell: &'sys AppShell<'sys, 'subsystem>,
+    app_state: &'sys RefCell<AppState<'subsystem>>,
+    event_bus: &AppEventBus,
+) {
+    let Some(path) = shell.select_open_path().await else {
+        tracing::warn!("operation was cancelled");
+        return;
+    };
+
+    if app_state.borrow_mut().load(&path).is_err() {
+        event_bus.push(AppEvent::UIMessageDialogRequest {
+            content: "Opening failed".into(),
+        });
+    }
+}
+
+#[cfg(windows)]
 async fn app_menu_on_save<'sys, 'subsystem>(
     shell: &'sys AppShell<'sys, 'subsystem>,
     app_state: &'sys RefCell<AppState<'subsystem>>,
@@ -3317,8 +3346,7 @@ async fn app_menu_on_save<'sys, 'subsystem>(
         return;
     };
 
-    if let Err(e) = app_state.borrow_mut().save(path) {
-        tracing::error!(reason = ?e, "save failed");
+    if app_state.borrow_mut().save(path).is_err() {
         event_bus.push(AppEvent::UIMessageDialogRequest {
             content: "Saving failed".into(),
         });

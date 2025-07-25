@@ -618,6 +618,30 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
         paths
     }
 
+    pub async fn select_open_path(&self) -> Option<PathBuf> {
+        let picker = FileOpenPicker::new().unwrap();
+        unsafe {
+            picker
+                .cast::<IInitializeWithWindow>()
+                .unwrap()
+                .Initialize(self.hwnd)
+                .unwrap();
+        }
+        picker.FileTypeFilter().unwrap().Append(h!(".psa")).unwrap();
+
+        match picker.PickSingleFileAsync().unwrap().await {
+            Ok(x) => Some(x.Path().unwrap().to_os_string().into()),
+            Err(e) if e.code() == windows::Win32::Foundation::S_OK => {
+                // operation was cancelled
+                None
+            }
+            Err(e) => {
+                tracing::error!(reason = ?e, "FileOpenPicker.PickSingleFileAsync failed");
+                panic!("cannot continue");
+            }
+        }
+    }
+
     pub async fn select_save_path(&self) -> Option<PathBuf> {
         let picker = FileSavePicker::new().unwrap();
         unsafe {

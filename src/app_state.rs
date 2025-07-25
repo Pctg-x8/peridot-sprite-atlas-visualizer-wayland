@@ -251,6 +251,7 @@ impl<'subsystem> AppState<'subsystem> {
         self.visible_menu
     }
 
+    #[tracing::instrument(name = "AppState::save", skip(self), fields(path = %path.as_ref().display()), err(Display))]
     pub fn save(&mut self, path: impl AsRef<Path>) -> std::io::Result<()> {
         let mut asset = peridot::SpriteAtlasAsset {
             width: self.atlas_size.width,
@@ -287,6 +288,7 @@ impl<'subsystem> AppState<'subsystem> {
         Ok(())
     }
 
+    #[tracing::instrument(name = "AppState::load", skip(self), fields(path = %path.as_ref().display()), err(Display))]
     pub fn load(
         &mut self,
         path: impl AsRef<Path>,
@@ -375,7 +377,7 @@ impl<'subsystem> AppState<'subsystem> {
     // TODO: unregister
     pub fn register_current_open_path_view_feedback(
         &mut self,
-        mut fb: impl FnMut(&Option<PathBuf>) + 'subsystem,
+        fb: impl FnMut(&Option<PathBuf>) + 'subsystem,
     ) {
         self.current_open_path_view_feedbacks.push(Box::new(fb));
     }

@@ -839,6 +839,13 @@ impl CellView {
             .ct_label
             .entity_mut_dirtified(&mut base_system.composite_tree);
         cr.texatlas_rect = label_atlas_rect;
+        cr.size[0] = AnimatableFloat::Value(label_atlas_rect.width() as f32 / cr.base_scale_factor);
+        // Note: クリップRect側の高さに合わせているのでそっちを修正する
+        let cr = self
+            .ct_label_clip
+            .entity_mut_dirtified(&mut base_system.composite_tree);
+        cr.size[1] =
+            AnimatableFloat::Value(label_atlas_rect.height() as f32 / cr.base_scale_factor);
 
         self.label.replace(label.into());
     }
@@ -856,7 +863,6 @@ struct FrameView {
     ht_resize_area: HitTestTreeRef,
     width: Cell<f32>,
     shown: TriggerCell<bool>,
-    ui_scale_factor: Cell<f32>,
     is_dirty: Cell<bool>,
 }
 impl FrameView {
@@ -1284,7 +1290,6 @@ impl FrameView {
             ht_resize_area,
             width: Cell::new(Self::INIT_WIDTH),
             shown: TriggerCell::new(true),
-            ui_scale_factor: Cell::new(init.ui_scale_factor as _),
             is_dirty: Cell::new(false),
         }
     }

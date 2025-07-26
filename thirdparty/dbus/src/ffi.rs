@@ -74,12 +74,12 @@ pub enum DBusBusType {
 pub type dbus_bool_t = u32;
 
 pub type DBusAddWatchFunction =
-    extern "C" fn(watch: *mut DBusWatch, data: *mut core::ffi::c_void) -> dbus_bool_t;
+    Option<extern "C" fn(watch: *mut DBusWatch, data: *mut core::ffi::c_void) -> dbus_bool_t>;
 pub type DBusRemoveWatchFunction =
-    extern "C" fn(watch: *mut DBusWatch, data: *mut core::ffi::c_void);
+    Option<extern "C" fn(watch: *mut DBusWatch, data: *mut core::ffi::c_void)>;
 pub type DBusWatchToggledFunction =
-    extern "C" fn(watch: *mut DBusWatch, data: *mut core::ffi::c_void);
-pub type DBusFreeFunction = extern "C" fn(memory: *mut core::ffi::c_void);
+    Option<extern "C" fn(watch: *mut DBusWatch, data: *mut core::ffi::c_void)>;
+pub type DBusFreeFunction = Option<extern "C" fn(memory: *mut core::ffi::c_void)>;
 
 pub const DBUS_MESSAGE_TYPE_INVALID: core::ffi::c_int = 0;
 pub const DBUS_MESSAGE_TYPE_METHOD_CALL: core::ffi::c_int = 1;

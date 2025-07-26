@@ -41,7 +41,7 @@ use crate::{
     composite::FloatParameter,
     quadtree::QuadTree,
 };
-use app_state::AppState;
+use app_state::{AppState, SpriteInfo};
 use base_system::{
     AppBaseSystem, RenderPassOptions,
     prof::ProfilingContext,
@@ -658,6 +658,56 @@ impl<'subsystem> HitTestRootTreeActionHandler<'subsystem> {
             sprites_qt: RefCell::new(QuadTree::new()),
             sprite_rects_cached: RefCell::new(Vec::new()),
             drag_state: RefCell::new(DragState::None),
+        }
+    }
+
+    fn update_sprite_rects(&self, sprites: &[SpriteInfo]) {
+        let mut sprite_rects_locked = self.sprite_rects_cached.borrow_mut();
+        let mut sprites_qt_locked = self.sprites_qt.borrow_mut();
+
+        while sprite_rects_locked.len() > sprites.len() {
+            // 削除分
+            let n = sprite_rects_locked.len() - 1;
+            let old = sprite_rects_locked.pop().unwrap();
+            let (index, level) = QuadTree::rect_index_and_level(old.0, old.1, old.2, old.3);
+
+            sprites_qt_locked.element_index_for_region[level][index as usize].remove(&n);
+        }
+        for (n, (old, new)) in sprite_rects_locked
+            .iter_mut()
+            .zip(sprites.iter())
+            .enumerate()
+        {
+            // 移動分
+            if old.0 == new.left
+                && old.1 == new.top
+                && old.2 == new.right()
+                && old.3 == new.bottom()
+            {
+                // 座標変化なし
+                continue;
+            }
+
+            let (old_index, old_level) = QuadTree::rect_index_and_level(old.0, old.1, old.2, old.3);
+            let (new_index, new_level) =
+                QuadTree::rect_index_and_level(new.left, new.top, new.right(), new.bottom());
+            *old = (new.left, new.top, new.right(), new.bottom());
+
+            if old_level == new_level && old_index == new_index {
+                // 所属ブロックに変化なし
+                continue;
+            }
+
+            sprites_qt_locked.element_index_for_region[old_level][old_index as usize].remove(&n);
+            sprites_qt_locked.bind(new_level, new_index, n);
+        }
+        let new_base = sprite_rects_locked.len();
+        for (n, new) in sprites.iter().enumerate().skip(new_base) {
+            // 追加分
+            let (index, level) =
+                QuadTree::rect_index_and_level(new.left, new.top, new.right(), new.bottom());
+            sprites_qt_locked.bind(level, index, n);
+            sprite_rects_locked.push((new.left, new.top, new.right(), new.bottom()));
         }
     }
 }
@@ -1764,18 +1814,16 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         parking_lot::RwLockWriteGuard::map(staging_scratch_buffers.write(), |x| {
             x.active_buffer_mut()
         });
+    let mut active_ui_scale = app_shell.ui_scale_factor();
+    tracing::info!(value = active_ui_scale, "initial ui scale");
     let mut init_context = PresenterInitContext {
         for_view: ViewInitContext {
             base_system: app_system,
             staging_scratch_buffer: &mut staging_scratch_buffer_locked,
-            ui_scale_factor: app_shell.ui_scale_factor(),
+            ui_scale_factor: active_ui_scale,
         },
         app_state: app_state.get_mut(),
     };
-    tracing::info!(
-        value = init_context.for_view.ui_scale_factor,
-        "initial ui scale"
-    );
 
     let editing_atlas_renderer = Rc::new(RefCell::new(EditingAtlasRenderer::new(
         init_context.for_view.base_system,
@@ -1872,87 +1920,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                 return;
             };
 
-            while ht_root_fallback_action_handler
-                .sprite_rects_cached
-                .borrow()
-                .len()
-                > sprites.len()
-            {
-                // 削除分
-                let n = ht_root_fallback_action_handler
-                    .sprite_rects_cached
-                    .borrow()
-                    .len()
-                    - 1;
-                let old = ht_root_fallback_action_handler
-                    .sprite_rects_cached
-                    .borrow_mut()
-                    .pop()
-                    .unwrap();
-                let (index, level) = QuadTree::rect_index_and_level(old.0, old.1, old.2, old.3);
-
-                ht_root_fallback_action_handler
-                    .sprites_qt
-                    .borrow_mut()
-                    .element_index_for_region[level][index as usize]
-                    .remove(&n);
-            }
-            for (n, (old, new)) in ht_root_fallback_action_handler
-                .sprite_rects_cached
-                .borrow_mut()
-                .iter_mut()
-                .zip(sprites.iter())
-                .enumerate()
-            {
-                // 移動分
-                if old.0 == new.left
-                    && old.1 == new.top
-                    && old.2 == new.right()
-                    && old.3 == new.bottom()
-                {
-                    // 座標変化なし
-                    continue;
-                }
-
-                let (old_index, old_level) =
-                    QuadTree::rect_index_and_level(old.0, old.1, old.2, old.3);
-                let (new_index, new_level) =
-                    QuadTree::rect_index_and_level(new.left, new.top, new.right(), new.bottom());
-                *old = (new.left, new.top, new.right(), new.bottom());
-
-                if old_level == new_level && old_index == new_index {
-                    // 所属ブロックに変化なし
-                    continue;
-                }
-
-                ht_root_fallback_action_handler
-                    .sprites_qt
-                    .borrow_mut()
-                    .element_index_for_region[old_level][old_index as usize]
-                    .remove(&n);
-                ht_root_fallback_action_handler
-                    .sprites_qt
-                    .borrow_mut()
-                    .bind(new_level, new_index, n);
-            }
-            let new_base = ht_root_fallback_action_handler
-                .sprite_rects_cached
-                .borrow()
-                .len();
-            for (n, new) in sprites.iter().enumerate().skip(new_base) {
-                // 追加分
-                let (index, level) =
-                    QuadTree::rect_index_and_level(new.left, new.top, new.right(), new.bottom());
-                ht_root_fallback_action_handler
-                    .sprites_qt
-                    .borrow_mut()
-                    .bind(level, index, n);
-                ht_root_fallback_action_handler
-                    .sprite_rects_cached
-                    .borrow_mut()
-                    .push((new.left, new.top, new.right(), new.bottom()));
-            }
-
+            ht_root_fallback_action_handler.update_sprite_rects(sprites);
             editing_atlas_renderer.borrow().update_sprites(
                 sprites,
                 &bg_worker,
@@ -2100,7 +2068,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     }));
 
     // initialize misc state
-    let mut active_ui_scale = app_shell.ui_scale_factor();
     let mut newsize_request = None;
     let mut last_pointer_pos = (0.0f32, 0.0f32);
     let mut last_composite_render_instructions = CompositeRenderingData {

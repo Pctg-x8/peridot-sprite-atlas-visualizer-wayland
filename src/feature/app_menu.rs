@@ -454,7 +454,7 @@ impl BaseView {
                     },
                     AnimatableFloat::Animated {
                         from_value: 0.0,
-                        to_value: 3.0,
+                        to_value: 6.0,
                         start_sec: current_sec,
                         end_sec: current_sec + 0.25,
                         curve: AnimationCurve::Linear,
@@ -476,7 +476,7 @@ impl BaseView {
                         event_on_complete: None,
                     },
                     AnimatableFloat::Animated {
-                        from_value: 3.0,
+                        from_value: 6.0,
                         to_value: 0.0,
                         start_sec: current_sec,
                         end_sec: current_sec + 0.25,

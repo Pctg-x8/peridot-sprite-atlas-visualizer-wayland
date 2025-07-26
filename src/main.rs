@@ -3318,7 +3318,6 @@ async fn app_menu_on_add_sprite<'subsystem>(
             return;
         }
         Err(SelectSpriteFilesError::OpenFileFailed(e)) => {
-            tracing::error!(reason = ?e, "FileChooser.OpenFile failed");
             events.push(AppEvent::UIMessageDialogRequest {
                 content: "FileChooser.OpenFile failed".into(),
             });
@@ -3326,7 +3325,6 @@ async fn app_menu_on_add_sprite<'subsystem>(
             return;
         }
         Err(SelectSpriteFilesError::OperationCancelled) => {
-            tracing::warn!("FileChooser.OpenFile has been cancelled");
             return;
         }
     };
@@ -3351,7 +3349,6 @@ async fn app_menu_on_open<'sys, 'subsystem>(
             return;
         }
         Err(SelectSpriteFilesError::OpenFileFailed(e)) => {
-            tracing::error!(reason = ?e, "FileChooser.OpenFile failed");
             event_bus.push(AppEvent::UIMessageDialogRequest {
                 content: "FileChooser.OpenFile failed".into(),
             });
@@ -3359,7 +3356,6 @@ async fn app_menu_on_open<'sys, 'subsystem>(
             return;
         }
         Err(SelectSpriteFilesError::OperationCancelled) => {
-            tracing::warn!("FileChooser.OpenFile has been cancelled");
             return;
         }
     };
@@ -3389,7 +3385,6 @@ async fn app_menu_on_save<'sys, 'subsystem>(
             return;
         }
         Err(SelectSpriteFilesError::OpenFileFailed(e)) => {
-            tracing::error!(reason = ?e, "FileChooser.OpenFile failed");
             event_bus.push(AppEvent::UIMessageDialogRequest {
                 content: "FileChooser.SaveFile failed".into(),
             });
@@ -3397,7 +3392,6 @@ async fn app_menu_on_save<'sys, 'subsystem>(
             return;
         }
         Err(SelectSpriteFilesError::OperationCancelled) => {
-            tracing::warn!("FileChooser.SaveFile has been cancelled");
             return;
         }
     };
@@ -3842,6 +3836,11 @@ impl SystemLink {
         }
     }
 
+    #[tracing::instrument(
+        name = "SystemLink::select_sprite_files",
+        skip(self, for_shell),
+        ret(Debug)
+    )]
     pub async fn select_sprite_files(
         &self,
         for_shell: &AppShell<'_, '_>,
@@ -3911,6 +3910,11 @@ impl SystemLink {
         ))
     }
 
+    #[tracing::instrument(
+        name = "SystemLink::select_open_file",
+        skip(self, for_shell),
+        ret(Debug)
+    )]
     pub async fn select_open_file(
         &self,
         for_shell: &AppShell<'_, '_>,

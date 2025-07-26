@@ -820,7 +820,7 @@ impl CellView {
         base_system: &mut AppBaseSystem,
         staging_scratch_buffer: &mut StagingScratchBufferManager,
     ) {
-        if label == &self.label.borrow() as &str {
+        if label == self.label.borrow().as_str() {
             // no changes
             return;
         }

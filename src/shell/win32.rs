@@ -44,18 +44,18 @@ use windows::{
                 IInitializeWithWindow,
             },
             WindowsAndMessaging::{
-                CW_USEDEFAULT, CloseWindow, CreateWindowExW, DefWindowProcW, DestroyWindow,
-                DispatchMessageW, GWLP_USERDATA, GetClientRect, GetSystemMetrics,
+                CREATESTRUCTW, CW_USEDEFAULT, CloseWindow, CreateWindowExW, DefWindowProcW,
+                DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetClientRect, GetSystemMetrics,
                 GetWindowLongPtrW, GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION,
                 HTCLIENT, HTCLOSE, HTLEFT, HTMAXBUTTON, HTMINBUTTON, HTRIGHT, HTTOP, HTTOPLEFT,
                 HTTOPRIGHT, IDC_ARROW, IDC_SIZEWE, IDI_APPLICATION, IsWindow, IsZoomed,
                 LoadCursorW, LoadIconW, MSG, NCCALCSIZE_PARAMS, PM_REMOVE, PeekMessageW,
                 RegisterClassExW, SM_CXSIZEFRAME, SM_CYSIZEFRAME, SW_RESTORE, SW_SHOWMAXIMIZED,
                 SW_SHOWNORMAL, SWP_FRAMECHANGED, SetCursor, SetWindowLongPtrW, SetWindowPos,
-                ShowWindow, TranslateMessage, WINDOW_LONG_PTR_INDEX, WM_ACTIVATE, WM_DESTROY,
-                WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE,
-                WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSEMOVE, WM_SIZE,
-                WNDCLASS_STYLES, WNDCLASSEXW, WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW,
+                ShowWindow, TranslateMessage, WM_ACTIVATE, WM_CREATE, WM_DESTROY, WM_DPICHANGED,
+                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCHITTEST,
+                WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSEMOVE, WM_SIZE, WNDCLASS_STYLES,
+                WNDCLASSEXW, WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW,
             },
         },
     },
@@ -71,15 +71,20 @@ use crate::{
     input::PointerInputManager,
 };
 
+struct WindowState<'sys, 'subsystem> {
+    app_event_bus: &'sys AppEventBus,
+    ui_scale_factor: Cell<f32>,
+    pointer_input_manager: UnsafeCell<PointerInputManager>,
+    base_sys: *mut AppBaseSystem<'subsystem>,
+}
+
 pub struct AppShell<'sys, 'subsystem> {
     hinstance: HINSTANCE,
     hwnd: HWND,
-    ui_scale_factor: core::pin::Pin<Box<Cell<f32>>>,
+    hwnd_state: Pin<Box<WindowState<'sys, 'subsystem>>>,
     current_display_refresh_rate_hz: core::pin::Pin<Box<Cell<f32>>>,
     perf_counter_freq: i64,
     next_target_frame_timing: Cell<i64>,
-    pub pointer_input_manager: Pin<Box<UnsafeCell<PointerInputManager>>>,
-    _marker: core::marker::PhantomData<(&'sys AppEventBus, *mut AppBaseSystem<'subsystem>)>,
 }
 impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
     #[tracing::instrument(skip(events, base_sys))]
@@ -91,7 +96,6 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
         let hinstance =
             unsafe { core::mem::transmute::<_, HINSTANCE>(GetModuleHandleW(None).unwrap()) };
 
-        let ui_scale_factor = Box::pin(Cell::new(1.0f32));
         let current_display_refresh_rate_hz = Box::pin(Cell::new(60.0f32));
 
         let wc = WNDCLASSEXW {
@@ -99,7 +103,7 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
             style: WNDCLASS_STYLES(0),
             lpfnWndProc: Some(Self::wndproc),
             cbClsExtra: 0,
-            cbWndExtra: (core::mem::size_of::<usize>() * 3) as _,
+            cbWndExtra: 0,
             hInstance: hinstance,
             hIcon: unsafe { LoadIconW(None, IDI_APPLICATION).unwrap() },
             hCursor: unsafe { LoadCursorW(None, IDC_ARROW).unwrap() },
@@ -116,6 +120,12 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
             );
         }
 
+        let hwnd_state = Box::pin(WindowState {
+            app_event_bus: events,
+            ui_scale_factor: Cell::new(1.0),
+            pointer_input_manager: UnsafeCell::new(PointerInputManager::new()),
+            base_sys,
+        });
         let hwnd = unsafe {
             CreateWindowExW(
                 WS_EX_APPWINDOW,
@@ -129,18 +139,10 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
                 None,
                 None,
                 Some(hinstance),
-                None,
+                Some(&*hwnd_state.as_ref() as *const WindowState as _),
             )
             .unwrap()
         };
-        unsafe {
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, events as *const _ as _);
-            SetWindowLongPtrW(
-                hwnd,
-                WINDOW_LONG_PTR_INDEX(0),
-                ui_scale_factor.as_ref().get_ref() as *const _ as _,
-            );
-        }
 
         // set dark mode preference
         if let Err(e) = unsafe {
@@ -179,27 +181,7 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
             }
         }
 
-        let mut pointer_input_manager =
-            Pin::new(Box::new(UnsafeCell::new(PointerInputManager::new())));
         unsafe {
-            SetWindowLongPtrW(
-                hwnd,
-                WINDOW_LONG_PTR_INDEX(core::mem::size_of::<usize>() as _),
-                pointer_input_manager.as_mut().get_mut() as *mut _ as _,
-            );
-            SetWindowLongPtrW(
-                hwnd,
-                WINDOW_LONG_PTR_INDEX((core::mem::size_of::<usize>() * 2) as _),
-                base_sys as _,
-            );
-        }
-
-        unsafe {
-            // 96dpi as base
-            ui_scale_factor
-                .as_ref()
-                .set(GetDpiForWindow(hwnd) as f32 / 96.0);
-
             let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
         }
 
@@ -263,7 +245,7 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
         Self {
             hinstance,
             hwnd,
-            ui_scale_factor,
+            hwnd_state,
             perf_counter_freq,
             next_target_frame_timing: Cell::new(
                 current_perf_counter
@@ -271,54 +253,41 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
                         as i64,
             ),
             current_display_refresh_rate_hz,
-            pointer_input_manager,
-            _marker: core::marker::PhantomData,
         }
     }
 
-    #[inline(always)]
-    fn app_event_bus<'a>(hwnd: HWND) -> &'a AppEventBus {
-        unsafe {
-            &*core::ptr::with_exposed_provenance::<AppEventBus>(GetWindowLongPtrW(
-                hwnd,
-                GWLP_USERDATA,
-            ) as _)
-        }
-    }
-
-    #[inline(always)]
-    fn ui_scale_factor_cell<'a>(hwnd: HWND) -> &'a Cell<f32> {
-        unsafe {
-            &*core::ptr::with_exposed_provenance::<Cell<f32>>(GetWindowLongPtrW(
-                hwnd,
-                WINDOW_LONG_PTR_INDEX(0),
-            ) as _)
-        }
-    }
-
-    #[inline(always)]
-    fn pointer_input_manager_st<'a>(hwnd: HWND) -> &'a UnsafeCell<PointerInputManager> {
-        unsafe {
-            &*core::ptr::with_exposed_provenance(GetWindowLongPtrW(
-                hwnd,
-                WINDOW_LONG_PTR_INDEX(core::mem::size_of::<usize>() as _),
-            ) as _)
-        }
-    }
-
-    #[inline(always)]
-    fn base_sys_mut<'a>(hwnd: HWND) -> &'a mut AppBaseSystem<'subsystem> {
-        unsafe {
-            &mut *core::ptr::with_exposed_provenance_mut(GetWindowLongPtrW(
-                hwnd,
-                WINDOW_LONG_PTR_INDEX((core::mem::size_of::<usize>() * 2) as _),
-            ) as _)
-        }
+    #[inline]
+    fn window_state_ref<'a>(hwnd: HWND) -> &'a WindowState<'sys, 'subsystem> {
+        unsafe { &*core::ptr::with_exposed_provenance(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as _) }
     }
 
     extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if msg == WM_CREATE {
+            // setup state
+            let state = unsafe {
+                &mut *((&*core::ptr::with_exposed_provenance_mut::<CREATESTRUCTW>(
+                    lparam.0 as usize,
+                ))
+                    .lpCreateParams as *mut WindowState)
+            };
+            // 96dpi as base
+            state
+                .ui_scale_factor
+                .set(unsafe { GetDpiForWindow(hwnd) } as f32 / 96.0);
+
+            // store state ptr
+            unsafe {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, state as *mut _ as _);
+            }
+
+            return LRESULT(0);
+        }
+
         if msg == WM_DESTROY {
-            Self::app_event_bus(hwnd).push(AppEvent::ToplevelWindowClose);
+            Self::window_state_ref(hwnd)
+                .app_event_bus
+                .push(AppEvent::ToplevelWindowClose);
+
             return LRESULT(0);
         }
 
@@ -395,11 +364,12 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
                 return LRESULT(HTTOP as _);
             }
 
-            let ui_scale_factor = Self::ui_scale_factor_cell(hwnd).get();
-            let pointer_input_manager = Self::pointer_input_manager_st(hwnd);
-            let base_sys = Self::base_sys_mut(hwnd);
+            let state_ref = Self::window_state_ref(hwnd);
+            let ui_scale_factor = state_ref.ui_scale_factor.get();
+            let pointer_input_manager = unsafe { &*state_ref.pointer_input_manager.get() };
+            let base_sys = unsafe { &mut *state_ref.base_sys };
 
-            return match unsafe { &*pointer_input_manager.get() }.role(
+            return match pointer_input_manager.role(
                 pointer_x_px as f32 / ui_scale_factor,
                 pointer_y_px as f32 / ui_scale_factor,
                 (rc.right - rc.left) as f32 / ui_scale_factor,
@@ -419,17 +389,20 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
         }
 
         if msg == WM_DPICHANGED {
-            Self::ui_scale_factor_cell(hwnd).set((wparam.0 & 0xffff) as u16 as f32 / 96.0);
+            Self::window_state_ref(hwnd)
+                .ui_scale_factor
+                .set((wparam.0 & 0xffff) as u16 as f32 / 96.0);
             return LRESULT(0);
         }
 
         if msg == WM_SIZE {
-            let app_event_bus = Self::app_event_bus(hwnd);
+            Self::window_state_ref(hwnd)
+                .app_event_bus
+                .push(AppEvent::ToplevelWindowNewSize {
+                    width_px: (lparam.0 & 0xffff) as u16 as _,
+                    height_px: ((lparam.0 >> 16) & 0xffff) as u16 as _,
+                });
 
-            app_event_bus.push(AppEvent::ToplevelWindowNewSize {
-                width_px: (lparam.0 & 0xffff) as u16 as _,
-                height_px: ((lparam.0 >> 16) & 0xffff) as u16 as _,
-            });
             return LRESULT(0);
         }
 
@@ -453,22 +426,29 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
         }
 
         if msg == WM_LBUTTONDOWN || msg == WM_NCLBUTTONDOWN {
-            Self::app_event_bus(hwnd).push(AppEvent::MainWindowPointerLeftDown);
+            Self::window_state_ref(hwnd)
+                .app_event_bus
+                .push(AppEvent::MainWindowPointerLeftDown);
             return LRESULT(0);
         }
 
         if msg == WM_LBUTTONUP || msg == WM_NCLBUTTONUP {
-            Self::app_event_bus(hwnd).push(AppEvent::MainWindowPointerLeftUp);
+            Self::window_state_ref(hwnd)
+                .app_event_bus
+                .push(AppEvent::MainWindowPointerLeftUp);
             return LRESULT(0);
         }
 
         if msg == WM_MOUSEMOVE {
-            let ui_scale_factor = Self::ui_scale_factor_cell(hwnd).get();
+            let state_ref = Self::window_state_ref(hwnd);
+            let ui_scale_factor = state_ref.ui_scale_factor.get();
 
-            Self::app_event_bus(hwnd).push(AppEvent::MainWindowPointerMove {
-                surface_x: (lparam.0 & 0xffff) as i16 as f32 / ui_scale_factor,
-                surface_y: ((lparam.0 >> 16) & 0xffff) as i16 as f32 / ui_scale_factor,
-            });
+            state_ref
+                .app_event_bus
+                .push(AppEvent::MainWindowPointerMove {
+                    surface_x: (lparam.0 & 0xffff) as i16 as f32 / ui_scale_factor,
+                    surface_y: ((lparam.0 >> 16) & 0xffff) as i16 as f32 / ui_scale_factor,
+                });
             return LRESULT(0);
         }
 
@@ -481,12 +461,15 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
                 MapWindowPoints(None, Some(hwnd), &mut p);
             }
 
-            let ui_scale_factor = Self::ui_scale_factor_cell(hwnd).get();
+            let state_ref = Self::window_state_ref(hwnd);
+            let ui_scale_factor = state_ref.ui_scale_factor.get();
 
-            Self::app_event_bus(hwnd).push(AppEvent::MainWindowPointerMove {
-                surface_x: p[0].x as f32 / ui_scale_factor,
-                surface_y: p[0].y as f32 / ui_scale_factor,
-            });
+            state_ref
+                .app_event_bus
+                .push(AppEvent::MainWindowPointerMove {
+                    surface_x: p[0].x as f32 / ui_scale_factor,
+                    surface_y: p[0].y as f32 / ui_scale_factor,
+                });
             // Note: NCMOUSEMOVEはデフォルト動作もさせる
         }
 
@@ -508,7 +491,7 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
     }
 
     pub fn pointer_input_manager(&self) -> &UnsafeCell<PointerInputManager> {
-        &self.pointer_input_manager
+        &self.hwnd_state.pointer_input_manager
     }
 
     pub unsafe fn create_vulkan_surface(
@@ -525,7 +508,7 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
     }
 
     pub fn client_size(&self) -> (f32, f32) {
-        let ui_scale_factor = self.ui_scale_factor.get();
+        let ui_scale_factor = self.hwnd_state.ui_scale_factor.get();
 
         let mut rc = core::mem::MaybeUninit::uninit();
         unsafe {
@@ -600,7 +583,7 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
 
     #[inline]
     pub fn ui_scale_factor(&self) -> f32 {
-        self.ui_scale_factor.get()
+        self.hwnd_state.ui_scale_factor.get()
     }
 
     #[inline]

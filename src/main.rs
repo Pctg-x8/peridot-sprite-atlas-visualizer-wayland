@@ -1286,9 +1286,7 @@ fn main() {
     let setup_timer = std::time::Instant::now();
 
     #[cfg(all(unix, not(target_os = "macos")))]
-    let dbus = dbus::Connection::connect_bus(dbus::BusType::Session).unwrap();
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let mut dbus = DBusLink { con: dbus };
+    let dbus = DBusLink::new();
 
     let events = AppEventBus {
         queue: UnsafeCell::new(VecDeque::new()),
@@ -1303,11 +1301,6 @@ fn main() {
     let mut app_shell = AppShell::new(&events, &mut app_system as _);
     let mut app_state = RefCell::new(AppState::new());
 
-    #[cfg(target_os = "linux")]
-    unsafe {
-        DBUS_WAIT_FOR_REPLY_WAKERS = &mut HashMap::new() as *mut _;
-        DBUS_WAIT_FOR_SIGNAL_WAKERS = &mut HashMap::new() as *mut _;
-    }
     let bg_worker = BackgroundWorker::new();
     let task_worker = smol::LocalExecutor::new();
 
@@ -1324,7 +1317,7 @@ fn main() {
         &task_worker,
         &bg_worker,
         #[cfg(all(unix, not(target_os = "macos")))]
-        &mut dbus,
+        &dbus,
     );
 
     bg_worker.teardown();
@@ -1338,7 +1331,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     app_state: &'sys mut RefCell<AppState<'subsystem>>,
     task_worker: &smol::LocalExecutor<'sys>,
     bg_worker: &BackgroundWorker<'subsystem>,
-    #[cfg(all(unix, not(target_os = "macos")))] dbus: &'sys mut DBusLink,
+    #[cfg(all(unix, not(target_os = "macos")))] dbus: &'sys DBusLink,
 ) {
     tracing::info!("Initializing Peridot SpriteAtlas Visualizer/Editor");
     let setup_timer = std::time::Instant::now();
@@ -2196,6 +2189,8 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         if !watch_ptr.handle(flags) {
                             tracing::warn!(?flags, "dbus_watch_handle failed");
                         }
+
+                        dbus.dispatch();
                     }
                     // ignore
                     None => (),
@@ -2204,8 +2199,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
             if !shell_event_processed {
                 app_shell.cancel_read_events();
             }
-
-            dispatch_dbus(&dbus);
         }
         #[cfg(windows)]
         {
@@ -3293,26 +3286,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     }
 }
 
-#[cfg(target_os = "linux")]
-struct DBusLink {
-    con: dbus::Connection,
-}
-#[cfg(target_os = "linux")]
-impl DBusLink {
-    #[inline(always)]
-    pub fn underlying(&self) -> &dbus::Connection {
-        &self.con
-    }
-
-    pub async fn send(&self, mut msg: dbus::Message) -> Option<dbus::Message> {
-        let Some(serial) = self.con.send_with_serial(&mut msg) else {
-            return None;
-        };
-
-        Some(DBusWaitForReplyFuture::new(serial).await)
-    }
-}
-
 #[cfg(windows)]
 async fn app_menu_on_add_sprite<'sys, 'subsystem>(
     shell: &'sys AppShell<'sys, 'subsystem>,
@@ -3361,7 +3334,7 @@ async fn app_menu_on_save<'sys, 'subsystem>(
 }
 
 #[cfg(unix)]
-struct DesktopPortal;
+pub struct DesktopPortal;
 #[cfg(unix)]
 impl DesktopPortal {
     #[tracing::instrument(name = "DesktopPortal::try_get_file_chooser", skip(dbus))]
@@ -3415,7 +3388,7 @@ impl DesktopPortal {
 }
 
 #[cfg(unix)]
-struct DesktopPortalFileChooser;
+pub struct DesktopPortalFileChooser;
 #[cfg(unix)]
 impl DesktopPortalFileChooser {
     pub async fn get_version(&self, dbus: &DBusLink) -> Result<u32, dbus::Error> {
@@ -3531,8 +3504,12 @@ impl DesktopPortalRequestObject {
         self.object_path == other.object_path
     }
 
-    pub fn wait_for_response(&self) -> DBusWaitForSignalFuture {
-        DBusWaitForSignalFuture::new(
+    #[inline]
+    pub fn wait_for_response<'link>(
+        &self,
+        dbus: &'link DBusLink,
+    ) -> DBusWaitForSignalFuture<'link> {
+        dbus.wait_for_signal(
             self.object_path.clone(),
             c"org.freedesktop.portal.Request".into(),
             c"Response".into(),
@@ -3614,7 +3591,7 @@ async fn app_menu_on_add_sprite<'subsystem>(
         request_object = request_handle;
     }
 
-    let resp = request_object.wait_for_response().await;
+    let resp = request_object.wait_for_response(dbus).await;
     drop(exported_shell);
 
     let mut resp_iter = resp.iter();
@@ -3855,114 +3832,185 @@ impl dbus::WatchFunction for DBusWatcher<'_> {
 }
 
 #[cfg(target_os = "linux")]
-fn dispatch_dbus(dbus: &DBusLink) {
-    while let Some(m) = dbus.underlying().pop_message() {
-        let span =
-            tracing::info_span!(target: "dbus_loop", "dbus message recv", r#type = m.r#type());
-        let _enter = span.enter();
-        if m.r#type() == dbus::MESSAGE_TYPE_METHOD_RETURN {
-            // method return
-            tracing::trace!(target: "dbus_loop", reply_serial = m.reply_serial(), signature = ?m.signature(), "method return data");
-            wake_for_reply(m);
-        } else if m.r#type() == dbus::MESSAGE_TYPE_SIGNAL {
-            // signal
-            tracing::trace!(target: "dbus_loop", path = ?m.path(), interface = ?m.interface(), member = ?m.member(), "signal data");
-            wake_for_signal(
-                m.path().unwrap().into(),
-                m.interface().unwrap().into(),
-                m.member().unwrap().into(),
-                m,
-            );
-        } else {
-            tracing::trace!(target: "dbus_loop", "unknown dbus message");
+pub struct DBusLink {
+    con: dbus::Connection,
+    wait_for_reply_wakers: RefCell<
+        HashMap<
+            u32,
+            Vec<(
+                std::rc::Weak<std::cell::Cell<Option<dbus::Message>>>,
+                core::task::Waker,
+            )>,
+        >,
+    >,
+    wait_for_signal_wakers: RefCell<
+        HashMap<
+            (std::ffi::CString, std::ffi::CString, std::ffi::CString),
+            Vec<(
+                std::rc::Weak<std::cell::Cell<Option<dbus::Message>>>,
+                core::task::Waker,
+            )>,
+        >,
+    >,
+}
+#[cfg(target_os = "linux")]
+impl DBusLink {
+    pub fn new() -> Self {
+        Self {
+            con: dbus::Connection::connect_bus(dbus::BusType::Session).unwrap(),
+            wait_for_reply_wakers: RefCell::new(HashMap::new()),
+            wait_for_signal_wakers: RefCell::new(HashMap::new()),
+        }
+    }
+
+    #[inline(always)]
+    pub fn underlying(&self) -> &dbus::Connection {
+        &self.con
+    }
+
+    pub async fn send(&self, mut msg: dbus::Message) -> Option<dbus::Message> {
+        let Some(serial) = self.con.send_with_serial(&mut msg) else {
+            return None;
+        };
+
+        Some(DBusWaitForReplyFuture::new(self, serial).await)
+    }
+
+    #[inline]
+    pub fn wait_for_signal<'link>(
+        &'link self,
+        object_path: std::ffi::CString,
+        interface: std::ffi::CString,
+        member: std::ffi::CString,
+    ) -> DBusWaitForSignalFuture<'link> {
+        DBusWaitForSignalFuture::new(self, object_path, interface, member)
+    }
+
+    fn dispatch(&self) {
+        while let Some(m) = self.con.pop_message() {
+            let span =
+                tracing::info_span!(target: "dbus_loop", "dbus message recv", r#type = m.r#type());
+            let _enter = span.enter();
+            if m.r#type() == dbus::MESSAGE_TYPE_METHOD_RETURN {
+                // method return
+                tracing::trace!(target: "dbus_loop", reply_serial = m.reply_serial(), signature = ?m.signature(), "method return data");
+                self.wake_for_reply(m);
+            } else if m.r#type() == dbus::MESSAGE_TYPE_SIGNAL {
+                // signal
+                tracing::trace!(target: "dbus_loop", path = ?m.path(), interface = ?m.interface(), member = ?m.member(), "signal data");
+                self.wake_for_signal(
+                    m.path().unwrap().into(),
+                    m.interface().unwrap().into(),
+                    m.member().unwrap().into(),
+                    m,
+                );
+            } else {
+                tracing::trace!(target: "dbus_loop", "unknown dbus message");
+            }
+        }
+    }
+
+    pub fn register_wait_for_reply(
+        &self,
+        serial: u32,
+        reply_sink: &std::rc::Rc<std::cell::Cell<Option<dbus::Message>>>,
+        waker: &core::task::Waker,
+    ) {
+        self.wait_for_reply_wakers
+            .borrow_mut()
+            .entry(serial)
+            .or_insert_with(Vec::new)
+            .push((std::rc::Rc::downgrade(reply_sink), waker.clone()));
+    }
+
+    fn wake_for_reply(&self, reply: dbus::Message) {
+        let Some(wakers) = self
+            .wait_for_reply_wakers
+            .borrow_mut()
+            .remove(&reply.reply_serial())
+        else {
+            return;
+        };
+
+        let wake_count = wakers.len();
+        for ((sink, w), m) in wakers
+            .into_iter()
+            .zip(core::iter::repeat_n(reply, wake_count))
+        {
+            let Some(sink1) = sink.upgrade() else {
+                // abandoned
+                continue;
+            };
+
+            sink1.set(Some(m));
+            drop(sink); // drop before wake(unchain weak ref)
+            w.wake();
+        }
+    }
+
+    pub fn register_wait_for_signal(
+        &self,
+        key: (std::ffi::CString, std::ffi::CString, std::ffi::CString),
+        signal_sink: &std::rc::Rc<std::cell::Cell<Option<dbus::Message>>>,
+        waker: &core::task::Waker,
+    ) {
+        self.wait_for_signal_wakers
+            .borrow_mut()
+            .entry(key)
+            .or_insert_with(Vec::new)
+            .push((std::rc::Rc::downgrade(signal_sink), waker.clone()));
+    }
+
+    fn wake_for_signal(
+        &self,
+        path: std::ffi::CString,
+        interface: std::ffi::CString,
+        member: std::ffi::CString,
+        message: dbus::Message,
+    ) {
+        let Some(wakers) = self
+            .wait_for_signal_wakers
+            .borrow_mut()
+            .remove(&(path, interface, member))
+        else {
+            return;
+        };
+
+        let wake_count = wakers.len();
+        for ((sink, w), m) in wakers
+            .into_iter()
+            .zip(core::iter::repeat_n(message, wake_count))
+        {
+            let Some(sink1) = sink.upgrade() else {
+                // abandoned
+                continue;
+            };
+
+            sink1.set(Some(m));
+            drop(sink); // drop before wake(unchain weak ref)
+            w.wake();
         }
     }
 }
 
 #[cfg(target_os = "linux")]
-static mut DBUS_WAIT_FOR_REPLY_WAKERS: *mut HashMap<
-    u32,
-    Vec<(
-        std::rc::Weak<std::cell::Cell<Option<dbus::Message>>>,
-        core::task::Waker,
-    )>,
-> = core::ptr::null_mut();
-#[cfg(target_os = "linux")]
-fn wake_for_reply(reply: dbus::Message) {
-    let Some(wakers) = unsafe { &mut *DBUS_WAIT_FOR_REPLY_WAKERS }.remove(&reply.reply_serial())
-    else {
-        return;
-    };
-
-    let wake_count = wakers.len();
-    for ((sink, w), m) in wakers
-        .into_iter()
-        .zip(core::iter::repeat_n(reply, wake_count))
-    {
-        let Some(sink1) = sink.upgrade() else {
-            // abandoned
-            continue;
-        };
-
-        sink1.set(Some(m));
-        drop(sink); // drop before wake(unchain weak ref)
-        w.wake();
-    }
-}
-
-#[cfg(target_os = "linux")]
-static mut DBUS_WAIT_FOR_SIGNAL_WAKERS: *mut HashMap<
-    (std::ffi::CString, std::ffi::CString, std::ffi::CString),
-    Vec<(
-        std::rc::Weak<std::cell::Cell<Option<dbus::Message>>>,
-        core::task::Waker,
-    )>,
-> = core::ptr::null_mut();
-#[cfg(target_os = "linux")]
-fn wake_for_signal(
-    path: std::ffi::CString,
-    interface: std::ffi::CString,
-    member: std::ffi::CString,
-    message: dbus::Message,
-) {
-    let Some(wakers) =
-        unsafe { &mut *DBUS_WAIT_FOR_SIGNAL_WAKERS }.remove(&(path, interface, member))
-    else {
-        return;
-    };
-
-    let wake_count = wakers.len();
-    for ((sink, w), m) in wakers
-        .into_iter()
-        .zip(core::iter::repeat_n(message, wake_count))
-    {
-        let Some(sink1) = sink.upgrade() else {
-            // abandoned
-            continue;
-        };
-
-        sink1.set(Some(m));
-        drop(sink); // drop before wake(unchain weak ref)
-        w.wake();
-    }
-}
-
-#[cfg(target_os = "linux")]
-pub struct DBusWaitForReplyFuture {
+pub struct DBusWaitForReplyFuture<'link> {
+    link: &'link DBusLink,
     serial: u32,
     reply: std::rc::Rc<std::cell::Cell<Option<dbus::Message>>>,
 }
 #[cfg(target_os = "linux")]
-impl DBusWaitForReplyFuture {
-    pub fn new(serial: u32) -> Self {
+impl<'link> DBusWaitForReplyFuture<'link> {
+    pub fn new(link: &'link DBusLink, serial: u32) -> Self {
         Self {
+            link,
             serial,
             reply: std::rc::Rc::new(std::cell::Cell::new(None)),
         }
     }
 }
 #[cfg(target_os = "linux")]
-impl core::future::Future for DBusWaitForReplyFuture {
+impl core::future::Future for DBusWaitForReplyFuture<'_> {
     type Output = dbus::Message;
 
     fn poll(
@@ -3977,10 +4025,8 @@ impl core::future::Future for DBusWaitForReplyFuture {
 
         match reply_mut_ref.take() {
             None => {
-                unsafe { &mut *DBUS_WAIT_FOR_REPLY_WAKERS }
-                    .entry(this.serial)
-                    .or_insert_with(Vec::new)
-                    .push((std::rc::Rc::downgrade(&this.reply), cx.waker().clone()));
+                this.link
+                    .register_wait_for_reply(this.serial, &this.reply, cx.waker());
 
                 core::task::Poll::Pending
             }
@@ -3990,25 +4036,28 @@ impl core::future::Future for DBusWaitForReplyFuture {
 }
 
 #[cfg(target_os = "linux")]
-pub struct DBusWaitForSignalFuture {
+pub struct DBusWaitForSignalFuture<'link> {
+    link: &'link DBusLink,
     key: Option<(std::ffi::CString, std::ffi::CString, std::ffi::CString)>,
     message: std::rc::Rc<std::cell::Cell<Option<dbus::Message>>>,
 }
 #[cfg(target_os = "linux")]
-impl DBusWaitForSignalFuture {
+impl<'link> DBusWaitForSignalFuture<'link> {
     pub fn new(
+        link: &'link DBusLink,
         object_path: std::ffi::CString,
         interface: std::ffi::CString,
         member: std::ffi::CString,
     ) -> Self {
         Self {
+            link,
             key: Some((object_path, interface, member)),
             message: std::rc::Rc::new(std::cell::Cell::new(None)),
         }
     }
 }
 #[cfg(target_os = "linux")]
-impl core::future::Future for DBusWaitForSignalFuture {
+impl core::future::Future for DBusWaitForSignalFuture<'_> {
     type Output = dbus::Message;
 
     fn poll(
@@ -4023,10 +4072,11 @@ impl core::future::Future for DBusWaitForSignalFuture {
 
         match msg_mut_ref.take() {
             None => {
-                unsafe { &mut *DBUS_WAIT_FOR_SIGNAL_WAKERS }
-                    .entry(this.key.take().expect("polled twice"))
-                    .or_insert_with(Vec::new)
-                    .push((std::rc::Rc::downgrade(&this.message), cx.waker().clone()));
+                this.link.register_wait_for_signal(
+                    this.key.take().expect("polled twice"),
+                    &this.message,
+                    cx.waker(),
+                );
 
                 core::task::Poll::Pending
             }

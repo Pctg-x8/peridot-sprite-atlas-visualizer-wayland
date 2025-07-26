@@ -3479,9 +3479,9 @@ impl DesktopPortalRequestObject {
         dbus: &'link DBusLink,
     ) -> DBusWaitForSignalFuture<'link> {
         dbus.wait_for_signal(
-            self.object_path.clone(),
-            c"org.freedesktop.portal.Request".into(),
-            c"Response".into(),
+            std::rc::Rc::from(self.object_path.as_c_str()),
+            std::rc::Rc::from(c"org.freedesktop.portal.Request"),
+            std::rc::Rc::from(c"Response"),
         )
     }
 }
@@ -3814,7 +3814,11 @@ pub struct DBusLink {
     >,
     wait_for_signal_wakers: RefCell<
         HashMap<
-            (std::ffi::CString, std::ffi::CString, std::ffi::CString),
+            (
+                std::rc::Rc<core::ffi::CStr>,
+                std::rc::Rc<core::ffi::CStr>,
+                std::rc::Rc<core::ffi::CStr>,
+            ),
             Vec<(
                 std::rc::Weak<std::cell::Cell<Option<dbus::Message>>>,
                 core::task::Waker,
@@ -3848,9 +3852,9 @@ impl DBusLink {
     #[inline]
     pub fn wait_for_signal<'link>(
         &'link self,
-        object_path: std::ffi::CString,
-        interface: std::ffi::CString,
-        member: std::ffi::CString,
+        object_path: std::rc::Rc<core::ffi::CStr>,
+        interface: std::rc::Rc<core::ffi::CStr>,
+        member: std::rc::Rc<core::ffi::CStr>,
     ) -> DBusWaitForSignalFuture<'link> {
         DBusWaitForSignalFuture::new(self, object_path, interface, member)
     }
@@ -3919,7 +3923,11 @@ impl DBusLink {
 
     pub fn register_wait_for_signal(
         &self,
-        key: (std::ffi::CString, std::ffi::CString, std::ffi::CString),
+        key: (
+            std::rc::Rc<core::ffi::CStr>,
+            std::rc::Rc<core::ffi::CStr>,
+            std::rc::Rc<core::ffi::CStr>,
+        ),
         signal_sink: &std::rc::Rc<std::cell::Cell<Option<dbus::Message>>>,
         waker: &core::task::Waker,
     ) {
@@ -3932,9 +3940,9 @@ impl DBusLink {
 
     fn wake_for_signal(
         &self,
-        path: std::ffi::CString,
-        interface: std::ffi::CString,
-        member: std::ffi::CString,
+        path: std::rc::Rc<core::ffi::CStr>,
+        interface: std::rc::Rc<core::ffi::CStr>,
+        member: std::rc::Rc<core::ffi::CStr>,
         message: dbus::Message,
     ) {
         let Some(wakers) = self
@@ -4007,20 +4015,24 @@ impl core::future::Future for DBusWaitForReplyFuture<'_> {
 #[cfg(target_os = "linux")]
 pub struct DBusWaitForSignalFuture<'link> {
     link: &'link DBusLink,
-    key: Option<(std::ffi::CString, std::ffi::CString, std::ffi::CString)>,
+    key: (
+        std::rc::Rc<std::ffi::CStr>,
+        std::rc::Rc<std::ffi::CStr>,
+        std::rc::Rc<std::ffi::CStr>,
+    ),
     message: std::rc::Rc<std::cell::Cell<Option<dbus::Message>>>,
 }
 #[cfg(target_os = "linux")]
 impl<'link> DBusWaitForSignalFuture<'link> {
     pub fn new(
         link: &'link DBusLink,
-        object_path: std::ffi::CString,
-        interface: std::ffi::CString,
-        member: std::ffi::CString,
+        object_path: std::rc::Rc<std::ffi::CStr>,
+        interface: std::rc::Rc<std::ffi::CStr>,
+        member: std::rc::Rc<std::ffi::CStr>,
     ) -> Self {
         Self {
             link,
-            key: Some((object_path, interface, member)),
+            key: (object_path, interface, member),
             message: std::rc::Rc::new(std::cell::Cell::new(None)),
         }
     }
@@ -4041,11 +4053,8 @@ impl core::future::Future for DBusWaitForSignalFuture<'_> {
 
         match msg_mut_ref.take() {
             None => {
-                this.link.register_wait_for_signal(
-                    this.key.take().expect("polled twice"),
-                    &this.message,
-                    cx.waker(),
-                );
+                this.link
+                    .register_wait_for_signal(this.key.clone(), &this.message, cx.waker());
 
                 core::task::Poll::Pending
             }

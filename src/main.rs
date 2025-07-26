@@ -19,6 +19,7 @@ mod text;
 mod trigger_cell;
 mod uikit;
 
+#[cfg(unix)]
 use dbus::MessageIterAppendLike;
 use helper_types::SafeF32;
 use shared_perflog_proto::{ProfileMarker, ProfileMarkerCategory};
@@ -1337,7 +1338,6 @@ fn main() {
     tracing::info!("Initializing BaseSystem...");
     let setup_timer = std::time::Instant::now();
 
-    #[cfg(all(unix, not(target_os = "macos")))]
     let syslink = SystemLink::new();
 
     let events = AppEventBus {
@@ -1368,7 +1368,6 @@ fn main() {
         &mut app_state,
         &task_worker,
         &bg_worker,
-        #[cfg(all(unix, not(target_os = "macos")))]
         &syslink,
     );
 
@@ -1383,7 +1382,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     app_state: &'sys mut RefCell<AppState<'subsystem>>,
     task_worker: &smol::LocalExecutor<'sys>,
     bg_worker: &BackgroundWorker<'subsystem>,
-    #[cfg(all(unix, not(target_os = "macos")))] syslink: &'sys SystemLink,
+    syslink: &'sys SystemLink,
 ) {
     tracing::info!("Initializing Peridot SpriteAtlas Visualizer/Editor");
     let setup_timer = std::time::Instant::now();
@@ -3191,7 +3190,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         .detach();
                     #[cfg(windows)]
                     task_worker
-                        .spawn(app_menu_on_add_sprite(app_shell, app_state))
+                        .spawn(app_menu_on_add_sprite(syslink, app_shell, app_state))
                         .detach();
                 }
                 AppEvent::AppMenuRequestOpen => {
@@ -3201,7 +3200,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         .detach();
                     #[cfg(windows)]
                     task_worker
-                        .spawn(app_menu_on_open(app_shell, app_state, events))
+                        .spawn(app_menu_on_open(syslink, app_shell, app_state, events))
                         .detach();
                 }
                 AppEvent::AppMenuRequestSave => {
@@ -3211,7 +3210,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         .detach();
                     #[cfg(windows)]
                     task_worker
-                        .spawn(app_menu_on_save(app_shell, app_state, events))
+                        .spawn(app_menu_on_save(syslink, app_shell, app_state, events))
                         .detach();
                 }
                 AppEvent::BeginBackgroundWork {
@@ -3255,10 +3254,11 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
 
 #[cfg(windows)]
 async fn app_menu_on_add_sprite<'sys, 'subsystem>(
+    syslink: &SystemLink,
     shell: &'sys AppShell<'sys, 'subsystem>,
     app_state: &'sys RefCell<AppState<'subsystem>>,
 ) {
-    let added_paths = shell.select_added_sprites().await;
+    let added_paths = syslink.select_sprite_files(shell).await;
     app_state
         .borrow_mut()
         .add_sprites_from_file_paths(added_paths);
@@ -3266,11 +3266,12 @@ async fn app_menu_on_add_sprite<'sys, 'subsystem>(
 
 #[cfg(windows)]
 async fn app_menu_on_open<'sys, 'subsystem>(
+    syslink: &SystemLink,
     shell: &'sys AppShell<'sys, 'subsystem>,
     app_state: &'sys RefCell<AppState<'subsystem>>,
     event_bus: &AppEventBus,
 ) {
-    let Some(path) = shell.select_open_path().await else {
+    let Some(path) = syslink.select_open_file(shell).await else {
         tracing::warn!("operation was cancelled");
         return;
     };
@@ -3284,11 +3285,12 @@ async fn app_menu_on_open<'sys, 'subsystem>(
 
 #[cfg(windows)]
 async fn app_menu_on_save<'sys, 'subsystem>(
+    syslink: &SystemLink,
     shell: &'sys AppShell<'sys, 'subsystem>,
     app_state: &'sys RefCell<AppState<'subsystem>>,
     event_bus: &AppEventBus,
 ) {
-    let Some(path) = shell.select_save_path().await else {
+    let Some(path) = syslink.select_save_file(shell).await else {
         tracing::warn!("operation was cancelled");
         return;
     };
@@ -3404,6 +3406,7 @@ async fn app_menu_on_save<'sys, 'subsystem>(
     }
 }
 
+#[cfg(unix)]
 fn dbus_introspect(
     dbus: &dbus::Connection,
     dest: Option<&core::ffi::CStr>,
@@ -3421,6 +3424,7 @@ fn dbus_introspect(
     .expect("no enough memory")
 }
 
+#[cfg(unix)]
 fn dbus_properties_get(
     dbus: &dbus::Connection,
     dest: Option<&core::ffi::CStr>,
@@ -3502,6 +3506,7 @@ impl DesktopPortal {
 
 #[cfg(unix)]
 pub struct DesktopPortalFileChooserProto;
+#[cfg(unix)]
 impl DesktopPortalFileChooserProto {
     pub fn get_version(dbus: &dbus::Connection) -> u32 {
         dbus_properties_get(
@@ -3718,6 +3723,7 @@ impl DesktopPortalRequestObject {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DesktopPortalRequestResponseCode {
     Success,
@@ -3725,6 +3731,7 @@ pub enum DesktopPortalRequestResponseCode {
     InteractionEnded,
     Unknown(u32),
 }
+#[cfg(target_os = "linux")]
 impl DesktopPortalRequestResponseCode {
     pub fn read(msg_iter: &mut dbus::MessageIter) -> Self {
         match msg_iter.try_get_u32().expect("invalid response code") {
@@ -3736,17 +3743,20 @@ impl DesktopPortalRequestResponseCode {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone)]
 pub enum DesktopPortalFileChooserFilter {
     Glob(std::ffi::CString),
     MIME(std::ffi::CString),
     Unknown(u32, std::ffi::CString),
 }
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone)]
 pub struct DesktopPortalFileChooserOpenFileCurrentFilterResponse {
     pub name: std::ffi::CString,
     pub filters: Vec<DesktopPortalFileChooserFilter>,
 }
+#[cfg(target_os = "linux")]
 impl DesktopPortalFileChooserOpenFileCurrentFilterResponse {
     pub fn read_all(value_content_iter: &mut dbus::MessageIter) -> Self {
         let mut struct_iter = value_content_iter
@@ -3785,11 +3795,13 @@ impl DesktopPortalFileChooserOpenFileCurrentFilterResponse {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone)]
 pub struct DesktopPortalFileChooserOpenFileResponse {
     pub uris: Vec<std::ffi::CString>,
     pub current_filter: Option<DesktopPortalFileChooserOpenFileCurrentFilterResponse>,
 }
+#[cfg(target_os = "linux")]
 impl DesktopPortalFileChooserOpenFileResponse {
     pub fn read_all(msg_iter: &mut dbus::MessageIter) -> Self {
         let mut results_iter = msg_iter
@@ -3874,6 +3886,7 @@ impl DesktopPortalFileChooserOpenFileResponse {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Debug, thiserror::Error)]
 pub enum SelectSpriteFilesError {
     #[error("No org.freedesktop.portal.FileChooser found")]
@@ -3882,6 +3895,138 @@ pub enum SelectSpriteFilesError {
     OpenFileFailed(dbus::Error),
     #[error("Operation was cancelled")]
     OperationCancelled,
+}
+
+#[cfg(windows)]
+pub struct SystemLink {}
+#[cfg(windows)]
+impl SystemLink {
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    #[tracing::instrument(
+        name = "SystemLink::select_sprite_files",
+        skip(self, for_shell),
+        ret(Debug)
+    )]
+    pub async fn select_sprite_files(
+        &self,
+        for_shell: &AppShell<'_, '_>,
+    ) -> Vec<std::path::PathBuf> {
+        let picker = windows::Storage::Pickers::FileOpenPicker::new().unwrap();
+        unsafe {
+            windows::core::Interface::cast::<windows::Win32::UI::Shell::IInitializeWithWindow>(
+                &picker,
+            )
+            .unwrap()
+            .Initialize(for_shell.hwnd())
+            .unwrap();
+        }
+        picker
+            .FileTypeFilter()
+            .unwrap()
+            .Append(windows::core::h!(".png"))
+            .unwrap();
+
+        let files = picker.PickMultipleFilesAsync().unwrap().await.unwrap();
+        let mut paths = Vec::with_capacity(files.Size().unwrap() as _);
+        let files_iter = files.First().unwrap();
+        while files_iter.HasCurrent().unwrap() {
+            paths.push(
+                files_iter
+                    .Current()
+                    .unwrap()
+                    .Path()
+                    .unwrap()
+                    .to_os_string()
+                    .into(),
+            );
+            files_iter.MoveNext().unwrap();
+        }
+
+        paths
+    }
+
+    #[tracing::instrument(
+        name = "SystemLink::select_open_file",
+        skip(self, for_shell),
+        ret(Debug)
+    )]
+    pub async fn select_open_file(
+        &self,
+        for_shell: &AppShell<'_, '_>,
+    ) -> Option<std::path::PathBuf> {
+        let picker = windows::Storage::Pickers::FileOpenPicker::new().unwrap();
+        unsafe {
+            windows::core::Interface::cast::<windows::Win32::UI::Shell::IInitializeWithWindow>(
+                &picker,
+            )
+            .unwrap()
+            .Initialize(for_shell.hwnd())
+            .unwrap();
+        }
+        picker
+            .FileTypeFilter()
+            .unwrap()
+            .Append(windows::core::h!(".psa"))
+            .unwrap();
+
+        match picker.PickSingleFileAsync().unwrap().await {
+            Ok(x) => Some(x.Path().unwrap().to_os_string().into()),
+            Err(e) if e.code() == windows::Win32::Foundation::S_OK => {
+                // operation was cancelled
+                None
+            }
+            Err(e) => {
+                tracing::error!(reason = ?e, "FileOpenPicker.PickSingleFileAsync failed");
+                panic!("cannot continue");
+            }
+        }
+    }
+
+    #[tracing::instrument(
+        name = "SystemLink::select_save_file",
+        skip(self, for_shell),
+        ret(Debug)
+    )]
+    pub async fn select_save_file(
+        &self,
+        for_shell: &AppShell<'_, '_>,
+    ) -> Option<std::path::PathBuf> {
+        let picker = windows::Storage::Pickers::FileSavePicker::new().unwrap();
+        unsafe {
+            windows::core::Interface::cast::<windows::Win32::UI::Shell::IInitializeWithWindow>(
+                &picker,
+            )
+            .unwrap()
+            .Initialize(for_shell.hwnd())
+            .unwrap();
+        }
+        picker
+            .FileTypeChoices()
+            .unwrap()
+            .Insert(
+                windows::core::h!("Peridot Sprite Atlas asset"),
+                &windows_collections::IVector::from(shell::win32::ReadOnlySliceAsVector(&[
+                    windows::core::HSTRING::from(".psa"),
+                ])),
+            )
+            .unwrap();
+
+        let file = match picker.PickSaveFileAsync().unwrap().await {
+            Ok(x) => x,
+            Err(e) if e.code() == windows::Win32::Foundation::S_OK => {
+                // operation was cancelled
+                return None;
+            }
+            Err(e) => {
+                tracing::error!(reason = ?e, "FileSavePicker.PickSaveFileAsync failed");
+                panic!("cannot continue");
+            }
+        };
+        Some(file.Path().unwrap().to_os_string().into())
+    }
 }
 
 #[cfg(target_os = "linux")]

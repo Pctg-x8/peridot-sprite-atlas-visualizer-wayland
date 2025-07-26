@@ -556,7 +556,7 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
         });
     }
 
-    /// windows only
+    // windows only
     pub fn next_frame_left_ms(&self) -> i64 {
         let mut cur = 0i64;
         unsafe {
@@ -566,6 +566,11 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
         ((self.next_target_frame_timing.get() - cur).max(0) as f64 * 1000.0
             / self.perf_counter_freq as f64)
             .trunc() as _
+    }
+
+    // windows only
+    pub const fn hwnd(&self) -> HWND {
+        self.hwnd
     }
 
     #[tracing::instrument(skip(self))]
@@ -625,92 +630,6 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
         if let Err(e) = unsafe { DestroyWindow(self.hwnd) } {
             tracing::warn!(reason = ?e, "DestroyWindow failed");
         }
-    }
-
-    pub async fn select_added_sprites(&self) -> Vec<PathBuf> {
-        let picker = FileOpenPicker::new().unwrap();
-        unsafe {
-            picker
-                .cast::<IInitializeWithWindow>()
-                .unwrap()
-                .Initialize(self.hwnd)
-                .unwrap();
-        }
-        picker.FileTypeFilter().unwrap().Append(h!(".png")).unwrap();
-
-        let files = picker.PickMultipleFilesAsync().unwrap().await.unwrap();
-        let mut paths = Vec::with_capacity(files.Size().unwrap() as _);
-        let files_iter = files.First().unwrap();
-        while files_iter.HasCurrent().unwrap() {
-            paths.push(
-                files_iter
-                    .Current()
-                    .unwrap()
-                    .Path()
-                    .unwrap()
-                    .to_os_string()
-                    .into(),
-            );
-            files_iter.MoveNext().unwrap();
-        }
-
-        paths
-    }
-
-    pub async fn select_open_path(&self) -> Option<PathBuf> {
-        let picker = FileOpenPicker::new().unwrap();
-        unsafe {
-            picker
-                .cast::<IInitializeWithWindow>()
-                .unwrap()
-                .Initialize(self.hwnd)
-                .unwrap();
-        }
-        picker.FileTypeFilter().unwrap().Append(h!(".psa")).unwrap();
-
-        match picker.PickSingleFileAsync().unwrap().await {
-            Ok(x) => Some(x.Path().unwrap().to_os_string().into()),
-            Err(e) if e.code() == windows::Win32::Foundation::S_OK => {
-                // operation was cancelled
-                None
-            }
-            Err(e) => {
-                tracing::error!(reason = ?e, "FileOpenPicker.PickSingleFileAsync failed");
-                panic!("cannot continue");
-            }
-        }
-    }
-
-    pub async fn select_save_path(&self) -> Option<PathBuf> {
-        let picker = FileSavePicker::new().unwrap();
-        unsafe {
-            picker
-                .cast::<IInitializeWithWindow>()
-                .unwrap()
-                .Initialize(self.hwnd)
-                .unwrap();
-        }
-        picker
-            .FileTypeChoices()
-            .unwrap()
-            .Insert(
-                h!("Peridot Sprite Atlas asset"),
-                &IVector::from(ReadOnlySliceAsVector(&[HSTRING::from(".psa")])),
-            )
-            .unwrap();
-
-        let file = match picker.PickSaveFileAsync().unwrap().await {
-            Ok(x) => x,
-            Err(e) if e.code() == windows::Win32::Foundation::S_OK => {
-                // operation was cancelled
-                return None;
-            }
-            Err(e) => {
-                tracing::error!(reason = ?e, "FileSavePicker.PickSaveFileAsync failed");
-                panic!("cannot continue");
-            }
-        };
-        Some(file.Path().unwrap().to_os_string().into())
     }
 }
 
@@ -869,7 +788,7 @@ impl LockedHGLOBAL {
 
 #[implement(IVector<T>)]
 #[repr(transparent)]
-struct ReadOnlySliceAsVector<'xs, T>(pub &'xs [T])
+pub struct ReadOnlySliceAsVector<'xs, T>(pub &'xs [T])
 where
     T: windows_core::RuntimeType + 'static;
 impl<'xs, T: windows_core::RuntimeType + 'static> IIterable_Impl<T>

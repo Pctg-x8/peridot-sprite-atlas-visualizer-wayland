@@ -1336,7 +1336,7 @@ fn main() {
     let setup_timer = std::time::Instant::now();
 
     #[cfg(all(unix, not(target_os = "macos")))]
-    let dbus = DBusLink::new();
+    let syslink = SystemLink::new();
 
     let events = AppEventBus {
         queue: UnsafeCell::new(VecDeque::new()),
@@ -1367,7 +1367,7 @@ fn main() {
         &task_worker,
         &bg_worker,
         #[cfg(all(unix, not(target_os = "macos")))]
-        &dbus,
+        &syslink,
     );
 
     bg_worker.teardown();
@@ -1381,7 +1381,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     app_state: &'sys mut RefCell<AppState<'subsystem>>,
     task_worker: &smol::LocalExecutor<'sys>,
     bg_worker: &BackgroundWorker<'subsystem>,
-    #[cfg(all(unix, not(target_os = "macos")))] dbus: &'sys DBusLink,
+    #[cfg(all(unix, not(target_os = "macos")))] syslink: &'sys SystemLink,
 ) {
     tracing::info!("Initializing Peridot SpriteAtlas Visualizer/Editor");
     let setup_timer = std::time::Instant::now();
@@ -2061,7 +2061,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         .unwrap();
 
     #[cfg(target_os = "linux")]
-    dbus.con.set_watch_functions(Box::new(DBusWatcher {
+    syslink.dbus.con.set_watch_functions(Box::new(DBusWatcher {
         epoll: &epoll,
         fd_pool: &poll_fd_pool,
         fd_to_pool_index: HashMap::new(),
@@ -2159,7 +2159,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                             tracing::warn!(?flags, "dbus_watch_handle failed");
                         }
 
-                        dbus.dispatch();
+                        syslink.dbus.dispatch();
                     }
                     // ignore
                     None => (),
@@ -3185,36 +3185,34 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                 AppEvent::AppMenuRequestAddSprite => {
                     #[cfg(target_os = "linux")]
                     task_worker
-                        .spawn(app_menu_on_add_sprite(dbus, app_shell, events, app_state))
+                        .spawn(app_menu_on_add_sprite(
+                            syslink, app_shell, events, app_state,
+                        ))
                         .detach();
                     #[cfg(windows)]
                     task_worker
                         .spawn(app_menu_on_add_sprite(app_shell, app_state))
                         .detach();
-                    #[cfg(not(any(target_os = "linux", windows)))]
-                    events.push(AppEvent::UIMessageDialogRequest {
-                        content: "[DEBUG] app_menu_on_add_sprite not implemented".into(),
-                    });
                 }
                 AppEvent::AppMenuRequestOpen => {
+                    #[cfg(target_os = "linux")]
+                    task_worker
+                        .spawn(app_menu_on_open(syslink, app_shell, app_state, events))
+                        .detach();
                     #[cfg(windows)]
                     task_worker
                         .spawn(app_menu_on_open(app_shell, app_state, events))
                         .detach();
-                    #[cfg(not(windows))]
-                    events.push(AppEvent::UIMessageDialogRequest {
-                        content: "[TODO] open asset".into(),
-                    });
                 }
                 AppEvent::AppMenuRequestSave => {
+                    #[cfg(target_os = "linux")]
+                    task_worker
+                        .spawn(app_menu_on_save(syslink, app_shell, app_state, events))
+                        .detach();
                     #[cfg(windows)]
                     task_worker
                         .spawn(app_menu_on_save(app_shell, app_state, events))
                         .detach();
-                    #[cfg(not(windows))]
-                    events.push(AppEvent::UIMessageDialogRequest {
-                        content: "[TODO] save asset".into(),
-                    });
                 }
                 AppEvent::BeginBackgroundWork {
                     thread_number,
@@ -3302,44 +3300,167 @@ async fn app_menu_on_save<'sys, 'subsystem>(
     }
 }
 
+#[cfg(target_os = "linux")]
+async fn app_menu_on_add_sprite<'subsystem>(
+    syslink: &SystemLink,
+    shell: &AppShell<'_, 'subsystem>,
+    events: &AppEventBus,
+    app_state: &RefCell<AppState<'subsystem>>,
+) {
+    // TODO: これUIだして待つべきか？ローカルだからあんまり待たないような気もするが......
+    let resp = match syslink.select_sprite_files(shell).await {
+        Ok(x) => x,
+        Err(SelectSpriteFilesError::NoFileChooser) => {
+            events.push(AppEvent::UIMessageDialogRequest {
+                content: "org.freedesktop.portal.FileChooser not found".into(),
+            });
+
+            return;
+        }
+        Err(SelectSpriteFilesError::OpenFileFailed(e)) => {
+            tracing::error!(reason = ?e, "FileChooser.OpenFile failed");
+            events.push(AppEvent::UIMessageDialogRequest {
+                content: "FileChooser.OpenFile failed".into(),
+            });
+
+            return;
+        }
+        Err(SelectSpriteFilesError::OperationCancelled) => {
+            tracing::warn!("FileChooser.OpenFile has been cancelled");
+            return;
+        }
+    };
+
+    app_state.borrow_mut().add_sprites_by_uri_list(resp.uris);
+}
+
+#[cfg(target_os = "linux")]
+async fn app_menu_on_open<'sys, 'subsystem>(
+    syslink: &'sys SystemLink,
+    shell: &'sys AppShell<'_, 'subsystem>,
+    app_state: &'sys RefCell<AppState<'subsystem>>,
+    event_bus: &AppEventBus,
+) {
+    let uri = match syslink.select_open_file(shell).await {
+        Ok(x) => x,
+        Err(SelectSpriteFilesError::NoFileChooser) => {
+            event_bus.push(AppEvent::UIMessageDialogRequest {
+                content: "org.freedesktop.portal.FileChooser not found".into(),
+            });
+
+            return;
+        }
+        Err(SelectSpriteFilesError::OpenFileFailed(e)) => {
+            tracing::error!(reason = ?e, "FileChooser.OpenFile failed");
+            event_bus.push(AppEvent::UIMessageDialogRequest {
+                content: "FileChooser.OpenFile failed".into(),
+            });
+
+            return;
+        }
+        Err(SelectSpriteFilesError::OperationCancelled) => {
+            tracing::warn!("FileChooser.OpenFile has been cancelled");
+            return;
+        }
+    };
+
+    let path = uri.to_str().unwrap().strip_prefix("file://").unwrap();
+    if app_state.borrow_mut().load(path).is_err() {
+        event_bus.push(AppEvent::UIMessageDialogRequest {
+            content: "Opening failed".into(),
+        });
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn app_menu_on_save<'sys, 'subsystem>(
+    syslink: &'sys SystemLink,
+    shell: &'sys AppShell<'_, 'subsystem>,
+    app_state: &'sys RefCell<AppState<'subsystem>>,
+    event_bus: &AppEventBus,
+) {
+    let uri = match syslink.select_save_file(shell).await {
+        Ok(x) => x,
+        Err(SelectSpriteFilesError::NoFileChooser) => {
+            event_bus.push(AppEvent::UIMessageDialogRequest {
+                content: "org.freedesktop.portal.FileChooser not found".into(),
+            });
+
+            return;
+        }
+        Err(SelectSpriteFilesError::OpenFileFailed(e)) => {
+            tracing::error!(reason = ?e, "FileChooser.OpenFile failed");
+            event_bus.push(AppEvent::UIMessageDialogRequest {
+                content: "FileChooser.SaveFile failed".into(),
+            });
+
+            return;
+        }
+        Err(SelectSpriteFilesError::OperationCancelled) => {
+            tracing::warn!("FileChooser.SaveFile has been cancelled");
+            return;
+        }
+    };
+
+    let path = uri.to_str().unwrap().strip_prefix("file://").unwrap();
+    if app_state.borrow_mut().save(path).is_err() {
+        event_bus.push(AppEvent::UIMessageDialogRequest {
+            content: "Saving failed".into(),
+        });
+    }
+}
+
 #[cfg(unix)]
-pub struct DesktopPortal;
+pub struct DesktopPortal {
+    file_chooser: smol::lock::OnceCell<Option<DesktopPortalFileChooser>>,
+}
 #[cfg(unix)]
 impl DesktopPortal {
-    #[tracing::instrument(name = "DesktopPortal::try_get_file_chooser", skip(dbus))]
-    pub async fn try_get_file_chooser(dbus: &DBusLink) -> Option<DesktopPortalFileChooser> {
-        let reply_msg = dbus
-            .send(
-                dbus::Message::new_method_call(
-                    Some(c"org.freedesktop.portal.Desktop"),
-                    c"/org/freedesktop/portal/desktop",
-                    Some(c"org.freedesktop.DBus.Introspectable"),
-                    c"Introspect",
-                )
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-        let reply_iter = reply_msg.iter();
-        let doc = reply_iter
-            .try_get_cstr()
-            .expect("invalid introspection response")
-            .to_str()
-            .unwrap();
-
-        let mut has_file_chooser = false;
-        if let Err(e) = dbus::introspect_document::read_toplevel(
-            &mut quick_xml::Reader::from_str(doc),
-            |_, ifname, r| {
-                has_file_chooser = ifname.as_ref() == b"org.freedesktop.portal.FileChooser";
-
-                dbus::introspect_document::skip_read_interface_tag_contents(r)
-            },
-        ) {
-            tracing::warn!(reason = ?e, "Failed to parse introspection document from portal object");
+    pub fn new() -> Self {
+        Self {
+            file_chooser: smol::lock::OnceCell::new(),
         }
+    }
 
-        has_file_chooser.then_some(DesktopPortalFileChooser)
+    #[tracing::instrument(name = "DesktopPortal::try_get_file_chooser", skip(self, dbus))]
+    pub async fn try_get_file_chooser<'x>(
+        &'x self,
+        dbus: &DBusLink,
+    ) -> Option<&'x DesktopPortalFileChooser> {
+        self.file_chooser.get_or_init(|| async {
+            let reply_msg = dbus
+                .send(
+                    dbus::Message::new_method_call(
+                        Some(c"org.freedesktop.portal.Desktop"),
+                        c"/org/freedesktop/portal/desktop",
+                        Some(c"org.freedesktop.DBus.Introspectable"),
+                        c"Introspect",
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            let reply_iter = reply_msg.iter();
+            let doc = reply_iter
+                .try_get_cstr()
+                .expect("invalid introspection response")
+                .to_str()
+                .unwrap();
+
+            let mut has_file_chooser = false;
+            if let Err(e) = dbus::introspect_document::read_toplevel(
+                &mut quick_xml::Reader::from_str(doc),
+                |_, ifname, r| {
+                    has_file_chooser = ifname.as_ref() == b"org.freedesktop.portal.FileChooser";
+
+                    dbus::introspect_document::skip_read_interface_tag_contents(r)
+                },
+            ) {
+                tracing::warn!(reason = ?e, "Failed to parse introspection document from portal object");
+            }
+
+            has_file_chooser.then_some(DesktopPortalFileChooser { version: smol::lock::OnceCell::new() })
+        }).await.as_ref()
     }
 
     #[inline(always)]
@@ -3357,38 +3478,45 @@ impl DesktopPortal {
 }
 
 #[cfg(unix)]
-pub struct DesktopPortalFileChooser;
+pub struct DesktopPortalFileChooser {
+    version: smol::lock::OnceCell<u32>,
+}
 #[cfg(unix)]
 impl DesktopPortalFileChooser {
     pub async fn get_version(&self, dbus: &DBusLink) -> Result<u32, dbus::Error> {
-        let reply_msg = dbus
-            .send({
-                let mut msg = dbus::Message::new_method_call(
-                    Some(c"org.freedesktop.portal.Desktop"),
-                    c"/org/freedesktop/portal/desktop",
-                    Some(c"org.freedesktop.DBus.Properties"),
-                    c"Get",
-                )
-                .unwrap();
-                let mut msg_args_appender = msg.iter_append();
-                msg_args_appender.append_cstr(c"org.freedesktop.portal.FileChooser");
-                msg_args_appender.append_cstr(c"version");
-                drop(msg_args_appender);
+        Ok(*self
+            .version
+            .get_or_try_init(|| async {
+                let reply_msg = dbus
+                    .send({
+                        let mut msg = dbus::Message::new_method_call(
+                            Some(c"org.freedesktop.portal.Desktop"),
+                            c"/org/freedesktop/portal/desktop",
+                            Some(c"org.freedesktop.DBus.Properties"),
+                            c"Get",
+                        )
+                        .unwrap();
+                        let mut msg_args_appender = msg.iter_append();
+                        msg_args_appender.append_cstr(c"org.freedesktop.portal.FileChooser");
+                        msg_args_appender.append_cstr(c"version");
+                        drop(msg_args_appender);
 
-                msg
+                        msg
+                    })
+                    .await
+                    .unwrap();
+                if let Some(error) = reply_msg.try_get_error() {
+                    return Err(error);
+                }
+
+                let mut reply_iter = reply_msg.iter();
+                assert_eq!(reply_iter.arg_type(), dbus::TYPE_VARIANT);
+                Ok(reply_iter
+                    .recurse()
+                    .try_get_u32()
+                    .expect("unexpected version value"))
             })
-            .await
-            .unwrap();
-        if let Some(error) = reply_msg.try_get_error() {
-            return Err(error);
-        }
-
-        let mut reply_iter = reply_msg.iter();
-        assert_eq!(reply_iter.arg_type(), dbus::TYPE_VARIANT);
-        Ok(reply_iter
-            .recurse()
-            .try_get_u32()
-            .expect("unexpected version value"))
+            .await?)
     }
 
     /// https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.FileChooser.html#org-freedesktop-portal-filechooser-openfile
@@ -3406,6 +3534,54 @@ impl DesktopPortalFileChooser {
                     c"/org/freedesktop/portal/desktop",
                     Some(c"org.freedesktop.portal.FileChooser"),
                     c"OpenFile",
+                )
+                .unwrap();
+                let mut msg_args_appender = msg.iter_append();
+                msg_args_appender.append_cstr(parent_window.unwrap_or(c""));
+                msg_args_appender.append_cstr(title);
+                let mut options_appender = msg_args_appender
+                    .open_container(dbus::TYPE_ARRAY, Some(c"{sv}"))
+                    .unwrap();
+                options_builder(&mut options_appender);
+                options_appender.close();
+
+                msg
+            })
+            .await
+        else {
+            unreachable!("no response for desktop-portal call?");
+        };
+
+        if let Some(e) = resp.try_get_error() {
+            return Err(e);
+        }
+
+        let reply_iter = resp.iter();
+        let handle = DesktopPortalRequestObject::new(
+            reply_iter
+                .try_get_object_path()
+                .expect("invalid response")
+                .into(),
+        );
+        assert!(!reply_iter.has_next(), "reply data left");
+        Ok(handle)
+    }
+
+    /// https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.FileChooser.html#org-freedesktop-portal-filechooser-savefile
+    pub async fn save_file(
+        &self,
+        dbus: &DBusLink,
+        parent_window: Option<&core::ffi::CStr>,
+        title: &core::ffi::CStr,
+        options_builder: impl FnOnce(&mut dbus::MessageIterAppendContainer<dbus::MessageIterAppend>),
+    ) -> Result<DesktopPortalRequestObject, dbus::Error> {
+        let Some(resp) = dbus
+            .send({
+                let mut msg = dbus::Message::new_method_call(
+                    Some(c"org.freedesktop.portal.Desktop"),
+                    c"/org/freedesktop/portal/desktop",
+                    Some(c"org.freedesktop.portal.FileChooser"),
+                    c"SaveFile",
                 )
                 .unwrap();
                 let mut msg_args_appender = msg.iter_append();
@@ -3486,177 +3662,416 @@ impl DesktopPortalRequestObject {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopPortalRequestResponseCode {
+    Success,
+    Cancelled,
+    InteractionEnded,
+    Unknown(u32),
+}
+impl DesktopPortalRequestResponseCode {
+    pub fn read(msg_iter: &mut dbus::MessageIter) -> Self {
+        match msg_iter.try_get_u32().expect("invalid response code") {
+            0 => Self::Success,
+            1 => Self::Cancelled,
+            2 => Self::InteractionEnded,
+            code => Self::Unknown(code),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum DesktopPortalFileChooserFilter {
+    Glob(std::ffi::CString),
+    MIME(std::ffi::CString),
+    Unknown(u32, std::ffi::CString),
+}
+#[derive(Debug, Clone)]
+pub struct DesktopPortalFileChooserOpenFileCurrentFilterResponse {
+    pub name: std::ffi::CString,
+    pub filters: Vec<DesktopPortalFileChooserFilter>,
+}
+impl DesktopPortalFileChooserOpenFileCurrentFilterResponse {
+    pub fn read_all(value_content_iter: &mut dbus::MessageIter) -> Self {
+        let mut struct_iter = value_content_iter
+            .try_begin_iter_struct_content()
+            .expect("invalid current_filter value content");
+        let filter_name = struct_iter
+            .try_get_cstr()
+            .expect("unexpected filter name value")
+            .to_owned();
+        struct_iter.next();
+        let mut array_iter = struct_iter
+            .try_begin_iter_array_content()
+            .expect("invalid current_filter value content");
+        let mut filters = Vec::new();
+        while array_iter.arg_type() != dbus::TYPE_INVALID {
+            let mut struct_iter = array_iter
+                .try_begin_iter_struct_content()
+                .expect("invalid current_filter value content element");
+            let v = struct_iter.try_get_u32().expect("unexpected type");
+            struct_iter.next();
+            let f = struct_iter.try_get_cstr().expect("unexpected filter value");
+            filters.push(match v {
+                0 => DesktopPortalFileChooserFilter::Glob(f.into()),
+                1 => DesktopPortalFileChooserFilter::MIME(f.into()),
+                x => DesktopPortalFileChooserFilter::Unknown(x, f.into()),
+            });
+            drop(struct_iter);
+
+            array_iter.next();
+        }
+
+        Self {
+            name: filter_name,
+            filters,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DesktopPortalFileChooserOpenFileResponse {
+    pub uris: Vec<std::ffi::CString>,
+    pub current_filter: Option<DesktopPortalFileChooserOpenFileCurrentFilterResponse>,
+}
+impl DesktopPortalFileChooserOpenFileResponse {
+    pub fn read_all(msg_iter: &mut dbus::MessageIter) -> Self {
+        let mut results_iter = msg_iter
+            .try_begin_iter_array_content()
+            .expect("invalid response results");
+        let mut data = DesktopPortalFileChooserOpenFileResponse {
+            uris: Vec::new(),
+            current_filter: None,
+        };
+        while results_iter.arg_type() != dbus::TYPE_INVALID {
+            let mut kv_iter = results_iter
+                .try_begin_iter_dict_entry_content()
+                .expect("invalid results kv pair");
+
+            match kv_iter.try_get_cstr().expect("unexpected key value") {
+                x if x == c"uris" => {
+                    kv_iter.next();
+
+                    let mut value_iter = kv_iter
+                        .try_begin_iter_variant_content()
+                        .expect("invalid uris value");
+                    let mut iter = value_iter
+                        .try_begin_iter_array_content()
+                        .expect("invalid uris value content");
+                    while iter.arg_type() != dbus::TYPE_INVALID {
+                        data.uris.push(std::ffi::CString::from(
+                            iter.try_get_cstr().expect("unexpected uris value"),
+                        ));
+                        iter.next();
+                    }
+                }
+                x if x == c"choices" => {
+                    kv_iter.next();
+
+                    let mut value_iter = kv_iter
+                        .try_begin_iter_variant_content()
+                        .expect("invalid choices value");
+                    let mut iter = value_iter
+                        .try_begin_iter_array_content()
+                        .expect("invalid choices value content");
+                    while iter.arg_type() != dbus::TYPE_INVALID {
+                        let mut elements_iter = iter
+                            .try_begin_iter_struct_content()
+                            .expect("invalid choices value content element");
+                        let key = elements_iter
+                            .try_get_cstr()
+                            .expect("unexpected key value")
+                            .to_owned();
+                        elements_iter.next();
+                        let value = elements_iter
+                            .try_get_cstr()
+                            .expect("unexpected value")
+                            .to_owned();
+                        println!("choices {key:?} -> {value:?}");
+                        drop(elements_iter);
+
+                        iter.next();
+                    }
+                }
+                x if x == c"current_filter" => {
+                    if data.current_filter.is_some() {
+                        panic!("current_filter received twice");
+                    }
+
+                    kv_iter.next();
+                    let mut value_iter = kv_iter
+                        .try_begin_iter_variant_content()
+                        .expect("invalid content_filter value");
+                    data.current_filter = Some(
+                        DesktopPortalFileChooserOpenFileCurrentFilterResponse::read_all(
+                            &mut value_iter,
+                        ),
+                    );
+                }
+                c => unreachable!("unexpected result entry: {c:?}"),
+            }
+
+            results_iter.next();
+        }
+
+        data
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SelectSpriteFilesError {
+    #[error("No org.freedesktop.portal.FileChooser found")]
+    NoFileChooser,
+    #[error("FileChooser.OpenFile failed: {0:?}")]
+    OpenFileFailed(dbus::Error),
+    #[error("Operation was cancelled")]
+    OperationCancelled,
+}
+
 #[cfg(target_os = "linux")]
-async fn app_menu_on_add_sprite<'subsystem>(
-    dbus: &DBusLink,
-    shell: &AppShell<'_, 'subsystem>,
-    events: &AppEventBus,
-    app_state: &RefCell<AppState<'subsystem>>,
-) {
-    // TODO: これUIだして待つべきか？ローカルだからあんまり待たないような気もするが......
-    let Some(dp_file_chooser) = DesktopPortal::try_get_file_chooser(dbus).await else {
-        // FileChooserなし
-        events.push(AppEvent::UIMessageDialogRequest {
-            content: "org.freedesktop.portal.FileChooser not found".into(),
-        });
-
-        return;
-    };
-
-    let version = match dp_file_chooser.get_version(dbus).await {
-        Ok(x) => x,
-        Err(e) => {
-            tracing::error!(reason = ?e, "FileChooser version get failed");
-            events.push(AppEvent::UIMessageDialogRequest {
-                content: format!("FileChooser version get failed: reason={e:?}"),
-            });
-
-            return;
+pub struct SystemLink {
+    dbus: DBusLink,
+    dp: DesktopPortal,
+}
+#[cfg(target_os = "linux")]
+impl SystemLink {
+    pub fn new() -> Self {
+        Self {
+            dbus: DBusLink::new(),
+            dp: DesktopPortal::new(),
         }
-    };
-    tracing::trace!(version, "AddSprite: file chooser found!");
-
-    let dialog_token = uuid::Uuid::new_v4().as_simple().to_string();
-    let mut request_object = DesktopPortal::open_request_object_for_token(dbus, &dialog_token);
-
-    let exported_shell = shell.try_export_toplevel();
-    let r = dp_file_chooser
-        .open_file(
-            dbus,
-            exported_shell.as_ref().map(|x| x.handle.as_c_str()),
-            c"Add Sprite",
-            |options_appender| {
-                let mut dict_appender = options_appender.open_dict_entry_container().unwrap();
-                dict_appender.append_cstr(c"handle_token");
-                dict_appender
-                    .append_variant_cstr(&std::ffi::CString::new(dialog_token.clone()).unwrap());
-                dict_appender.close();
-
-                let mut dict_appender = options_appender.open_dict_entry_container().unwrap();
-                dict_appender.append_cstr(c"multiple");
-                dict_appender.append_variant_bool(true);
-                dict_appender.close();
-            },
-        )
-        .await;
-    let request_handle = match r {
-        Ok(x) => x,
-        Err(e) => {
-            tracing::error!(reason = ?e, "FileChooser.OpenFile failed");
-            events.push(AppEvent::UIMessageDialogRequest {
-                content: format!("FileChooser.OpenFile failed: reason={e:?}"),
-            });
-
-            return;
-        }
-    };
-
-    if !request_object.points_same_object(&request_handle) {
-        tracing::debug!(
-            open_file_dialog_handle = ?request_handle.object_path,
-            request_object_path = ?request_object.object_path,
-            "returned object_path did not match with the expected, switching request object..."
-        );
-        request_object = request_handle;
     }
 
-    let resp = request_object.wait_for_response(dbus).await;
-    drop(exported_shell);
+    pub async fn select_sprite_files(
+        &self,
+        for_shell: &AppShell<'_, '_>,
+    ) -> Result<DesktopPortalFileChooserOpenFileResponse, SelectSpriteFilesError> {
+        let file_chooser = self
+            .dp
+            .try_get_file_chooser(&self.dbus)
+            .await
+            .ok_or(SelectSpriteFilesError::NoFileChooser)?;
 
-    let mut resp_iter = resp.iter();
-    let response = resp_iter.try_get_u32().expect("unexpected type");
-    if response != 0 {
-        tracing::warn!(code = response, "FileChooser.OpenFile has cancelled");
-        return;
-    }
-
-    resp_iter.next();
-    assert_eq!(resp_iter.arg_type(), dbus::TYPE_ARRAY);
-    let mut resp_results_iter = resp_iter.recurse();
-    let mut uris = Vec::new();
-    while resp_results_iter.arg_type() != dbus::TYPE_INVALID {
-        assert_eq!(resp_results_iter.arg_type(), dbus::TYPE_DICT_ENTRY);
-        let mut kv_iter = resp_results_iter.recurse();
-
-        match kv_iter.try_get_cstr().expect("unexpected key value") {
-            x if x == c"uris" => {
-                kv_iter.next();
-
-                let mut value_iter = kv_iter
-                    .try_begin_iter_variant_content()
-                    .expect("invalid uris value");
-                let mut iter = value_iter
-                    .try_begin_iter_array_content()
-                    .expect("invalid uris value content");
-                while iter.arg_type() != dbus::TYPE_INVALID {
-                    uris.push(std::ffi::CString::from(
-                        iter.try_get_cstr().expect("unexpected uris value"),
-                    ));
-                    iter.next();
-                }
+        // dbg
+        /*match file_chooser.get_version(&self.dbus).await {
+            Ok(version) => {
+                tracing::trace!(version, "AddSprite: file chooser found!");
             }
-            x if x == c"choices" => {
-                kv_iter.next();
-
-                let mut value_iter = kv_iter
-                    .try_begin_iter_variant_content()
-                    .expect("invalid choices value");
-                let mut iter = value_iter
-                    .try_begin_iter_array_content()
-                    .expect("invalid choices value content");
-                while iter.arg_type() != dbus::TYPE_INVALID {
-                    let mut elements_iter = iter
-                        .try_begin_iter_struct_content()
-                        .expect("invalid choices value content element");
-                    let key = elements_iter
-                        .try_get_cstr()
-                        .expect("unexpected key value")
-                        .to_owned();
-                    elements_iter.next();
-                    let value = elements_iter
-                        .try_get_cstr()
-                        .expect("unexpected value")
-                        .to_owned();
-                    println!("choices {key:?} -> {value:?}");
-                    drop(elements_iter);
-
-                    iter.next();
-                }
+            Err(e) => {
+                tracing::warn!(reason = ?e, "FileChooser version get failed");
             }
-            x if x == c"current_filter" => {
-                kv_iter.next();
+        }*/
 
-                let mut struct_iter = kv_iter
-                    .try_begin_iter_struct_content()
-                    .expect("invalid current_filter value");
-                let filter_name = struct_iter
-                    .try_get_cstr()
-                    .expect("unexpected filter name value")
-                    .to_owned();
-                struct_iter.next();
-                let mut array_iter = struct_iter
-                    .try_begin_iter_array_content()
-                    .expect("invalid current_filter value content");
-                while array_iter.arg_type() != dbus::TYPE_INVALID {
-                    let mut struct_iter = array_iter
-                        .try_begin_iter_struct_content()
-                        .expect("invalid current_filter value content element");
-                    let v = struct_iter.try_get_u32().expect("unexpected type");
-                    struct_iter.next();
-                    let f = struct_iter.try_get_cstr().expect("unexpected filter value");
-                    println!("filter {filter_name:?}: {v} {f:?}");
-                    drop(struct_iter);
+        let dialog_token = uuid::Uuid::new_v4().as_simple().to_string();
+        let mut request_object =
+            DesktopPortal::open_request_object_for_token(&self.dbus, &dialog_token);
 
-                    array_iter.next();
-                }
-            }
-            c => unreachable!("unexpected result entry: {c:?}"),
+        let exported_shell = for_shell.try_export_toplevel();
+        let request_handle = file_chooser
+            .open_file(
+                &self.dbus,
+                exported_shell.as_ref().map(|x| x.handle.as_c_str()),
+                c"Add Sprite",
+                |options_appender| {
+                    let mut dict_appender = options_appender.open_dict_entry_container().unwrap();
+                    dict_appender.append_cstr(c"handle_token");
+                    dict_appender.append_variant_cstr(
+                        &std::ffi::CString::new(dialog_token.clone()).unwrap(),
+                    );
+                    dict_appender.close();
+
+                    let mut dict_appender = options_appender.open_dict_entry_container().unwrap();
+                    dict_appender.append_cstr(c"multiple");
+                    dict_appender.append_variant_bool(true);
+                    dict_appender.close();
+                },
+            )
+            .await
+            .map_err(SelectSpriteFilesError::OpenFileFailed)?;
+        if !request_object.points_same_object(&request_handle) {
+            tracing::debug!(
+                open_file_dialog_handle = ?request_handle.object_path,
+                request_object_path = ?request_object.object_path,
+                "returned object_path did not match with the expected, switching request object..."
+            );
+            request_object = request_handle;
+        }
+        let resp = request_object.wait_for_response(&self.dbus).await;
+        drop(exported_shell);
+
+        let mut resp_iter = resp.iter();
+        let response = DesktopPortalRequestResponseCode::read(&mut resp_iter);
+        if response != DesktopPortalRequestResponseCode::Success {
+            return Err(SelectSpriteFilesError::OperationCancelled);
         }
 
-        resp_results_iter.next();
+        resp_iter.next();
+        Ok(DesktopPortalFileChooserOpenFileResponse::read_all(
+            &mut resp_iter,
+        ))
     }
 
-    app_state.borrow_mut().add_sprites_by_uri_list(uris);
+    pub async fn select_open_file(
+        &self,
+        for_shell: &AppShell<'_, '_>,
+    ) -> Result<std::ffi::CString, SelectSpriteFilesError> {
+        let file_chooser = self
+            .dp
+            .try_get_file_chooser(&self.dbus)
+            .await
+            .ok_or(SelectSpriteFilesError::NoFileChooser)?;
+
+        // dbg
+        /*match file_chooser.get_version(&self.dbus).await {
+            Ok(version) => {
+                tracing::trace!(version, "AddSprite: file chooser found!");
+            }
+            Err(e) => {
+                tracing::warn!(reason = ?e, "FileChooser version get failed");
+            }
+        }*/
+
+        let dialog_token = uuid::Uuid::new_v4().as_simple().to_string();
+        let mut request_object =
+            DesktopPortal::open_request_object_for_token(&self.dbus, &dialog_token);
+
+        let exported_shell = for_shell.try_export_toplevel();
+        let request_handle = file_chooser
+            .open_file(
+                &self.dbus,
+                exported_shell.as_ref().map(|x| x.handle.as_c_str()),
+                c"Open",
+                |options_appender| {
+                    let mut dict_appender = options_appender.open_dict_entry_container().unwrap();
+                    dict_appender.append_cstr(c"handle_token");
+                    dict_appender.append_variant_cstr(
+                        &std::ffi::CString::new(dialog_token.clone()).unwrap(),
+                    );
+                    dict_appender.close();
+
+                    let mut dict_appender = options_appender.open_dict_entry_container().unwrap();
+                    dict_appender.append_cstr(c"multiple");
+                    dict_appender.append_variant_bool(false);
+                    dict_appender.close();
+                },
+            )
+            .await
+            .map_err(SelectSpriteFilesError::OpenFileFailed)?;
+        if !request_object.points_same_object(&request_handle) {
+            tracing::debug!(
+                open_file_dialog_handle = ?request_handle.object_path,
+                request_object_path = ?request_object.object_path,
+                "returned object_path did not match with the expected, switching request object..."
+            );
+            request_object = request_handle;
+        }
+        let resp = request_object.wait_for_response(&self.dbus).await;
+        drop(exported_shell);
+
+        let mut resp_iter = resp.iter();
+        let response = DesktopPortalRequestResponseCode::read(&mut resp_iter);
+        if response != DesktopPortalRequestResponseCode::Success {
+            return Err(SelectSpriteFilesError::OperationCancelled);
+        }
+
+        resp_iter.next();
+        let mut res = DesktopPortalFileChooserOpenFileResponse::read_all(&mut resp_iter);
+        assert!(res.uris.len() == 1);
+        Ok(unsafe { res.uris.pop().unwrap_unchecked() })
+    }
+
+    #[tracing::instrument(
+        name = "SystemLink::select_save_file",
+        skip(self, for_shell),
+        ret(Debug)
+    )]
+    pub async fn select_save_file(
+        &self,
+        for_shell: &AppShell<'_, '_>,
+    ) -> Result<std::ffi::CString, SelectSpriteFilesError> {
+        let file_chooser = self
+            .dp
+            .try_get_file_chooser(&self.dbus)
+            .await
+            .ok_or(SelectSpriteFilesError::NoFileChooser)?;
+
+        // dbg
+        /*match file_chooser.get_version(&self.dbus).await {
+            Ok(version) => {
+                tracing::trace!(version, "AddSprite: file chooser found!");
+            }
+            Err(e) => {
+                tracing::warn!(reason = ?e, "FileChooser version get failed");
+            }
+        }*/
+
+        let dialog_token = uuid::Uuid::new_v4().as_simple().to_string();
+        let mut request_object =
+            DesktopPortal::open_request_object_for_token(&self.dbus, &dialog_token);
+
+        let exported_shell = for_shell.try_export_toplevel();
+        let request_handle = file_chooser
+            .save_file(
+                &self.dbus,
+                exported_shell.as_ref().map(|x| x.handle.as_c_str()),
+                c"Save",
+                |options_appender| {
+                    let mut dict_appender = options_appender.open_dict_entry_container().unwrap();
+                    dict_appender.append_cstr(c"handle_token");
+                    dict_appender.append_variant_cstr(
+                        &std::ffi::CString::new(dialog_token.clone()).unwrap(),
+                    );
+                    dict_appender.close();
+
+                    let mut dict_appender = options_appender.open_dict_entry_container().unwrap();
+                    dict_appender.append_cstr(c"filters");
+                    let mut filter_variant_appender =
+                        dict_appender.open_variant_container(c"a(sa(us))").unwrap();
+                    let mut filter_appender = filter_variant_appender
+                        .open_array_container(c"(sa(us))")
+                        .unwrap();
+                    let mut filter_struct_appender =
+                        filter_appender.open_struct_container(c"sa(us)").unwrap();
+                    filter_struct_appender.append_cstr(c"Peridot Sprite Atlas asset");
+                    let mut filter_ext_appender = filter_struct_appender
+                        .open_array_container(c"(us)")
+                        .unwrap();
+                    let mut filter_ext_content_appender =
+                        filter_ext_appender.open_struct_container(c"us").unwrap();
+                    filter_ext_content_appender.append_u32(0);
+                    filter_ext_content_appender.append_cstr(c"*.psa");
+                    filter_ext_content_appender.close();
+                    filter_ext_appender.close();
+                    filter_struct_appender.close();
+                    filter_appender.close();
+                    filter_variant_appender.close();
+                    dict_appender.close();
+                },
+            )
+            .await
+            .map_err(SelectSpriteFilesError::OpenFileFailed)?;
+        if !request_object.points_same_object(&request_handle) {
+            tracing::debug!(
+                open_file_dialog_handle = ?request_handle.object_path,
+                request_object_path = ?request_object.object_path,
+                "returned object_path did not match with the expected, switching request object..."
+            );
+            request_object = request_handle;
+        }
+        let resp = request_object.wait_for_response(&self.dbus).await;
+        drop(exported_shell);
+
+        let mut resp_iter = resp.iter();
+        let response = DesktopPortalRequestResponseCode::read(&mut resp_iter);
+        if response != DesktopPortalRequestResponseCode::Success {
+            return Err(SelectSpriteFilesError::OperationCancelled);
+        }
+
+        resp_iter.next();
+        let mut res = DesktopPortalFileChooserOpenFileResponse::read_all(&mut resp_iter);
+        assert!(res.uris.len() == 1);
+        Ok(unsafe { res.uris.pop().unwrap_unchecked() })
+    }
 }
 
 #[cfg(target_os = "linux")]

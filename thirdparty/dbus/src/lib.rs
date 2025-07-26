@@ -552,6 +552,14 @@ impl MessageIter<'_> {
             x => Err(x),
         }
     }
+
+    #[inline]
+    pub fn try_begin_iter_dict_entry_content(&mut self) -> Result<Self, core::ffi::c_int> {
+        match self.arg_type() {
+            TYPE_DICT_ENTRY => Ok(self.recurse()),
+            x => Err(x),
+        }
+    }
 }
 
 pub trait MessageIterAppendLike {
@@ -649,6 +657,10 @@ impl<'p, P: MessageIterAppendLike + 'p> MessageIterAppendContainer<'p, P> {
         unsafe { ffi::dbus_message_iter_append_basic(&mut self.0, r#type, value) != 0 }
     }
 
+    pub fn append_u32(&mut self, value: u32) -> bool {
+        unsafe { self.append_basic(ffi::DBUS_TYPE_UINT, &value as *const _ as _) }
+    }
+
     pub fn append_cstr(&mut self, value: &CStr) -> bool {
         unsafe { self.append_basic(ffi::DBUS_TYPE_STRING, &value.as_ptr() as *const _ as _) }
     }
@@ -671,6 +683,22 @@ impl<'p, P: MessageIterAppendLike + 'p> MessageIterAppendContainer<'p, P> {
         contained_signature: &CStr,
     ) -> Option<MessageIterAppendContainer<'p1, Self>> {
         self.open_container(ffi::DBUS_TYPE_VARIANT, Some(contained_signature))
+    }
+
+    #[inline(always)]
+    pub fn open_array_container<'p1>(
+        &'p1 mut self,
+        contained_signature: &CStr,
+    ) -> Option<MessageIterAppendContainer<'p1, Self>> {
+        self.open_container(ffi::DBUS_TYPE_ARRAY, Some(contained_signature))
+    }
+
+    #[inline(always)]
+    pub fn open_struct_container<'p1>(
+        &'p1 mut self,
+        contained_signature: &CStr,
+    ) -> Option<MessageIterAppendContainer<'p1, Self>> {
+        self.open_container(ffi::DBUS_TYPE_STRUCT, Some(contained_signature))
     }
 
     #[inline]

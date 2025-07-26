@@ -1,30 +1,48 @@
 use std::{
     cell::{Cell, UnsafeCell},
+    os::windows::ffi::OsStringExt,
     path::PathBuf,
     pin::Pin,
+    u32,
 };
 
 use bedrock::{self as br, SurfaceCreateInfo};
 use windows::{
     Storage::Pickers::{FileOpenPicker, FileSavePicker},
     Win32::{
-        Foundation::{E_NOTIMPL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM},
+        Foundation::{
+            E_NOTIMPL, GetLastError, HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM,
+        },
         Graphics::{
-            Dwm::DwmExtendFrameIntoClientArea,
+            Dwm::{
+                DWMWA_USE_IMMERSIVE_DARK_MODE, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
+            },
             Gdi::{
                 DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, GetMonitorInfoW, HBRUSH,
                 MONITOR_DEFAULTTOPRIMARY, MONITORINFOEXW, MapWindowPoints, MonitorFromWindow,
             },
         },
         System::{
+            Com::{
+                CLSCTX_INPROC_SERVER, CoCreateInstance, DVASPECT_CONTENT, FORMATETC, STGMEDIUM,
+                TYMED_HGLOBAL,
+            },
             LibraryLoader::GetModuleHandleW,
+            Memory::{GlobalLock, GlobalUnlock},
+            Ole::{
+                CF_HDROP, DROPEFFECT_LINK, IDropTarget, IDropTarget_Impl, OleInitialize,
+                RegisterDragDrop, ReleaseStgMedium,
+            },
             Performance::{QueryPerformanceCounter, QueryPerformanceFrequency},
         },
         UI::{
             Controls::MARGINS,
             HiDpi::GetDpiForWindow,
             Input::KeyboardAndMouse::{ReleaseCapture, SetCapture},
-            Shell::IInitializeWithWindow,
+            Shell::{
+                CLSID_DragDropHelper, DragQueryFileW, HDROP, IDropTargetHelper,
+                IInitializeWithWindow,
+            },
             WindowsAndMessaging::{
                 CW_USEDEFAULT, CloseWindow, CreateWindowExW, DefWindowProcW, DestroyWindow,
                 DispatchMessageW, GWLP_USERDATA, GetClientRect, GetSystemMetrics,
@@ -58,15 +76,18 @@ pub struct AppShell<'sys, 'subsystem> {
     hwnd: HWND,
     ui_scale_factor: core::pin::Pin<Box<Cell<f32>>>,
     current_display_refresh_rate_hz: core::pin::Pin<Box<Cell<f32>>>,
-    app_event_queue: &'sys AppEventBus,
     perf_counter_freq: i64,
     next_target_frame_timing: Cell<i64>,
     pub pointer_input_manager: Pin<Box<UnsafeCell<PointerInputManager>>>,
-    _marker: core::marker::PhantomData<*mut AppBaseSystem<'subsystem>>,
+    _marker: core::marker::PhantomData<(&'sys AppEventBus, *mut AppBaseSystem<'subsystem>)>,
 }
 impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
     #[tracing::instrument(skip(events, base_sys))]
     pub fn new(events: &'sys AppEventBus, base_sys: *mut AppBaseSystem<'subsystem>) -> Self {
+        if let Err(e) = unsafe { OleInitialize(None) } {
+            tracing::warn!(reason = ?e, "OleInitialize failed");
+        }
+
         let hinstance =
             unsafe { core::mem::transmute::<_, HINSTANCE>(GetModuleHandleW(None).unwrap()) };
 
@@ -119,6 +140,43 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
                 WINDOW_LONG_PTR_INDEX(0),
                 ui_scale_factor.as_ref().get_ref() as *const _ as _,
             );
+        }
+
+        // set dark mode preference
+        if let Err(e) = unsafe {
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                &windows::core::BOOL(true as _) as *const _ as _,
+                core::mem::size_of::<windows_core::BOOL>() as _,
+            )
+        } {
+            tracing::warn!(reason = ?e, "activating DWM Immersive Dark Mode failed");
+        }
+
+        'try_setup_dnd: {
+            let dd_helper = match unsafe {
+                CoCreateInstance(&CLSID_DragDropHelper, None, CLSCTX_INPROC_SERVER)
+            } {
+                Ok(x) => x,
+                Err(e) => {
+                    tracing::warn!(reason = ?e, "creating DragDropHelper failed");
+                    break 'try_setup_dnd;
+                }
+            };
+
+            if let Err(e) = unsafe {
+                RegisterDragDrop(
+                    hwnd,
+                    &IDropTarget::from(DropTargetHandler {
+                        bound_hwnd: hwnd,
+                        app_event_bus: events,
+                        dd_helper,
+                    }),
+                )
+            } {
+                tracing::warn!(reason = ?e, "registering drag drop handler failed");
+            }
         }
 
         let mut pointer_input_manager =
@@ -206,7 +264,6 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
             hinstance,
             hwnd,
             ui_scale_factor,
-            app_event_queue: events,
             perf_counter_freq,
             next_target_frame_timing: Cell::new(
                 current_perf_counter
@@ -656,7 +713,7 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
             .unwrap()
             .Insert(
                 h!("Peridot Sprite Atlas asset"),
-                &IVector::from(VectorWrapper(&[HSTRING::from(".psa")])),
+                &IVector::from(ReadOnlySliceAsVector(&[HSTRING::from(".psa")])),
             )
             .unwrap();
 
@@ -675,17 +732,174 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
     }
 }
 
+#[implement(IDropTarget)]
+pub struct DropTargetHandler<'sys> {
+    bound_hwnd: HWND,
+    app_event_bus: &'sys AppEventBus,
+    dd_helper: IDropTargetHelper,
+}
+impl IDropTarget_Impl for DropTargetHandler_Impl<'_> {
+    fn DragEnter(
+        &self,
+        pdataobj: windows_core::Ref<'_, windows::Win32::System::Com::IDataObject>,
+        _grfkeystate: windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS,
+        pt: &windows::Win32::Foundation::POINTL,
+        pdweffect: *mut windows::Win32::System::Ole::DROPEFFECT,
+    ) -> windows_core::Result<()> {
+        unsafe {
+            self.dd_helper.DragEnter(
+                self.bound_hwnd,
+                pdataobj.unwrap(),
+                &POINT { x: pt.x, y: pt.y },
+                core::ptr::read(pdweffect),
+            )?;
+        }
+        self.app_event_bus.push(AppEvent::UIShowDragAndDropOverlay);
+        unsafe {
+            core::ptr::write(pdweffect, DROPEFFECT_LINK);
+        }
+
+        Ok(())
+    }
+
+    fn DragLeave(&self) -> windows_core::Result<()> {
+        unsafe {
+            self.dd_helper.DragLeave()?;
+        }
+        self.app_event_bus.push(AppEvent::UIHideDragAndDropOverlay);
+
+        Ok(())
+    }
+
+    fn DragOver(
+        &self,
+        _grfkeystate: windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS,
+        pt: &windows::Win32::Foundation::POINTL,
+        pdweffect: *mut windows::Win32::System::Ole::DROPEFFECT,
+    ) -> windows_core::Result<()> {
+        unsafe {
+            self.dd_helper
+                .DragOver(&POINT { x: pt.x, y: pt.y }, core::ptr::read(pdweffect))?;
+            core::ptr::write(pdweffect, DROPEFFECT_LINK);
+        }
+
+        Ok(())
+    }
+
+    fn Drop(
+        &self,
+        pdataobj: windows_core::Ref<'_, windows::Win32::System::Com::IDataObject>,
+        _grfkeystate: windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS,
+        pt: &windows::Win32::Foundation::POINTL,
+        pdweffect: *mut windows::Win32::System::Ole::DROPEFFECT,
+    ) -> windows_core::Result<()> {
+        let data = OwnedStgMedium(unsafe {
+            pdataobj
+                .unwrap()
+                .GetData(&FORMATETC {
+                    cfFormat: CF_HDROP.0,
+                    ptd: core::ptr::null_mut(),
+                    dwAspect: DVASPECT_CONTENT.0,
+                    lindex: -1,
+                    tymed: TYMED_HGLOBAL.0 as _,
+                })
+                .unwrap()
+        });
+        let gl = unsafe { LockedHGLOBAL::acquire(data.hglobal_unchecked()).unwrap() };
+        let hdrop: HDROP = unsafe { core::mem::transmute(gl.ptr) };
+        let file_count = unsafe { DragQueryFileW(hdrop, 0xffff_ffff, None) };
+        let mut file_paths = Vec::with_capacity(file_count as _);
+        for n in 0..file_count {
+            let len = unsafe { DragQueryFileW(hdrop, n, None) };
+            let mut path = Vec::with_capacity((len + 1) as _);
+            unsafe {
+                path.set_len(path.capacity());
+            }
+            if unsafe { DragQueryFileW(hdrop, n, Some(&mut path)) } == 0 {
+                tracing::error!("DragQueryFileW(querying file path) failed");
+                panic!("cannot continue");
+            }
+
+            file_paths.push(PathBuf::from(std::ffi::OsString::from_wide(
+                &path[..path.len() - 1],
+            )));
+        }
+        drop((gl, data));
+        self.app_event_bus
+            .push(AppEvent::AddSpriteByPathList(file_paths));
+
+        unsafe {
+            self.dd_helper.Drop(
+                pdataobj.unwrap(),
+                &POINT { x: pt.x, y: pt.y },
+                core::ptr::read(pdweffect),
+            )?;
+        }
+        self.app_event_bus.push(AppEvent::UIHideDragAndDropOverlay);
+        unsafe {
+            core::ptr::write(pdweffect, DROPEFFECT_LINK);
+        }
+
+        Ok(())
+    }
+}
+
+#[repr(transparent)]
+struct OwnedStgMedium(pub STGMEDIUM);
+impl Drop for OwnedStgMedium {
+    #[inline]
+    fn drop(&mut self) {
+        unsafe {
+            ReleaseStgMedium(&mut self.0);
+        }
+    }
+}
+impl OwnedStgMedium {
+    pub const unsafe fn hglobal_unchecked(&self) -> HGLOBAL {
+        unsafe { self.0.u.hGlobal }
+    }
+}
+
+struct LockedHGLOBAL {
+    handle: HGLOBAL,
+    ptr: *mut core::ffi::c_void,
+}
+impl Drop for LockedHGLOBAL {
+    fn drop(&mut self) {
+        if let Err(e) = unsafe { GlobalUnlock(self.handle) }
+            && e.code() != windows::Win32::Foundation::S_OK
+        {
+            // なぜかErrなのに中身S_OKで返ってくることがあるらしい
+            tracing::warn!(reason = ?e, "GlobalUnlock failed");
+        }
+    }
+}
+impl LockedHGLOBAL {
+    pub unsafe fn acquire(handle: HGLOBAL) -> windows::core::Result<Self> {
+        let ptr = unsafe { GlobalLock(handle) };
+        if ptr.is_null() {
+            return Err(unsafe { GetLastError().into() });
+        }
+
+        Ok(Self { handle, ptr })
+    }
+}
+
 #[implement(IVector<T>)]
 #[repr(transparent)]
-struct VectorWrapper<'xs, T>(&'xs [T])
+struct ReadOnlySliceAsVector<'xs, T>(pub &'xs [T])
 where
     T: windows_core::RuntimeType + 'static;
-impl<'xs, T: windows_core::RuntimeType + 'static> IIterable_Impl<T> for VectorWrapper_Impl<'xs, T> {
+impl<'xs, T: windows_core::RuntimeType + 'static> IIterable_Impl<T>
+    for ReadOnlySliceAsVector_Impl<'xs, T>
+{
     fn First(&self) -> windows_core::Result<windows_collections::IIterator<T>> {
         Err(E_NOTIMPL.into())
     }
 }
-impl<'xs, T: windows_core::RuntimeType + 'static> IVector_Impl<T> for VectorWrapper_Impl<'xs, T> {
+impl<'xs, T: windows_core::RuntimeType + 'static> IVector_Impl<T>
+    for ReadOnlySliceAsVector_Impl<'xs, T>
+{
     fn Append(&self, _value: windows_core::Ref<'_, T>) -> windows_core::Result<()> {
         Err(E_NOTIMPL.into())
     }

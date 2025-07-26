@@ -109,6 +109,7 @@ pub enum AppEvent {
     },
     DeselectSprite,
     AddSpritesByUriList(Vec<std::ffi::CString>),
+    AddSpriteByPathList(Vec<std::path::PathBuf>),
     UIShowDragAndDropOverlay,
     UIHideDragAndDropOverlay,
 }
@@ -3267,6 +3268,9 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                 }
                 AppEvent::AddSpritesByUriList(uris) => {
                     app_state.borrow_mut().add_sprites_by_uri_list(uris);
+                }
+                AppEvent::AddSpriteByPathList(paths) => {
+                    app_state.borrow_mut().add_sprites_from_file_paths(paths);
                 }
                 AppEvent::UIShowDragAndDropOverlay => {
                     dnd_overlay.show(app_system, t.elapsed().as_secs_f32());

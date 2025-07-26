@@ -3190,7 +3190,9 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         .detach();
                     #[cfg(windows)]
                     task_worker
-                        .spawn(app_menu_on_add_sprite(syslink, app_shell, app_state))
+                        .spawn(app_menu_on_add_sprite(
+                            syslink, app_shell, app_state, events,
+                        ))
                         .detach();
                 }
                 AppEvent::AppMenuRequestOpen => {
@@ -3257,8 +3259,16 @@ async fn app_menu_on_add_sprite<'sys, 'subsystem>(
     syslink: &SystemLink,
     shell: &'sys AppShell<'sys, 'subsystem>,
     app_state: &'sys RefCell<AppState<'subsystem>>,
+    event_bus: &AppEventBus,
 ) {
-    let added_paths = syslink.select_sprite_files(shell).await;
+    let added_paths = match syslink.select_sprite_files(shell).await {
+        Ok(x) => x,
+        Err(e) => {
+            e.ui_feedback(event_bus);
+            return;
+        }
+    };
+
     app_state
         .borrow_mut()
         .add_sprites_from_file_paths(added_paths);
@@ -3271,9 +3281,16 @@ async fn app_menu_on_open<'sys, 'subsystem>(
     app_state: &'sys RefCell<AppState<'subsystem>>,
     event_bus: &AppEventBus,
 ) {
-    let Some(path) = syslink.select_open_file(shell).await else {
-        tracing::warn!("operation was cancelled");
-        return;
+    let path = match syslink.select_open_file(shell).await {
+        Ok(Some(x)) => x,
+        Ok(None) => {
+            tracing::warn!("operation was cancelled");
+            return;
+        }
+        Err(e) => {
+            e.ui_feedback(event_bus);
+            return;
+        }
     };
 
     if app_state.borrow_mut().load(&path).is_err() {
@@ -3290,9 +3307,16 @@ async fn app_menu_on_save<'sys, 'subsystem>(
     app_state: &'sys RefCell<AppState<'subsystem>>,
     event_bus: &AppEventBus,
 ) {
-    let Some(path) = syslink.select_save_file(shell).await else {
-        tracing::warn!("operation was cancelled");
-        return;
+    let path = match syslink.select_save_file(shell).await {
+        Ok(Some(x)) => x,
+        Ok(None) => {
+            tracing::warn!("operation was cancelled");
+            return;
+        }
+        Err(e) => {
+            e.ui_feedback(event_bus);
+            return;
+        }
     };
 
     if app_state.borrow_mut().save(path).is_err() {
@@ -3898,6 +3922,49 @@ pub enum SelectSpriteFilesError {
 }
 
 #[cfg(windows)]
+#[derive(Debug, thiserror::Error)]
+pub enum SystemLinkError {
+    #[error("unrecoverable exception: {0:?}")]
+    UnrecoverableException(windows::core::Error),
+}
+impl SystemLinkError {
+    pub fn ui_feedback(self, events: &AppEventBus) {
+        match self {
+            Self::UnrecoverableException(_) => {
+                events.push(AppEvent::UIMessageDialogRequest {
+                    content: "Operation failed".into(),
+                });
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+macro_rules! syslink_unrecoverable {
+    ($x: expr, $msg: literal) => {
+        match $x {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, $msg);
+                return Err(SystemLinkError::UnrecoverableException(e));
+            }
+        }
+    }
+}
+
+macro_rules! warn_bailout_scope {
+    ($label: lifetime, $x: expr, $msg: literal) => {
+        match $x {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::warn!(reason = ?e, $msg);
+                break $label;
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
 pub struct SystemLink {}
 #[cfg(windows)]
 impl SystemLink {
@@ -3913,39 +3980,80 @@ impl SystemLink {
     pub async fn select_sprite_files(
         &self,
         for_shell: &AppShell<'_, '_>,
-    ) -> Vec<std::path::PathBuf> {
-        let picker = windows::Storage::Pickers::FileOpenPicker::new().unwrap();
-        unsafe {
-            windows::core::Interface::cast::<windows::Win32::UI::Shell::IInitializeWithWindow>(
-                &picker,
-            )
-            .unwrap()
-            .Initialize(for_shell.hwnd())
-            .unwrap();
-        }
-        picker
-            .FileTypeFilter()
-            .unwrap()
-            .Append(windows::core::h!(".png"))
-            .unwrap();
+    ) -> Result<Vec<std::path::PathBuf>, SystemLinkError> {
+        let picker = syslink_unrecoverable!(
+            windows::Storage::Pickers::FileOpenPicker::new(),
+            "FileOpenPicker::new failed"
+        );
+        syslink_unrecoverable!(
+            unsafe {
+                syslink_unrecoverable!(
+                    windows::core::Interface::cast::<
+                        windows::Win32::UI::Shell::IInitializeWithWindow,
+                    >(&picker),
+                    "querying IInitializeWithWindow failed"
+                )
+                .Initialize(for_shell.hwnd())
+            },
+            "picker initialization failed"
+        );
 
-        let files = picker.PickMultipleFilesAsync().unwrap().await.unwrap();
-        let mut paths = Vec::with_capacity(files.Size().unwrap() as _);
-        let files_iter = files.First().unwrap();
-        while files_iter.HasCurrent().unwrap() {
-            paths.push(
-                files_iter
-                    .Current()
-                    .unwrap()
-                    .Path()
-                    .unwrap()
-                    .to_os_string()
-                    .into(),
+        'try_set_filter: {
+            warn_bailout_scope!(
+                'try_set_filter,
+                warn_bailout_scope!(
+                    'try_set_filter,
+                    picker.FileTypeFilter(),
+                    "getting FileTypeFilter failed"
+                )
+                .Append(windows::core::h!(".png")),
+                "appending filter failed"
             );
-            files_iter.MoveNext().unwrap();
         }
 
-        paths
+        let files = syslink_unrecoverable!(
+            syslink_unrecoverable!(
+                picker.PickMultipleFilesAsync(),
+                "FileOpenPicker.PickMultipleFilesAsync failed"
+            )
+            .await,
+            "Error while PickMultipleFilesAsync operation"
+        );
+
+        let mut paths = match files.Size() {
+            Ok(count) => Vec::with_capacity(count as _),
+            Err(e) => {
+                tracing::warn!(reason = ?e, "getting file count failed, operation may be suboptimal");
+                Vec::new()
+            }
+        };
+        let files_iter = syslink_unrecoverable!(files.First(), "getting files iterator failed");
+        while files_iter.HasCurrent().unwrap_or_else(|e| {
+            tracing::warn!(reason = ?e, "getting HasCurrent failed, canceling iteration");
+            false
+        }) {
+            'try_get_file_path: {
+                let current = match files_iter.Current() {
+                    Ok(x) => x,
+                    Err(e) => {
+                        tracing::warn!(reason = ?e, "getting Current element failed, skipping");
+                        break 'try_get_file_path;
+                    }
+                };
+                let path = match current.Path() {
+                    Ok(x) => x,
+                    Err(e) => {
+                        tracing::warn!(reason = ?e, "getting Path failed, skipping");
+                        break 'try_get_file_path;
+                    }
+                };
+                paths.push(path.to_os_string().into());
+            }
+
+            syslink_unrecoverable!(files_iter.MoveNext(), "moving to next failed");
+        }
+
+        Ok(paths)
     }
 
     #[tracing::instrument(
@@ -3956,33 +4064,58 @@ impl SystemLink {
     pub async fn select_open_file(
         &self,
         for_shell: &AppShell<'_, '_>,
-    ) -> Option<std::path::PathBuf> {
-        let picker = windows::Storage::Pickers::FileOpenPicker::new().unwrap();
-        unsafe {
-            windows::core::Interface::cast::<windows::Win32::UI::Shell::IInitializeWithWindow>(
-                &picker,
-            )
-            .unwrap()
-            .Initialize(for_shell.hwnd())
-            .unwrap();
-        }
-        picker
-            .FileTypeFilter()
-            .unwrap()
-            .Append(windows::core::h!(".psa"))
-            .unwrap();
+    ) -> Result<Option<std::path::PathBuf>, SystemLinkError> {
+        let picker = syslink_unrecoverable!(
+            windows::Storage::Pickers::FileOpenPicker::new(),
+            "FileOpenPiciker::new failed"
+        );
+        syslink_unrecoverable!(
+            unsafe {
+                syslink_unrecoverable!(
+                    windows::core::Interface::cast::<
+                        windows::Win32::UI::Shell::IInitializeWithWindow,
+                    >(&picker,),
+                    "querying IInitializeWithWindow failed"
+                )
+                .Initialize(for_shell.hwnd())
+            },
+            "picker initialization failed"
+        );
 
-        match picker.PickSingleFileAsync().unwrap().await {
-            Ok(x) => Some(x.Path().unwrap().to_os_string().into()),
+        'try_set_filter: {
+            warn_bailout_scope!(
+                'try_set_filter,
+                warn_bailout_scope!(
+                    'try_set_filter,
+                    picker.FileTypeFilter(),
+                    "getting FileTypeFilter failed"
+                )
+                .Append(windows::core::h!(".psa")),
+                "appending filter failed"
+            );
+        }
+
+        let file = match syslink_unrecoverable!(
+            picker.PickSingleFileAsync(),
+            "PickSingleFileAsync failed"
+        )
+        .await
+        {
+            Ok(x) => x,
             Err(e) if e.code() == windows::Win32::Foundation::S_OK => {
                 // operation was cancelled
-                None
+                return Ok(None);
             }
             Err(e) => {
                 tracing::error!(reason = ?e, "FileOpenPicker.PickSingleFileAsync failed");
-                panic!("cannot continue");
+                return Err(SystemLinkError::UnrecoverableException(e));
             }
-        }
+        };
+        Ok(Some(
+            syslink_unrecoverable!(file.Path(), "getting path failed")
+                .to_os_string()
+                .into(),
+        ))
     }
 
     #[tracing::instrument(
@@ -3993,39 +4126,54 @@ impl SystemLink {
     pub async fn select_save_file(
         &self,
         for_shell: &AppShell<'_, '_>,
-    ) -> Option<std::path::PathBuf> {
-        let picker = windows::Storage::Pickers::FileSavePicker::new().unwrap();
-        unsafe {
-            windows::core::Interface::cast::<windows::Win32::UI::Shell::IInitializeWithWindow>(
-                &picker,
-            )
-            .unwrap()
-            .Initialize(for_shell.hwnd())
-            .unwrap();
-        }
-        picker
-            .FileTypeChoices()
-            .unwrap()
-            .Insert(
-                windows::core::h!("Peridot Sprite Atlas asset"),
-                &windows_collections::IVector::from(shell::win32::ReadOnlySliceAsVector(&[
-                    windows::core::HSTRING::from(".psa"),
-                ])),
-            )
-            .unwrap();
+    ) -> Result<Option<std::path::PathBuf>, SystemLinkError> {
+        let picker = syslink_unrecoverable!(
+            windows::Storage::Pickers::FileSavePicker::new(),
+            "FileSavePicker::new failed"
+        );
+        syslink_unrecoverable!(
+            unsafe {
+                syslink_unrecoverable!(
+                    windows::core::Interface::cast::<
+                        windows::Win32::UI::Shell::IInitializeWithWindow,
+                    >(&picker,),
+                    "querying IInitializeWithWindow failed"
+                )
+                .Initialize(for_shell.hwnd())
+            },
+            "picker initialization failed"
+        );
 
-        let file = match picker.PickSaveFileAsync().unwrap().await {
-            Ok(x) => x,
-            Err(e) if e.code() == windows::Win32::Foundation::S_OK => {
-                // operation was cancelled
-                return None;
-            }
-            Err(e) => {
-                tracing::error!(reason = ?e, "FileSavePicker.PickSaveFileAsync failed");
-                panic!("cannot continue");
-            }
-        };
-        Some(file.Path().unwrap().to_os_string().into())
+        syslink_unrecoverable!(
+            syslink_unrecoverable!(picker.FileTypeChoices(), "getting FileTypeChoices failed")
+                .Insert(
+                    windows::core::h!("Peridot Sprite Atlas asset"),
+                    &windows_collections::IVector::from(shell::win32::ReadOnlySliceAsVector(&[
+                        windows::core::HSTRING::from(".psa"),
+                    ])),
+                ),
+            "inserting filter failed"
+        );
+
+        let file =
+            match syslink_unrecoverable!(picker.PickSaveFileAsync(), "PickSaveFileAsync failed")
+                .await
+            {
+                Ok(x) => x,
+                Err(e) if e.code() == windows::Win32::Foundation::S_OK => {
+                    // operation was cancelled
+                    return Ok(None);
+                }
+                Err(e) => {
+                    tracing::error!(reason = ?e, "FileSavePicker.PickSaveFileAsync failed");
+                    return Err(SystemLinkError::UnrecoverableException(e));
+                }
+            };
+        Ok(Some(
+            syslink_unrecoverable!(file.Path(), "getting path failed")
+                .to_os_string()
+                .into(),
+        ))
     }
 }
 

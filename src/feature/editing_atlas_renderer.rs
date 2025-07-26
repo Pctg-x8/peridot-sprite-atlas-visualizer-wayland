@@ -30,6 +30,57 @@ use crate::{
     subsystem::Subsystem,
 };
 
+pub struct EditingAtlasGridView<'d> {
+    ct_root: CompositeTreeRef,
+    custom_render_token: CustomRenderToken,
+    renderer: RefCell<EditingAtlasRenderer<'d>>,
+}
+impl<'d> EditingAtlasGridView<'d> {
+    pub fn new(
+        init: &mut ViewInitContext<'_, '_, 'd>,
+        rendered_pass: br::SubpassRef<impl br::RenderPass + ?Sized>,
+        main_buffer_size: br::Extent2D,
+        init_atlas_size: SizePixels,
+    ) -> Self {
+        let renderer = EditingAtlasRenderer::new(
+            init.base_system,
+            rendered_pass,
+            main_buffer_size,
+            init_atlas_size,
+        );
+
+        let custom_render_token = init
+            .base_system
+            .composite_tree
+            .acquire_custom_render_token();
+        let ct_root = init.base_system.register_composite_rect(CompositeRect {
+            relative_size_adjustment: [1.0, 1.0],
+            custom_render_token: Some(custom_render_token),
+            ..Default::default()
+        });
+
+        Self {
+            ct_root,
+            custom_render_token,
+            renderer: RefCell::new(renderer),
+        }
+    }
+
+    pub fn mount(&self, base_system: &mut AppBaseSystem, ct_parent: CompositeTreeRef) {
+        base_system.set_composite_tree_parent(self.ct_root, ct_parent);
+    }
+
+    #[inline(always)]
+    pub fn is_custom_render(&self, token: &CustomRenderToken) -> bool {
+        &self.custom_render_token == token
+    }
+
+    #[inline(always)]
+    pub fn renderer(&self) -> &RefCell<EditingAtlasRenderer<'d>> {
+        &self.renderer
+    }
+}
+
 #[repr(C)]
 struct GridParams {
     pub offset: [f32; 2],
@@ -233,57 +284,6 @@ impl<'subsystem> SpriteInstanceBuffers<'subsystem> {
     }
 }
 
-pub struct EditingAtlasGridView<'d> {
-    ct_root: CompositeTreeRef,
-    custom_render_token: CustomRenderToken,
-    renderer: RefCell<EditingAtlasRenderer<'d>>,
-}
-impl<'d> EditingAtlasGridView<'d> {
-    pub fn new(
-        init: &mut ViewInitContext<'_, '_, 'd>,
-        rendered_pass: br::SubpassRef<impl br::RenderPass + ?Sized>,
-        main_buffer_size: br::Extent2D,
-        init_atlas_size: SizePixels,
-    ) -> Self {
-        let renderer = EditingAtlasRenderer::new(
-            init.base_system,
-            rendered_pass,
-            main_buffer_size,
-            init_atlas_size,
-        );
-
-        let custom_render_token = init
-            .base_system
-            .composite_tree
-            .acquire_custom_render_token();
-        let ct_root = init.base_system.register_composite_rect(CompositeRect {
-            relative_size_adjustment: [1.0, 1.0],
-            custom_render_token: Some(custom_render_token),
-            ..Default::default()
-        });
-
-        Self {
-            ct_root,
-            custom_render_token,
-            renderer: RefCell::new(renderer),
-        }
-    }
-
-    pub fn mount(&self, base_system: &mut AppBaseSystem, ct_parent: CompositeTreeRef) {
-        base_system.set_composite_tree_parent(self.ct_root, ct_parent);
-    }
-
-    #[inline(always)]
-    pub fn is_custom_render(&self, token: &CustomRenderToken) -> bool {
-        &self.custom_render_token == token
-    }
-
-    #[inline(always)]
-    pub fn renderer(&self) -> &RefCell<EditingAtlasRenderer<'d>> {
-        &self.renderer
-    }
-}
-
 pub struct EditingAtlasRenderer<'d> {
     _sprite_sampler: br::SamplerObject<&'d Subsystem>,
     pub param_buffer: br::BufferObject<&'d Subsystem>,
@@ -334,7 +334,7 @@ impl<'d> EditingAtlasRenderer<'d> {
     );
 
     #[tracing::instrument(skip(app_system, rendered_pass))]
-    pub fn new(
+    fn new(
         app_system: &AppBaseSystem<'d>,
         rendered_pass: br::SubpassRef<impl br::RenderPass + ?Sized>,
         main_buffer_size: br::Extent2D,

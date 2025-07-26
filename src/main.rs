@@ -63,7 +63,7 @@ use composite::{
     populate_composite_render_commands,
 };
 use coordinate::SizePixels;
-use feature::editing_atlas_renderer::{EditingAtlasGridView, EditingAtlasRenderer};
+use feature::editing_atlas_renderer::EditingAtlasGridView;
 use hittest::{HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef};
 use input::EventContinueControl;
 use parking_lot::RwLock;

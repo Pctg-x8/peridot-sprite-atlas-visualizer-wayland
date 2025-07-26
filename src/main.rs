@@ -63,7 +63,7 @@ use composite::{
     populate_composite_render_commands,
 };
 use coordinate::SizePixels;
-use feature::editing_atlas_renderer::EditingAtlasRenderer;
+use feature::editing_atlas_renderer::{EditingAtlasGridView, EditingAtlasRenderer};
 use hittest::{HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef};
 use input::EventContinueControl;
 use parking_lot::RwLock;
@@ -642,18 +642,18 @@ struct HitTestRootTreeActionHandler<'subsystem> {
     sprites_qt: RefCell<QuadTree>,
     sprite_rects_cached: RefCell<Vec<(u32, u32, u32, u32)>>,
     current_selected_sprite_marker_view: std::rc::Weak<CurrentSelectedSpriteMarkerView>,
-    editing_atlas_renderer: std::rc::Weak<RefCell<EditingAtlasRenderer<'subsystem>>>,
+    editing_atlas_grid_view: std::rc::Weak<EditingAtlasGridView<'subsystem>>,
     ht_titlebar: Option<HitTestTreeRef>,
     drag_state: RefCell<DragState>,
 }
 impl<'subsystem> HitTestRootTreeActionHandler<'subsystem> {
     pub fn new(
-        editing_atlas_renderer: &Rc<RefCell<EditingAtlasRenderer<'subsystem>>>,
+        editing_atlas_grid_view: &Rc<EditingAtlasGridView<'subsystem>>,
         current_selected_sprite_marker_view: &Rc<CurrentSelectedSpriteMarkerView>,
         ht_titlebar: Option<HitTestTreeRef>,
     ) -> Self {
         Self {
-            editing_atlas_renderer: Rc::downgrade(editing_atlas_renderer),
+            editing_atlas_grid_view: Rc::downgrade(editing_atlas_grid_view),
             current_selected_sprite_marker_view: Rc::downgrade(current_selected_sprite_marker_view),
             ht_titlebar,
             sprites_qt: RefCell::new(QuadTree::new()),
@@ -727,7 +727,7 @@ impl<'c> HitTestTreeActionHandler for HitTestRootTreeActionHandler<'c> {
         context: &mut AppUpdateContext,
         args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
-        let Some(ear) = self.editing_atlas_renderer.upgrade() else {
+        let Some(ear) = self.editing_atlas_grid_view.upgrade() else {
             // app teardown-ed
             return EventContinueControl::empty();
         };
@@ -736,7 +736,7 @@ impl<'c> HitTestTreeActionHandler for HitTestRootTreeActionHandler<'c> {
             return EventContinueControl::empty();
         };
 
-        let [current_offset_x, current_offset_y] = ear.borrow().offset();
+        let [current_offset_x, current_offset_y] = ear.renderer().borrow().offset();
         let pointing_x = args.client_x * context.ui_scale_factor - current_offset_x;
         let pointing_y = args.client_y * context.ui_scale_factor - current_offset_y;
 
@@ -781,7 +781,7 @@ impl<'c> HitTestTreeActionHandler for HitTestRootTreeActionHandler<'c> {
         context: &mut AppUpdateContext,
         args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
-        let Some(ear) = self.editing_atlas_renderer.upgrade() else {
+        let Some(ear) = self.editing_atlas_grid_view.upgrade() else {
             // app teardown-ed
             return EventContinueControl::empty();
         };
@@ -799,7 +799,7 @@ impl<'c> HitTestTreeActionHandler for HitTestRootTreeActionHandler<'c> {
                 let ox = base_x_pixels + dx;
                 let oy = base_y_pixels + dy;
 
-                ear.borrow_mut().set_offset(ox, oy);
+                ear.renderer().borrow_mut().set_offset(ox, oy);
 
                 if let Some(marker_view) = self.current_selected_sprite_marker_view.upgrade() {
                     marker_view.set_view_offset(ox, oy);
@@ -823,7 +823,8 @@ impl<'c> HitTestTreeActionHandler for HitTestRootTreeActionHandler<'c> {
                     (base_x_pixels + dx).max(0.0) as u32,
                     (base_y_pixels + dy).max(0.0) as u32,
                 );
-                ear.borrow_mut()
+                ear.renderer()
+                    .borrow_mut()
                     .update_sprite_offset(index, sx as _, sy as _);
 
                 return EventContinueControl::STOP_PROPAGATION;
@@ -839,7 +840,7 @@ impl<'c> HitTestTreeActionHandler for HitTestRootTreeActionHandler<'c> {
         context: &mut AppUpdateContext,
         args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
-        let Some(ear) = self.editing_atlas_renderer.upgrade() else {
+        let Some(ear) = self.editing_atlas_grid_view.upgrade() else {
             // app teardown-ed
             return EventContinueControl::empty();
         };
@@ -861,7 +862,7 @@ impl<'c> HitTestTreeActionHandler for HitTestRootTreeActionHandler<'c> {
                 let ox = base_x_pixels + dx;
                 let oy = base_y_pixels + dy;
 
-                ear.borrow_mut().set_offset(ox, oy);
+                ear.renderer().borrow_mut().set_offset(ox, oy);
 
                 if let Some(marker_view) = self.current_selected_sprite_marker_view.upgrade() {
                     marker_view.set_view_offset(ox, oy);
@@ -906,13 +907,13 @@ impl<'c> HitTestTreeActionHandler for HitTestRootTreeActionHandler<'c> {
         context: &mut AppUpdateContext,
         args: &hittest::PointerActionArgs,
     ) -> EventContinueControl {
-        let Some(ear) = self.editing_atlas_renderer.upgrade() else {
+        let Some(ear) = self.editing_atlas_grid_view.upgrade() else {
             // app teardown-ed
             return EventContinueControl::empty();
         };
 
-        let x = args.client_x * context.ui_scale_factor - ear.borrow().offset()[0];
-        let y = args.client_y * context.ui_scale_factor - ear.borrow().offset()[1];
+        let x = args.client_x * context.ui_scale_factor - ear.renderer().borrow().offset()[0];
+        let y = args.client_y * context.ui_scale_factor - ear.renderer().borrow().offset()[1];
 
         let mut max_index = None;
         for n in self
@@ -1826,29 +1827,32 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         app_state: app_state.get_mut(),
     };
 
-    let editing_atlas_renderer = Rc::new(RefCell::new(EditingAtlasRenderer::new(
-        init_context.for_view.base_system,
+    let editing_atlas_grid_view = Rc::new(EditingAtlasGridView::new(
+        &mut init_context.for_view,
         main_rp_final.subpass(0),
         sc.size,
         SizePixels {
             width: 32,
             height: 32,
         },
-    )));
+    ));
     let mut editing_atlas_current_bound_pipeline = RenderPassRequirements {
         after_operation: RenderPassAfterOperation::None,
         continued: false,
     };
     init_context.app_state.register_atlas_size_view_feedback({
-        let editing_atlas_renderer = Rc::downgrade(&editing_atlas_renderer);
+        let editing_atlas_grid_view = Rc::downgrade(&editing_atlas_grid_view);
 
         move |size| {
-            let Some(editing_atlas_renderer) = editing_atlas_renderer.upgrade() else {
+            let Some(editing_atlas_grid_view) = editing_atlas_grid_view.upgrade() else {
                 // app teardown-ed
                 return;
             };
 
-            editing_atlas_renderer.borrow_mut().set_atlas_size(*size);
+            editing_atlas_grid_view
+                .renderer()
+                .borrow_mut()
+                .set_atlas_size(*size);
         }
     });
 
@@ -1868,6 +1872,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     drop(init_context);
     drop(staging_scratch_buffer_locked);
 
+    editing_atlas_grid_view.mount(app_system, CompositeTree::ROOT);
     current_selected_sprite_marker_view.mount(CompositeTree::ROOT, &mut app_system.composite_tree);
     sprite_list_pane.mount(app_system, CompositeTree::ROOT, HitTestTreeManager::ROOT);
     app_menu.mount(app_system, CompositeTree::ROOT, HitTestTreeManager::ROOT);
@@ -1885,7 +1890,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     let mut popup_manager = PopupManager::new(popup_hit_layer, CompositeTree::ROOT);
 
     let ht_root_fallback_action_handler = Rc::new(HitTestRootTreeActionHandler::new(
-        &editing_atlas_renderer,
+        &editing_atlas_grid_view,
         &current_selected_sprite_marker_view,
         None,
     ));
@@ -1895,7 +1900,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
 
     app_state.get_mut().register_sprites_view_feedback({
         let ht_root_fallback_action_handler = Rc::downgrade(&ht_root_fallback_action_handler);
-        let editing_atlas_renderer = Rc::downgrade(&editing_atlas_renderer);
+        let editing_atlas_grid_view = Rc::downgrade(&editing_atlas_grid_view);
         let bg_worker = bg_worker.enqueue_access().downgrade();
         let mut last_selected_index = None;
         let staging_scratch_buffers = Arc::downgrade(&staging_scratch_buffers);
@@ -1908,7 +1913,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                 // app teardown-ed
                 return;
             };
-            let Some(editing_atlas_renderer) = editing_atlas_renderer.upgrade() else {
+            let Some(editing_atlas_grid_view) = editing_atlas_grid_view.upgrade() else {
                 // app teardown-ed
                 return;
             };
@@ -1922,7 +1927,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
             };
 
             ht_root_fallback_action_handler.update_sprite_rects(sprites);
-            editing_atlas_renderer.borrow().update_sprites(
+            editing_atlas_grid_view.renderer().borrow().update_sprites(
                 sprites,
                 &bg_worker,
                 &staging_scratch_buffers,
@@ -1947,7 +1952,8 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     });
 
     // initial state modification
-    editing_atlas_renderer
+    editing_atlas_grid_view
+        .renderer()
         .borrow_mut()
         .set_offset(0.0, app_header.height() * app_shell.ui_scale_factor());
 
@@ -2491,7 +2497,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                             );
                         }
 
-                        editing_atlas_renderer.borrow_mut().recreate(
+                        editing_atlas_grid_view.renderer().borrow_mut().recreate(
                             app_system,
                             match editing_atlas_current_bound_pipeline {
                                 RenderPassRequirements {
@@ -2633,7 +2639,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     let composite_instance_buffer_dirty =
                         core::mem::replace(&mut composite_instance_buffer_dirty, false);
                     let mut needs_update = composite_instance_buffer_dirty
-                        || editing_atlas_renderer.borrow().is_dirty();
+                        || editing_atlas_grid_view.renderer().borrow().is_dirty();
 
                     if composite_backdrop_buffers_invalidated {
                         composite_backdrop_buffers_invalidated = false;
@@ -2785,11 +2791,14 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                             )
                         })
                         .inject(|r| {
-                            editing_atlas_renderer.borrow_mut().process_dirty_data(
-                                app_system.subsystem,
-                                &staging_scratch_buffers_locked.active_buffer(),
-                                r,
-                            )
+                            editing_atlas_grid_view
+                                .renderer()
+                                .borrow_mut()
+                                .process_dirty_data(
+                                    app_system.subsystem,
+                                    &staging_scratch_buffers_locked.active_buffer(),
+                                    r,
+                                )
                         })
                         .end()
                         .unwrap();
@@ -2851,7 +2860,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         {
                             editing_atlas_current_bound_pipeline =
                                 last_composite_render_instructions.render_passes[0];
-                            editing_atlas_renderer.borrow_mut().recreate(
+                            editing_atlas_grid_view.renderer().borrow_mut().recreate(
                                 app_system,
                                 match (
                                     editing_atlas_current_bound_pipeline.after_operation,
@@ -2875,49 +2884,29 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         }
 
                         for (n, cb) in main_cbs.iter_mut().enumerate() {
-                            let (first_rp, first_fb) =
-                                match last_composite_render_instructions.render_passes[0] {
-                                    RenderPassRequirements {
-                                        continued: true, ..
-                                    } => unreachable!("cannot continue at first"),
-                                    RenderPassRequirements {
-                                        after_operation: RenderPassAfterOperation::Grab,
-                                        continued: false,
-                                    } => (&main_rp_grabbed, &main_grabbed_fbs[n]),
-                                    RenderPassRequirements {
-                                        after_operation: RenderPassAfterOperation::None,
-                                        continued: false,
-                                    } => (&main_rp_final, &main_final_fbs[n]),
-                                };
-
                             unsafe { cb.begin(&br::CommandBufferBeginInfo::new()).unwrap() }
-                                .inject(|r| {
-                                    inject_cmd_begin_render_pass2(
-                                        r,
-                                        app_system.subsystem,
-                                        &br::RenderPassBeginInfo::new(
-                                            first_rp,
-                                            first_fb,
-                                            sc.size.into_rect(br::Offset2D::ZERO),
-                                            &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 1.0])],
-                                        ),
-                                        &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
-                                    )
-                                })
-                                .inject(|r| {
-                                    editing_atlas_renderer.borrow().render_commands(sc.size, r)
-                                })
                                 .inject(|r| {
                                     populate_composite_render_commands(
                                         r,
                                         app_system.subsystem,
-                                        true,
+                                        false,
                                         sc.size,
                                         &last_composite_render_instructions,
                                         |rpreq| match rpreq {
                                             RenderPassRequirements {
-                                                continued: false, ..
-                                            } => unreachable!("not at first(must be continued)"),
+                                                continued: false,
+                                                after_operation: RenderPassAfterOperation::Grab,
+                                            } => (
+                                                main_rp_grabbed.as_transparent_ref(),
+                                                main_grabbed_fbs[n].as_transparent_ref(),
+                                            ),
+                                            RenderPassRequirements {
+                                                continued: false,
+                                                after_operation: RenderPassAfterOperation::None,
+                                            } => (
+                                                main_rp_final.as_transparent_ref(),
+                                                main_final_fbs[n].as_transparent_ref(),
+                                            ),
                                             RenderPassRequirements {
                                                 continued: true,
                                                 after_operation: RenderPassAfterOperation::Grab,
@@ -2961,6 +2950,16 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                         &backdrop_fx_blur_processor,
                                         &blur_fixed_descriptors,
                                         &composite_backdrop_blur_destination_fbs,
+                                        |token, r| {
+                                            if editing_atlas_grid_view.is_custom_render(&token) {
+                                                editing_atlas_grid_view
+                                                    .renderer()
+                                                    .borrow()
+                                                    .render_commands(sc.size, r)
+                                            } else {
+                                                r
+                                            }
+                                        },
                                     )
                                 })
                                 .inject(|r| {

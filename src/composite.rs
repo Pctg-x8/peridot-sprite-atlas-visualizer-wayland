@@ -399,6 +399,10 @@ pub struct ClipConfig {
     pub bottom_softness: SafeF32,
 }
 
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CustomRenderToken(usize);
+
 pub struct CompositeRect {
     pub has_bitmap: bool,
     pub base_scale_factor: f32,
@@ -410,6 +414,7 @@ pub struct CompositeRect {
     pub texatlas_rect: AtlasRect,
     pub slice_borders: [f32; 4],
     pub composite_mode: CompositeMode,
+    pub custom_render_token: Option<CustomRenderToken>,
     pub opacity: AnimatableFloat,
     pub pivot: [f32; 2],
     pub scale_x: AnimatableFloat,
@@ -437,6 +442,7 @@ impl Default for CompositeRect {
             slice_borders: [0.0, 0.0, 0.0, 0.0],
             dirty: false,
             composite_mode: CompositeMode::DirectSourceOver,
+            custom_render_token: None,
             opacity: AnimatableFloat::Value(1.0),
             pivot: [0.5; 2],
             scale_x: AnimatableFloat::Value(1.0),
@@ -822,6 +828,7 @@ pub enum CompositeRenderingInstruction {
         index_range: core::ops::Range<usize>,
         backdrop_buffer: usize,
     },
+    InsertCustomRenderCommands(CustomRenderToken),
     SetClip {
         shader_parameters: [SafeF32; 8],
     },
@@ -912,6 +919,14 @@ impl CompositeRenderingInstructionBuilder {
                 index_range: index..index + 1,
                 backdrop_buffer: backdrop_buffer_index,
             });
+    }
+
+    fn insert_custom_render_commands(&mut self, token: CustomRenderToken) {
+        // no dependency check
+        self.insts
+            .push(CompositeRenderingInstruction::InsertCustomRenderCommands(
+                token,
+            ));
     }
 
     fn set_clip(&mut self, rect: &[SafeF32; 4], config: &ClipConfig) {
@@ -1099,6 +1114,8 @@ pub struct CompositeTree {
     unused: BTreeSet<usize>,
     dirty: bool,
     parameter_store: CompositeTreeParameterStore,
+    custom_render_unused: BTreeSet<usize>,
+    custom_render_last_id: usize,
 }
 impl CompositeTree {
     /// ルートノード
@@ -1121,6 +1138,8 @@ impl CompositeTree {
                 float_values: Vec::new(),
                 unused_float_parameters: BTreeSet::new(),
             },
+            custom_render_unused: BTreeSet::new(),
+            custom_render_last_id: 0,
         }
     }
 
@@ -1136,6 +1155,20 @@ impl CompositeTree {
 
     pub fn free(&mut self, index: CompositeTreeRef) {
         self.unused.insert(index.0);
+    }
+
+    pub fn acquire_custom_render_token(&mut self) -> CustomRenderToken {
+        if let Some(x) = self.custom_render_unused.pop_first() {
+            return CustomRenderToken(x);
+        }
+
+        let t = CustomRenderToken(self.custom_render_last_id);
+        self.custom_render_last_id += 1;
+        t
+    }
+
+    pub fn release_custom_render_token(&mut self, token: CustomRenderToken) {
+        self.custom_render_unused.insert(token.0);
     }
 
     pub fn get(&self, index: CompositeTreeRef) -> &CompositeRect {
@@ -1278,7 +1311,10 @@ impl CompositeTree {
                 }
             }
 
-            if r.has_bitmap {
+            if let Some(t) = r.custom_render_token {
+                // Custom Renderがある場合はそっちのみ
+                inst_builder.insert_custom_render_commands(t);
+            } else if r.has_bitmap {
                 unsafe {
                     core::ptr::write(
                         mapped_head
@@ -1422,6 +1458,7 @@ pub fn populate_composite_render_commands<'x, 'r>(
     backdrop_fx_blur_processor: &BackdropEffectBlurProcessor,
     backdrop_blur_fixed_descriptors: &[br::DescriptorSet],
     backdrop_blur_destination_fbs: &[impl br::VkHandle<Handle = br::vk::VkFramebuffer>],
+    mut custom_render: impl FnMut(CustomRenderToken, br::CmdRecord<'x>) -> br::CmdRecord<'x>,
 ) -> br::CmdRecord<'x> {
     let render_region = target_size.into_rect(br::Offset2D::ZERO);
 
@@ -1486,6 +1523,33 @@ pub fn populate_composite_render_commands<'x, 'r>(
                         &[],
                     )
                     .draw(4, index_range.len() as _, 0, index_range.start as _)
+            }
+            &CompositeRenderingInstruction::InsertCustomRenderCommands(token) => {
+                if !in_render_pass {
+                    in_render_pass = true;
+
+                    let (rp, fb) =
+                        render_target_pair_provider(&render_data.render_passes[rpt_pointer]);
+
+                    rec = rec.inject(|r| {
+                        inject_cmd_begin_render_pass2(
+                            r,
+                            subsystem,
+                            &br::RenderPassBeginInfo::new(
+                                &rp,
+                                &fb,
+                                render_region,
+                                &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 1.0])],
+                            ),
+                            &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                        )
+                    });
+                }
+
+                rec = custom_render(token, rec);
+
+                // 別のパイプラインをつかっている可能性があるのでいったん紐づいているのを無効化する
+                pipeline_bound = false;
             }
             &CompositeRenderingInstruction::SetClip {
                 ref shader_parameters,

@@ -448,7 +448,7 @@ impl BaseView {
                         start_sec: current_sec,
                         end_sec: current_sec + 0.25,
                         from_value: [0.0, 0.0, 0.0, 0.0],
-                        to_value: [0.0, 0.0, 0.0, 0.25],
+                        to_value: [0.0, 0.0, 0.0, 0.125],
                         curve: AnimationCurve::Linear,
                         event_on_complete: None,
                     },
@@ -470,7 +470,7 @@ impl BaseView {
                     AnimatableColor::Animated {
                         start_sec: current_sec,
                         end_sec: current_sec + 0.25,
-                        from_value: [0.0, 0.0, 0.0, 0.25],
+                        from_value: [0.0, 0.0, 0.0, 0.125],
                         to_value: [0.0, 0.0, 0.0, 0.0],
                         curve: AnimationCurve::Linear,
                         event_on_complete: None,

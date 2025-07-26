@@ -20,7 +20,7 @@ use crate::{
     subsystem::Subsystem,
 };
 
-pub const BLUR_SAMPLE_STEPS: usize = 2;
+pub const BLUR_SAMPLE_STEPS: usize = 4;
 
 #[repr(C)]
 pub struct CompositeInstanceData {
@@ -2084,12 +2084,13 @@ impl<'subsystem> BackdropEffectBlurProcessor<'subsystem> {
     pub fn populate_commands<'x>(
         &self,
         mut rec: br::CmdRecord<'x>,
-        stdev: SafeF32,
+        mut stdev: SafeF32,
         dest_fb: &(impl br::VkHandle<Handle = br::vk::VkFramebuffer> + ?Sized),
         subsystem: &'subsystem Subsystem,
         rt_size: br::Extent2D,
         input_descriptor_sets: &[br::DescriptorSet],
     ) -> br::CmdRecord<'x> {
+        let mut step_count = 0;
         // downsample
         for lv in 1..=BLUR_SAMPLE_STEPS {
             rec = rec
@@ -2099,9 +2100,7 @@ impl<'subsystem> BackdropEffectBlurProcessor<'subsystem> {
                         subsystem,
                         &br::RenderPassBeginInfo::new(
                             &self.render_pass,
-                            &&unsafe {
-                                br::VkHandleRef::dangling(self.downsample_pass_fbs[lv - 1])
-                            },
+                            &unsafe { br::VkHandleRef::dangling(self.downsample_pass_fbs[lv - 1]) },
                             br::Extent2D {
                                 width: rt_size.width >> lv,
                                 height: rt_size.height >> lv,
@@ -2135,9 +2134,15 @@ impl<'subsystem> BackdropEffectBlurProcessor<'subsystem> {
                 )
                 .draw(3, 1, 0, 0)
                 .inject(|r| inject_cmd_end_render_pass2(r, subsystem, &br::SubpassEndInfo::new()));
+
+            step_count += 1;
+            stdev = unsafe { SafeF32::new_unchecked(stdev.value() / 2.0) };
+            if stdev.value() < 0.5 {
+                break;
+            }
         }
         // upsample
-        for lv in (0..BLUR_SAMPLE_STEPS).rev() {
+        for lv in (0..step_count).rev() {
             rec = rec
                 .inject(|r| {
                     inject_cmd_begin_render_pass2(
@@ -2186,6 +2191,8 @@ impl<'subsystem> BackdropEffectBlurProcessor<'subsystem> {
                 )
                 .draw(3, 1, 0, 0)
                 .inject(|r| inject_cmd_end_render_pass2(r, subsystem, &br::SubpassEndInfo::new()));
+
+            stdev = unsafe { SafeF32::new_unchecked(stdev.value() * 2.0) };
         }
 
         rec

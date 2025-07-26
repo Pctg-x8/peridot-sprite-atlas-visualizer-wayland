@@ -1764,7 +1764,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         parking_lot::RwLockWriteGuard::map(staging_scratch_buffers.write(), |x| {
             x.active_buffer_mut()
         });
-    tracing::info!(value = app_shell.ui_scale_factor(), "initial ui scale");
     let mut init_context = PresenterInitContext {
         for_view: ViewInitContext {
             base_system: app_system,
@@ -1773,6 +1772,10 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         },
         app_state: app_state.get_mut(),
     };
+    tracing::info!(
+        value = init_context.for_view.ui_scale_factor,
+        "initial ui scale"
+    );
 
     let editing_atlas_renderer = Rc::new(RefCell::new(EditingAtlasRenderer::new(
         init_context.for_view.base_system,
@@ -1830,9 +1833,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     });
     app_system.set_hit_tree_parent(popup_hit_layer, HitTestTreeManager::ROOT);
 
-    editing_atlas_renderer
-        .borrow_mut()
-        .set_offset(0.0, app_header.height() * app_shell.ui_scale_factor());
+    let mut popup_manager = PopupManager::new(popup_hit_layer, CompositeTree::ROOT);
 
     let ht_root_fallback_action_handler = Rc::new(HitTestRootTreeActionHandler::new(
         &editing_atlas_renderer,
@@ -1976,6 +1977,11 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         }
     });
 
+    // initial state modification
+    editing_atlas_renderer
+        .borrow_mut()
+        .set_offset(0.0, app_header.height() * app_shell.ui_scale_factor());
+
     {
         let staging_scratch_buffer_locked =
             parking_lot::RwLockWriteGuard::map(staging_scratch_buffers.write(), |x| {
@@ -2052,7 +2058,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     app_shell.flush();
 
     #[cfg(target_os = "linux")]
-    let poll_fd_pool = RefCell::new(PollFDPool::new());
+    let mut poll_fd_pool = RefCell::new(PollFDPool::new());
     #[cfg(target_os = "linux")]
     let epoll = platform::linux::Epoll::new(0).unwrap();
     #[cfg(target_os = "linux")]
@@ -2060,9 +2066,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         .add(
             &events.efd,
             platform::linux::EPOLLIN,
-            platform::linux::EpollData::U64(
-                poll_fd_pool.borrow_mut().alloc(PollFDType::AppEventBus),
-            ),
+            platform::linux::EpollData::U64(poll_fd_pool.get_mut().alloc(PollFDType::AppEventBus)),
         )
         .unwrap();
     #[cfg(target_os = "linux")]
@@ -2071,7 +2075,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
             &app_shell.display_fd(),
             platform::linux::EPOLLIN,
             platform::linux::EpollData::U64(
-                poll_fd_pool.borrow_mut().alloc(PollFDType::AppShellDisplay),
+                poll_fd_pool.get_mut().alloc(PollFDType::AppShellDisplay),
             ),
         )
         .unwrap();
@@ -2082,7 +2086,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
             platform::linux::EPOLLIN,
             platform::linux::EpollData::U64(
                 poll_fd_pool
-                    .borrow_mut()
+                    .get_mut()
                     .alloc(PollFDType::BackgroundWorkerViewFeedback),
             ),
         )
@@ -2095,8 +2099,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         fd_to_pool_index: HashMap::new(),
     }));
 
-    let mut popup_manager = PopupManager::new(popup_hit_layer, CompositeTree::ROOT);
-
     // initialize misc state
     let mut active_ui_scale = app_shell.ui_scale_factor();
     let mut newsize_request = None;
@@ -2106,7 +2108,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         render_passes: Vec::new(),
         required_backdrop_buffer_count: 0,
     };
-    let mut composite_instance_buffer_dirty = false;
+    let mut composite_instance_buffer_dirty;
 
     // initial post event
     events.push(AppEvent::ToplevelWindowFrameTiming);

@@ -1212,8 +1212,8 @@ impl FrameView {
             texatlas_rect: frame_image_atlas_rect,
             slice_borders: [Self::CORNER_RADIUS.value() * init.ui_scale_factor; 4],
             composite_mode: CompositeMode::ColorTintBackdropBlur(
-                AnimatableColor::Value([1.0, 1.0, 1.0, 0.0625]),
-                AnimatableFloat::Value(3.0),
+                AnimatableColor::Value([1.0, 1.0, 1.0, 0.03125]),
+                AnimatableFloat::Value(15.0),
             ),
             ..Default::default()
         });

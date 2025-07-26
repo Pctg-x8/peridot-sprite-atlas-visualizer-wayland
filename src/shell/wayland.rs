@@ -1277,6 +1277,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             enter_serial,
             match shape {
                 CursorShape::Default => WpCursorShapeDeviceV1Shape::Default,
+                CursorShape::Pointer => WpCursorShapeDeviceV1Shape::Pointer,
                 CursorShape::ResizeHorizontal => WpCursorShapeDeviceV1Shape::EwResize,
             },
         ) {

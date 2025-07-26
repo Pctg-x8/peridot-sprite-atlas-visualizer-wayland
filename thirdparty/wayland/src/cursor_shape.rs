@@ -73,6 +73,7 @@ impl WpCursorShapeManagerV1 {
 pub enum WpCursorShapeDeviceV1Shape {
     Default = 1,
     // ContextMenu = 2,
+    Pointer = 4,
     NeResize = 20,
     NwResize = 21,
     SeResize = 23,

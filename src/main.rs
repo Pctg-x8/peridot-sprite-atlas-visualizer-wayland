@@ -1807,7 +1807,10 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         }
     });
 
-    let app_header = feature::app_header::Presenter::new(&mut init_context);
+    let app_header = feature::app_header::Presenter::new(
+        &mut init_context,
+        app_shell.is_floating_window_system(),
+    );
     let mut sprite_list_pane =
         feature::sprite_list_pane::Presenter::new(&mut init_context, app_header.height());
     let app_menu = feature::app_menu::Presenter::new(&mut init_context, app_header.height());

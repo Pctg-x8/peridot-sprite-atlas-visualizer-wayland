@@ -970,18 +970,20 @@ impl BaseView {
 
 struct ActionHandler {
     menu_button_view: MenuButtonView,
-    system_command_button_views: Vec<SystemCommandButtonView>,
+    system_command_button_views: Option<[SystemCommandButtonView; 3]>,
 }
 impl HitTestTreeActionHandler for ActionHandler {
     fn role(&self, sender: HitTestTreeRef) -> Option<Role> {
-        for x in self.system_command_button_views.iter() {
-            if sender == x.ht_root {
-                return match x.cmd.get() {
-                    SystemCommand::Close => Some(Role::CloseButton),
-                    SystemCommand::Minimize => Some(Role::MinimizeButton),
-                    SystemCommand::Maximize => Some(Role::MaximizeButton),
-                    SystemCommand::Restore => Some(Role::RestoreButton),
-                };
+        if let Some(ref vs) = self.system_command_button_views {
+            for x in vs {
+                if sender == x.ht_root {
+                    return match x.cmd.get() {
+                        SystemCommand::Close => Some(Role::CloseButton),
+                        SystemCommand::Minimize => Some(Role::MinimizeButton),
+                        SystemCommand::Maximize => Some(Role::MaximizeButton),
+                        SystemCommand::Restore => Some(Role::RestoreButton),
+                    };
+                }
             }
         }
 
@@ -1003,10 +1005,12 @@ impl HitTestTreeActionHandler for ActionHandler {
             return EventContinueControl::STOP_PROPAGATION;
         }
 
-        for x in self.system_command_button_views.iter() {
-            if sender == x.ht_root {
-                x.on_hover();
-                return EventContinueControl::STOP_PROPAGATION;
+        if let Some(ref vs) = self.system_command_button_views {
+            for x in vs {
+                if sender == x.ht_root {
+                    x.on_hover();
+                    return EventContinueControl::STOP_PROPAGATION;
+                }
             }
         }
 
@@ -1024,10 +1028,12 @@ impl HitTestTreeActionHandler for ActionHandler {
             return EventContinueControl::STOP_PROPAGATION;
         }
 
-        for x in self.system_command_button_views.iter() {
-            if sender == x.ht_root {
-                x.on_leave();
-                return EventContinueControl::STOP_PROPAGATION;
+        if let Some(ref vs) = self.system_command_button_views {
+            for x in vs {
+                if sender == x.ht_root {
+                    x.on_leave();
+                    return EventContinueControl::STOP_PROPAGATION;
+                }
             }
         }
 
@@ -1040,9 +1046,11 @@ impl HitTestTreeActionHandler for ActionHandler {
         _context: &mut AppUpdateContext,
         _args: &PointerActionArgs,
     ) -> EventContinueControl {
-        for x in self.system_command_button_views.iter() {
-            if sender == x.ht_root {
-                return EventContinueControl::STOP_PROPAGATION;
+        if let Some(ref vs) = self.system_command_button_views {
+            for x in vs {
+                if sender == x.ht_root {
+                    return EventContinueControl::STOP_PROPAGATION;
+                }
             }
         }
 
@@ -1060,9 +1068,11 @@ impl HitTestTreeActionHandler for ActionHandler {
         _context: &mut AppUpdateContext,
         _args: &PointerActionArgs,
     ) -> EventContinueControl {
-        for x in self.system_command_button_views.iter() {
-            if sender == x.ht_root {
-                return EventContinueControl::STOP_PROPAGATION;
+        if let Some(ref vs) = self.system_command_button_views {
+            for x in vs {
+                if sender == x.ht_root {
+                    return EventContinueControl::STOP_PROPAGATION;
+                }
             }
         }
 
@@ -1080,25 +1090,27 @@ impl HitTestTreeActionHandler for ActionHandler {
         context: &mut AppUpdateContext,
         _args: &PointerActionArgs,
     ) -> EventContinueControl {
-        for x in self.system_command_button_views.iter() {
-            if sender == x.ht_root {
-                match x.cmd.get() {
-                    SystemCommand::Close => {
-                        context.event_queue.push(AppEvent::ToplevelWindowClose);
+        if let Some(ref vs) = self.system_command_button_views {
+            for x in vs {
+                if sender == x.ht_root {
+                    match x.cmd.get() {
+                        SystemCommand::Close => {
+                            context.event_queue.push(AppEvent::ToplevelWindowClose);
+                        }
+                        SystemCommand::Minimize => {
+                            context
+                                .event_queue
+                                .push(AppEvent::ToplevelWindowMinimizeRequest);
+                        }
+                        SystemCommand::Maximize => {
+                            context
+                                .event_queue
+                                .push(AppEvent::ToplevelWindowMaximizeRequest);
+                        }
+                        SystemCommand::Restore => (),
                     }
-                    SystemCommand::Minimize => {
-                        context
-                            .event_queue
-                            .push(AppEvent::ToplevelWindowMinimizeRequest);
-                    }
-                    SystemCommand::Maximize => {
-                        context
-                            .event_queue
-                            .push(AppEvent::ToplevelWindowMaximizeRequest);
-                    }
-                    SystemCommand::Restore => (),
+                    return EventContinueControl::STOP_PROPAGATION;
                 }
-                return EventContinueControl::STOP_PROPAGATION;
             }
         }
 
@@ -1116,50 +1128,43 @@ pub struct Presenter {
     action_handler: Rc<ActionHandler>,
 }
 impl Presenter {
-    pub fn new(init: &mut PresenterInitContext) -> Self {
+    pub fn new(init: &mut PresenterInitContext, needs_client_decoration: bool) -> Self {
         let base_view = Rc::new(BaseView::new(&mut init.for_view));
         let menu_button_view = MenuButtonView::new(&mut init.for_view, base_view.height);
-        let close_button_view =
-            SystemCommandButtonView::new(&mut init.for_view, 0.0, SystemCommand::Close);
-        let maximize_restore_button_view = SystemCommandButtonView::new(
-            &mut init.for_view,
-            SystemCommandButtonView::WIDTH,
-            SystemCommand::Maximize,
-        );
-        let minimize_button_view = SystemCommandButtonView::new(
-            &mut init.for_view,
-            SystemCommandButtonView::WIDTH * 2.0,
-            SystemCommand::Minimize,
-        );
+        let system_command_button_views = needs_client_decoration.then(|| {
+            [
+                SystemCommandButtonView::new(&mut init.for_view, 0.0, SystemCommand::Close),
+                SystemCommandButtonView::new(
+                    &mut init.for_view,
+                    SystemCommandButtonView::WIDTH,
+                    SystemCommand::Maximize,
+                ),
+                SystemCommandButtonView::new(
+                    &mut init.for_view,
+                    SystemCommandButtonView::WIDTH * 2.0,
+                    SystemCommand::Minimize,
+                ),
+            ]
+        });
 
         menu_button_view.mount(
             init.for_view.base_system,
             base_view.ct_root,
             base_view.ht_root,
         );
-        close_button_view.mount(
-            init.for_view.base_system,
-            base_view.ct_root,
-            base_view.ht_root,
-        );
-        maximize_restore_button_view.mount(
-            init.for_view.base_system,
-            base_view.ct_root,
-            base_view.ht_root,
-        );
-        minimize_button_view.mount(
-            init.for_view.base_system,
-            base_view.ct_root,
-            base_view.ht_root,
-        );
+        if let Some(ref vs) = system_command_button_views {
+            for v in vs {
+                v.mount(
+                    init.for_view.base_system,
+                    base_view.ct_root,
+                    base_view.ht_root,
+                );
+            }
+        }
 
         let action_handler = Rc::new(ActionHandler {
             menu_button_view,
-            system_command_button_views: vec![
-                close_button_view,
-                maximize_restore_button_view,
-                minimize_button_view,
-            ],
+            system_command_button_views,
         });
         init.for_view
             .base_system
@@ -1169,11 +1174,13 @@ impl Presenter {
             .base_system
             .hit_tree
             .set_action_handler(action_handler.menu_button_view.ht_root, &action_handler);
-        for x in action_handler.system_command_button_views.iter() {
-            init.for_view
-                .base_system
-                .hit_tree
-                .set_action_handler(x.ht_root, &action_handler);
+        if let Some(ref vs) = action_handler.system_command_button_views {
+            for x in vs {
+                init.for_view
+                    .base_system
+                    .hit_tree
+                    .set_action_handler(x.ht_root, &action_handler);
+            }
         }
 
         init.app_state.register_current_open_path_view_feedback({
@@ -1217,8 +1224,10 @@ impl Presenter {
         self.action_handler
             .menu_button_view
             .rescale(base_system, ui_scale_factor);
-        for v in self.action_handler.system_command_button_views.iter() {
-            v.rescale(base_system, ui_scale_factor);
+        if let Some(ref vs) = self.action_handler.system_command_button_views {
+            for v in vs {
+                v.rescale(base_system, ui_scale_factor);
+            }
         }
     }
 
@@ -1232,8 +1241,10 @@ impl Presenter {
         self.action_handler
             .menu_button_view
             .update(&mut base_system.composite_tree, current_sec);
-        for x in self.action_handler.system_command_button_views.iter() {
-            x.update(&mut base_system.composite_tree, current_sec);
+        if let Some(ref vs) = self.action_handler.system_command_button_views {
+            for x in vs {
+                x.update(&mut base_system.composite_tree, current_sec);
+            }
         }
     }
 

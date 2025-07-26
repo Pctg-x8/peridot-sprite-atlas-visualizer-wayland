@@ -1118,7 +1118,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
         }
     }
 
-    pub const fn is_floating_window(&self) -> bool {
+    pub const fn is_floating_window_system(&self) -> bool {
         // TODO: detect floating/tiling window system
         false
     }

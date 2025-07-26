@@ -1118,9 +1118,24 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
         }
     }
 
-    pub const fn is_floating_window_system(&self) -> bool {
-        // TODO: detect floating/tiling window system
-        false
+    pub fn needs_window_command_buttons(&self) -> bool {
+        let Some(current_desktop) = std::env::var_os("XDG_CURRENT_DESKTOP") else {
+            // for unknown wm: defaults to require
+            return true;
+        };
+
+        let Some(current_desktop_str) = current_desktop.to_str() else {
+            tracing::warn!("invalid str sequence in XDG_CURRENT_DESKTOP");
+            return true;
+        };
+
+        if current_desktop_str.eq_ignore_ascii_case("hyprland") {
+            // for hyprland: no command buttons needed(there are shortcut keys)
+            return false;
+        }
+
+        // for unknown wm: defaults to require
+        true
     }
 
     pub const fn server_side_decoration_provided(&self) -> bool {

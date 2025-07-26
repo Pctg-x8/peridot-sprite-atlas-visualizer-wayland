@@ -476,7 +476,8 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
         unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
     }
 
-    pub const fn is_floating_window(&self) -> bool {
+    pub const fn needs_window_command_buttons(&self) -> bool {
+        // for Windows: window command buttons is always required
         true
     }
 

@@ -1809,7 +1809,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
 
     let app_header = feature::app_header::Presenter::new(
         &mut init_context,
-        app_shell.is_floating_window_system(),
+        app_shell.needs_window_command_buttons(),
     );
     let mut sprite_list_pane =
         feature::sprite_list_pane::Presenter::new(&mut init_context, app_header.height());

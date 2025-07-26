@@ -48,7 +48,7 @@ use windows::{
                 DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetClientRect, GetSystemMetrics,
                 GetWindowLongPtrW, GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION,
                 HTCLIENT, HTCLOSE, HTLEFT, HTMAXBUTTON, HTMINBUTTON, HTRIGHT, HTTOP, HTTOPLEFT,
-                HTTOPRIGHT, IDC_ARROW, IDC_SIZEWE, IDI_APPLICATION, IsWindow, IsZoomed,
+                HTTOPRIGHT, IDC_ARROW, IDC_HAND, IDC_SIZEWE, IDI_APPLICATION, IsWindow, IsZoomed,
                 LoadCursorW, LoadIconW, MSG, NCCALCSIZE_PARAMS, PM_REMOVE, PeekMessageW,
                 RegisterClassExW, SM_CXSIZEFRAME, SM_CYSIZEFRAME, SW_RESTORE, SW_SHOWMAXIMIZED,
                 SW_SHOWNORMAL, SWP_FRAMECHANGED, SetCursor, SetWindowLongPtrW, SetWindowPos,
@@ -532,10 +532,8 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
         ((rc.right - rc.left) as _, (rc.bottom - rc.top) as _)
     }
 
-    #[tracing::instrument(skip(self))]
     pub fn flush(&mut self) {}
 
-    #[tracing::instrument(skip(self))]
     pub fn process_pending_events(&self) {
         let mut msg = core::mem::MaybeUninit::<MSG>::uninit();
         while unsafe { PeekMessageW(msg.as_mut_ptr(), None, 0, 0, PM_REMOVE).0 != 0 } {
@@ -546,7 +544,6 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
         }
     }
 
-    #[tracing::instrument(skip(self))]
     pub fn request_next_frame(&self) {
         unsafe {
             QueryPerformanceCounter(self.next_target_frame_timing.as_ptr()).unwrap_unchecked();
@@ -576,6 +573,7 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
             SetCursor(match shape {
                 // TODO: 必要ならキャッシュする
                 CursorShape::Default => Some(LoadCursorW(None, IDC_ARROW).unwrap()),
+                CursorShape::Pointer => Some(LoadCursorW(None, IDC_HAND).unwrap()),
                 CursorShape::ResizeHorizontal => Some(LoadCursorW(None, IDC_SIZEWE).unwrap()),
             });
         }

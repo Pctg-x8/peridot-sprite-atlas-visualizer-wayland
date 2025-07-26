@@ -634,6 +634,18 @@ impl HitTestTreeActionHandler for ActionHandler {
 
         EventContinueControl::empty()
     }
+
+    fn cursor_shape(
+        &self,
+        sender: HitTestTreeRef,
+        _context: &mut AppUpdateContext,
+    ) -> hittest::CursorShape {
+        if self.item_views.iter().any(|x| x.ht_root == sender) {
+            return hittest::CursorShape::Pointer;
+        }
+
+        hittest::CursorShape::Default
+    }
 }
 
 pub struct Presenter {

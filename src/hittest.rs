@@ -289,6 +289,7 @@ impl<'h> HitTestTreeManager<'h> {
 #[derive(Clone, Copy, Debug)]
 pub enum CursorShape {
     Default,
+    Pointer,
     ResizeHorizontal,
 }
 

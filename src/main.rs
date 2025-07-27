@@ -4135,6 +4135,8 @@ pub enum SelectSpriteFilesError {
     NoFileChooser,
     #[error("FileChooser.OpenFile failed: {0:?}")]
     OpenFileFailed(dbus::Error),
+    #[error("FileChooser.SaveFile failed: {0:?}")]
+    SaveFileFailed(dbus::Error),
     #[error("Operation was cancelled")]
     OperationCancelled,
 }
@@ -4148,6 +4150,11 @@ impl SelectSpriteFilesError {
                 });
             }
             Self::OpenFileFailed(_) => {
+                events.push(AppEvent::UIMessageDialogRequest {
+                    content: "FileChooser.OpenFile failed".into(),
+                });
+            }
+            Self::SaveFileFailed(_) => {
                 events.push(AppEvent::UIMessageDialogRequest {
                     content: "FileChooser.SaveFile failed".into(),
                 });
@@ -4388,7 +4395,7 @@ impl SystemLink {
                 },
             )
             .await
-            .map_err(SelectSpriteFilesError::OpenFileFailed)?;
+            .map_err(SelectSpriteFilesError::SaveFileFailed)?;
         if !request_object.points_same_object(&request_handle) {
             tracing::debug!(
                 open_file_dialog_handle = ?request_handle.object_path,

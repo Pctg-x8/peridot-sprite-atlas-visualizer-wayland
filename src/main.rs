@@ -3336,21 +3336,8 @@ async fn app_menu_on_add_sprite<'subsystem>(
     // TODO: これUIだして待つべきか？ローカルだからあんまり待たないような気もするが......
     let resp = match syslink.select_sprite_files(shell).await {
         Ok(x) => x,
-        Err(SelectSpriteFilesError::NoFileChooser) => {
-            events.push(AppEvent::UIMessageDialogRequest {
-                content: "org.freedesktop.portal.FileChooser not found".into(),
-            });
-
-            return;
-        }
-        Err(SelectSpriteFilesError::OpenFileFailed(_)) => {
-            events.push(AppEvent::UIMessageDialogRequest {
-                content: "FileChooser.OpenFile failed".into(),
-            });
-
-            return;
-        }
-        Err(SelectSpriteFilesError::OperationCancelled) => {
+        Err(e) => {
+            e.ui_feedback(events);
             return;
         }
     };
@@ -3367,21 +3354,8 @@ async fn app_menu_on_open<'sys, 'subsystem>(
 ) {
     let uri = match syslink.select_open_file(shell).await {
         Ok(x) => x,
-        Err(SelectSpriteFilesError::NoFileChooser) => {
-            event_bus.push(AppEvent::UIMessageDialogRequest {
-                content: "org.freedesktop.portal.FileChooser not found".into(),
-            });
-
-            return;
-        }
-        Err(SelectSpriteFilesError::OpenFileFailed(_)) => {
-            event_bus.push(AppEvent::UIMessageDialogRequest {
-                content: "FileChooser.OpenFile failed".into(),
-            });
-
-            return;
-        }
-        Err(SelectSpriteFilesError::OperationCancelled) => {
+        Err(e) => {
+            e.ui_feedback(event_bus);
             return;
         }
     };
@@ -3403,21 +3377,8 @@ async fn app_menu_on_save<'sys, 'subsystem>(
 ) {
     let uri = match syslink.select_save_file(shell).await {
         Ok(x) => x,
-        Err(SelectSpriteFilesError::NoFileChooser) => {
-            event_bus.push(AppEvent::UIMessageDialogRequest {
-                content: "org.freedesktop.portal.FileChooser not found".into(),
-            });
-
-            return;
-        }
-        Err(SelectSpriteFilesError::OpenFileFailed(_)) => {
-            event_bus.push(AppEvent::UIMessageDialogRequest {
-                content: "FileChooser.SaveFile failed".into(),
-            });
-
-            return;
-        }
-        Err(SelectSpriteFilesError::OperationCancelled) => {
+        Err(e) => {
+            e.ui_feedback(event_bus);
             return;
         }
     };
@@ -3910,23 +3871,13 @@ impl DesktopPortalFileChooserOpenFileResponse {
     }
 }
 
-#[cfg(target_os = "linux")]
-#[derive(Debug, thiserror::Error)]
-pub enum SelectSpriteFilesError {
-    #[error("No org.freedesktop.portal.FileChooser found")]
-    NoFileChooser,
-    #[error("FileChooser.OpenFile failed: {0:?}")]
-    OpenFileFailed(dbus::Error),
-    #[error("Operation was cancelled")]
-    OperationCancelled,
-}
-
 #[cfg(windows)]
 #[derive(Debug, thiserror::Error)]
 pub enum SystemLinkError {
     #[error("unrecoverable exception: {0:?}")]
     UnrecoverableException(windows::core::Error),
 }
+#[cfg(windows)]
 impl SystemLinkError {
     pub fn ui_feedback(self, events: &AppEventBus) {
         match self {
@@ -4174,6 +4125,35 @@ impl SystemLink {
                 .to_os_string()
                 .into(),
         ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, thiserror::Error)]
+pub enum SelectSpriteFilesError {
+    #[error("No org.freedesktop.portal.FileChooser found")]
+    NoFileChooser,
+    #[error("FileChooser.OpenFile failed: {0:?}")]
+    OpenFileFailed(dbus::Error),
+    #[error("Operation was cancelled")]
+    OperationCancelled,
+}
+#[cfg(target_os = "linux")]
+impl SelectSpriteFilesError {
+    pub fn ui_feedback(self, events: &AppEventBus) {
+        match self {
+            Self::NoFileChooser => {
+                events.push(AppEvent::UIMessageDialogRequest {
+                    content: "org.freedesktop.portal.FileChooser not found".into(),
+                });
+            }
+            Self::OpenFileFailed(_) => {
+                events.push(AppEvent::UIMessageDialogRequest {
+                    content: "FileChooser.SaveFile failed".into(),
+                });
+            }
+            Self::OperationCancelled => (/* no feedback */),
+        }
     }
 }
 

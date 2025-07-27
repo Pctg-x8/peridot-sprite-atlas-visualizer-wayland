@@ -982,7 +982,7 @@ impl CompositeRenderingInstructionBuilder {
     }
 
     fn clear_clip(&mut self) {
-        if !self.clip_invalidated && self.active_clip_parameters.is_none() {
+        if self.clip_invalidated && self.active_clip_parameters.is_none() {
             // nothing clip activated
             return;
         }

@@ -937,7 +937,7 @@ impl<'d> EditingAtlasRenderer<'d> {
     pub fn recreate(
         &mut self,
         app_system: &AppBaseSystem<'d>,
-        rendered_pass: br::SubpassRef<impl br::RenderPass>,
+        rendered_pass: br::SubpassRef<impl br::RenderPass + ?Sized>,
         main_buffer_size: br::Extent2D,
     ) {
         let grid_vsh = app_system.require_shader("resources/filltri.vert");

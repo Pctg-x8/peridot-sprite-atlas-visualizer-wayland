@@ -11,8 +11,8 @@ use crate::{
     atlas::AtlasRect,
     base_system::{
         AppBaseSystem, BufferMapMode, FontType, MemoryBoundBuffer, PixelFormat, RenderPassOptions,
-        RenderTexture, RenderTextureFlags, RenderTextureOptions, create_render_pass2,
-        inject_cmd_begin_render_pass2, inject_cmd_end_render_pass2, inject_cmd_pipeline_barrier_2,
+        RenderTexture, RenderTextureFlags, RenderTextureOptions, inject_cmd_begin_render_pass2,
+        inject_cmd_end_render_pass2, inject_cmd_pipeline_barrier_2,
         scratch_buffer::StagingScratchBufferManager,
     },
     composite::{
@@ -109,9 +109,8 @@ impl ToggleButtonView {
         )
         .unwrap();
 
-        let rp = create_render_pass2(
-            base_system.subsystem,
-            &br::RenderPassCreateInfo2::new(
+        let rp = base_system
+            .create_render_pass(&br::RenderPassCreateInfo2::new(
                 &[msaa_buffer
                     .make_attachment_description()
                     .color_memory_op(br::LoadOp::Clear, br::StoreOp::Store)
@@ -132,9 +131,8 @@ impl ToggleButtonView {
                     br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                     br::PipelineStageFlags::TRANSFER,
                 )],
-            ),
-        )
-        .unwrap();
+            ))
+            .unwrap();
         let fb = br::FramebufferObject::new(
             base_system.subsystem,
             &br::FramebufferCreateInfo::new(

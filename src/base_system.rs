@@ -439,39 +439,36 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         }
 
         tracing::info!("creating fresh");
-        let o = create_render_pass2(
-            self.subsystem,
-            &br::RenderPassCreateInfo2::new(
-                &[br::AttachmentDescription2::new(br::vk::VK_FORMAT_R8_UNORM)
-                    .color_memory_op(
-                        if options.contains(RenderPassOptions::FULL_PIXEL_RENDER) {
-                            br::LoadOp::DontCare
-                        } else {
-                            br::LoadOp::Clear
-                        },
-                        br::StoreOp::Store,
-                    )
-                    .layout_transition(
-                        br::ImageLayout::Undefined,
-                        br::ImageLayout::ShaderReadOnlyOpt,
-                    )],
-                &[br::SubpassDescription2::new()
-                    .colors(&[const { br::AttachmentReference2::color_attachment_opt(0) }])],
-                &[br::SubpassDependency2::new(
-                    br::SubpassIndex::Internal(0),
-                    br::SubpassIndex::External,
+        let o = self.create_render_pass(&br::RenderPassCreateInfo2::new(
+            &[br::AttachmentDescription2::new(br::vk::VK_FORMAT_R8_UNORM)
+                .color_memory_op(
+                    if options.contains(RenderPassOptions::FULL_PIXEL_RENDER) {
+                        br::LoadOp::DontCare
+                    } else {
+                        br::LoadOp::Clear
+                    },
+                    br::StoreOp::Store,
                 )
-                .by_region()
-                .of_memory(
-                    br::AccessFlags::COLOR_ATTACHMENT.write,
-                    br::AccessFlags::SHADER.read,
-                )
-                .of_execution(
-                    br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                    br::PipelineStageFlags::FRAGMENT_SHADER,
+                .layout_transition(
+                    br::ImageLayout::Undefined,
+                    br::ImageLayout::ShaderReadOnlyOpt,
                 )],
-            ),
-        )?;
+            &[br::SubpassDescription2::new()
+                .colors(&[const { br::AttachmentReference2::color_attachment_opt(0) }])],
+            &[br::SubpassDependency2::new(
+                br::SubpassIndex::Internal(0),
+                br::SubpassIndex::External,
+            )
+            .by_region()
+            .of_memory(
+                br::AccessFlags::COLOR_ATTACHMENT.write,
+                br::AccessFlags::SHADER.read,
+            )
+            .of_execution(
+                br::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                br::PipelineStageFlags::FRAGMENT_SHADER,
+            )],
+        ))?;
 
         let o = Rc::new(o);
         cache_locked.insert(options, o.clone());
@@ -809,9 +806,8 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         )
         .create()?;
 
-        let render_pass = create_render_pass2(
-            self.subsystem,
-            &br::RenderPassCreateInfo2::new(
+        let render_pass = self
+            .create_render_pass(&br::RenderPassCreateInfo2::new(
                 &[
                     br::AttachmentDescription2::new(br::vk::VK_FORMAT_R8_UNORM)
                         .color_memory_op(br::LoadOp::Clear, br::StoreOp::DontCare)
@@ -857,9 +853,8 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
                         br::PipelineStageFlags::TRANSFER,
                     ),
                 ],
-            ),
-        )
-        .unwrap();
+            ))
+            .unwrap();
         let fb = br::FramebufferObject::new(
             self.subsystem,
             &br::FramebufferCreateInfo::new(
@@ -1576,6 +1571,32 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         self.subsystem.is_coherent_memory_type(index)
     }
 
+    #[cfg(target_os = "macos")]
+    #[inline(always)]
+    pub fn create_render_pass(
+        &self,
+        create_info: &br::RenderPassCreateInfo2,
+    ) -> br::Result<br::RenderPassObject<&'subsystem Subsystem>> {
+        Ok(unsafe {
+            br::RenderPassObject::manage(
+                br::DeviceCreateRenderPass2Extension::new_render_pass2_khr(
+                    self.subsystem,
+                    create_info,
+                    None,
+                )?,
+                self.subsystem,
+            )
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    #[inline(always)]
+    pub fn create_render_pass(
+        &self,
+        create_info: &br::RenderPassCreateInfo2,
+    ) -> br::Result<br::RenderPassObject<&'subsystem Subsystem>> {
+        br::RenderPassObject::new(self.subsystem, create_info)
+    }
+
     #[tracing::instrument(name = "AppBaseSystem::load_shader", skip(self), fields(path = %path.as_ref().display()), err(Display))]
     pub fn load_shader<'d>(
         &'d self,
@@ -2087,32 +2108,6 @@ impl<'subsystem> br::DeviceChild for RenderTextureImageAccess<'subsystem> {
 
 // MoltenVKでは一部のコマンドがpromoteされていないらしい（1.3 compatibleのはずなのに）のでこれらのコマンドはラッパー関数を通す
 // https://github.com/KhronosGroup/MoltenVK/issues/2133
-
-#[cfg(target_os = "macos")]
-#[inline(always)]
-pub fn create_render_pass2<'subsystem>(
-    subsystem: &'subsystem Subsystem,
-    create_info: &br::RenderPassCreateInfo2,
-) -> br::Result<br::RenderPassObject<&'subsystem Subsystem>> {
-    Ok(unsafe {
-        br::RenderPassObject::manage(
-            br::DeviceCreateRenderPass2Extension::new_render_pass2_khr(
-                subsystem,
-                create_info,
-                None,
-            )?,
-            subsystem,
-        )
-    })
-}
-#[cfg(not(target_os = "macos"))]
-#[inline(always)]
-pub fn create_render_pass2<'subsystem>(
-    subsystem: &'subsystem Subsystem,
-    create_info: &br::RenderPassCreateInfo2,
-) -> br::Result<br::RenderPassObject<&'subsystem Subsystem>> {
-    br::RenderPassObject::new(subsystem, create_info)
-}
 
 #[cfg(target_os = "macos")]
 #[inline(always)]

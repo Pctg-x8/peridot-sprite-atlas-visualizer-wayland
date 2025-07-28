@@ -3193,16 +3193,16 @@ impl SystemLink {
                 c"Add Sprite",
                 |options_appender| {
                     let mut dict_appender = options_appender.open_dict_entry_container().unwrap();
-                    dict_appender.append_cstr(c"handle_token");
-                    dict_appender.append_variant_cstr(
-                        &std::ffi::CString::new(dialog_token.clone()).unwrap(),
-                    );
-                    dict_appender.close();
+                    dict_appender.append_cstr(c"handle_token").unwrap();
+                    dict_appender
+                        .append_variant_cstr(&std::ffi::CString::new(dialog_token.clone()).unwrap())
+                        .unwrap();
+                    dict_appender.close().unwrap();
 
                     let mut dict_appender = options_appender.open_dict_entry_container().unwrap();
-                    dict_appender.append_cstr(c"multiple");
-                    dict_appender.append_variant_bool(true);
-                    dict_appender.close();
+                    dict_appender.append_cstr(c"multiple").unwrap();
+                    dict_appender.append_variant_bool(true).unwrap();
+                    dict_appender.close().unwrap();
                 },
             )
             .await
@@ -3265,16 +3265,16 @@ impl SystemLink {
                 c"Open",
                 |options_appender| {
                     let mut dict_appender = options_appender.open_dict_entry_container().unwrap();
-                    dict_appender.append_cstr(c"handle_token");
-                    dict_appender.append_variant_cstr(
-                        &std::ffi::CString::new(dialog_token.clone()).unwrap(),
-                    );
-                    dict_appender.close();
+                    dict_appender.append_cstr(c"handle_token").unwrap();
+                    dict_appender
+                        .append_variant_cstr(&std::ffi::CString::new(dialog_token.clone()).unwrap())
+                        .unwrap();
+                    dict_appender.close().unwrap();
 
                     let mut dict_appender = options_appender.open_dict_entry_container().unwrap();
-                    dict_appender.append_cstr(c"multiple");
-                    dict_appender.append_variant_bool(false);
-                    dict_appender.close();
+                    dict_appender.append_cstr(c"multiple").unwrap();
+                    dict_appender.append_variant_bool(false).unwrap();
+                    dict_appender.close().unwrap();
                 },
             )
             .await
@@ -3334,14 +3334,14 @@ impl SystemLink {
                 c"Save",
                 |options_appender| {
                     let mut dict_appender = options_appender.open_dict_entry_container().unwrap();
-                    dict_appender.append_cstr(c"handle_token");
-                    dict_appender.append_variant_cstr(
-                        &std::ffi::CString::new(dialog_token.clone()).unwrap(),
-                    );
-                    dict_appender.close();
+                    dict_appender.append_cstr(c"handle_token").unwrap();
+                    dict_appender
+                        .append_variant_cstr(&std::ffi::CString::new(dialog_token.clone()).unwrap())
+                        .unwrap();
+                    dict_appender.close().unwrap();
 
                     let mut dict_appender = options_appender.open_dict_entry_container().unwrap();
-                    dict_appender.append_cstr(c"filters");
+                    dict_appender.append_cstr(c"filters").unwrap();
                     let mut filter_variant_appender =
                         dict_appender.open_variant_container(c"a(sa(us))").unwrap();
                     let mut filter_appender = filter_variant_appender
@@ -3349,20 +3349,22 @@ impl SystemLink {
                         .unwrap();
                     let mut filter_struct_appender =
                         filter_appender.open_struct_container(c"sa(us)").unwrap();
-                    filter_struct_appender.append_cstr(c"Peridot Sprite Atlas asset");
+                    filter_struct_appender
+                        .append_cstr(c"Peridot Sprite Atlas asset")
+                        .unwrap();
                     let mut filter_ext_appender = filter_struct_appender
                         .open_array_container(c"(us)")
                         .unwrap();
                     let mut filter_ext_content_appender =
                         filter_ext_appender.open_struct_container(c"us").unwrap();
-                    filter_ext_content_appender.append_u32(0);
-                    filter_ext_content_appender.append_cstr(c"*.psa");
-                    filter_ext_content_appender.close();
-                    filter_ext_appender.close();
-                    filter_struct_appender.close();
-                    filter_appender.close();
-                    filter_variant_appender.close();
-                    dict_appender.close();
+                    filter_ext_content_appender.append_u32(0).unwrap();
+                    filter_ext_content_appender.append_cstr(c"*.psa").unwrap();
+                    filter_ext_content_appender.close().unwrap();
+                    filter_ext_appender.close().unwrap();
+                    filter_struct_appender.close().unwrap();
+                    filter_appender.close().unwrap();
+                    filter_variant_appender.close().unwrap();
+                    dict_appender.close().unwrap();
                 },
             )
             .await

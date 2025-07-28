@@ -565,39 +565,43 @@ impl MessageIter<'_> {
 pub trait MessageIterAppendLike {
     fn ffi_pointer_mut(&mut self) -> *mut ffi::DBusMessageIter;
 
-    #[inline(always)]
+    #[inline]
     unsafe fn append_basic(
         &mut self,
         r#type: core::ffi::c_int,
         value: *const core::ffi::c_void,
-    ) -> bool {
-        unsafe { ffi::dbus_message_iter_append_basic(self.ffi_pointer_mut(), r#type, value) != 0 }
+    ) -> Result<(), NotEnoughMemory> {
+        if unsafe {
+            ffi::dbus_message_iter_append_basic(self.ffi_pointer_mut(), r#type, value) == 0
+        } {
+            Err(NotEnoughMemory)
+        } else {
+            Ok(())
+        }
     }
 
     #[inline(always)]
-    fn append_u32(&mut self, value: u32) -> bool {
+    fn append_u32(&mut self, value: u32) -> Result<(), NotEnoughMemory> {
         unsafe { self.append_basic(ffi::DBUS_TYPE_UINT, &value as *const _ as _) }
     }
 
     #[inline(always)]
-    fn append_cstr(&mut self, value: &CStr) -> bool {
+    fn append_cstr(&mut self, value: &CStr) -> Result<(), NotEnoughMemory> {
         unsafe { self.append_basic(ffi::DBUS_TYPE_STRING, &value.as_ptr() as *const _ as _) }
     }
 
     #[inline(always)]
-    fn append_bool(&mut self, value: bool) -> bool {
+    fn append_bool(&mut self, value: bool) -> Result<(), NotEnoughMemory> {
         let v1: ffi::dbus_bool_t = if value { 1 } else { 0 };
         unsafe { self.append_basic(ffi::DBUS_TYPE_BOOLEAN, &v1 as *const _ as _) }
     }
 
+    #[inline]
     fn open_container<'p1>(
         &'p1 mut self,
         r#type: core::ffi::c_int,
         contained_signature: Option<&CStr>,
-    ) -> Option<MessageIterAppendContainer<'p1, Self>>
-    where
-        Self: Sized,
-    {
+    ) -> Result<MessageIterAppendContainer<'p1, Self>, NotEnoughMemory> {
         let mut subiter = MaybeUninit::uninit();
         if unsafe {
             ffi::dbus_message_iter_open_container(
@@ -607,44 +611,27 @@ pub trait MessageIterAppendLike {
                 subiter.as_mut_ptr(),
             ) != 0
         } {
-            Some(MessageIterAppendContainer(
+            Ok(MessageIterAppendContainer(
                 unsafe { subiter.assume_init() },
                 self,
             ))
         } else {
-            None
+            Err(NotEnoughMemory)
         }
     }
 
     #[inline(always)]
     fn open_dict_entry_container<'p1>(
         &'p1 mut self,
-    ) -> Option<MessageIterAppendContainer<'p1, Self>>
-    where
-        Self: Sized,
-    {
+    ) -> Result<MessageIterAppendContainer<'p1, Self>, NotEnoughMemory> {
         self.open_container(ffi::DBUS_TYPE_DICT_ENTRY, None)
-    }
-
-    #[inline(always)]
-    fn open_variant_container<'p1>(
-        &'p1 mut self,
-        contained_signature: &CStr,
-    ) -> Option<MessageIterAppendContainer<'p1, Self>>
-    where
-        Self: Sized,
-    {
-        self.open_container(ffi::DBUS_TYPE_VARIANT, Some(contained_signature))
     }
 
     #[inline(always)]
     fn open_array_container<'p1>(
         &'p1 mut self,
         contained_signature: &CStr,
-    ) -> Option<MessageIterAppendContainer<'p1, Self>>
-    where
-        Self: Sized,
-    {
+    ) -> Result<MessageIterAppendContainer<'p1, Self>, NotEnoughMemory> {
         self.open_container(ffi::DBUS_TYPE_ARRAY, Some(contained_signature))
     }
 
@@ -652,49 +639,38 @@ pub trait MessageIterAppendLike {
     fn open_struct_container<'p1>(
         &'p1 mut self,
         contained_signature: &CStr,
-    ) -> Option<MessageIterAppendContainer<'p1, Self>>
-    where
-        Self: Sized,
-    {
+    ) -> Result<MessageIterAppendContainer<'p1, Self>, NotEnoughMemory> {
         self.open_container(ffi::DBUS_TYPE_STRUCT, Some(contained_signature))
     }
 
-    fn append_variant_bool(&mut self, v: bool) -> bool
-    where
-        Self: Sized,
-    {
-        let Some(mut c) = self.open_variant_container(c"b") else {
-            return false;
-        };
-        if !c.append_bool(v) {
-            c.abandon();
-            return false;
-        }
-        if !c.close() {
-            tracing::warn!("closing variant container has failed");
-            return false;
-        }
-
-        true
+    #[inline(always)]
+    fn open_variant_container<'p1>(
+        &'p1 mut self,
+        contained_signature: &CStr,
+    ) -> Result<MessageIterAppendContainer<'p1, Self>, NotEnoughMemory> {
+        self.open_container(ffi::DBUS_TYPE_VARIANT, Some(contained_signature))
     }
 
-    fn append_variant_cstr(&mut self, v: &CStr) -> bool
-    where
-        Self: Sized,
-    {
-        let Some(mut c) = self.open_variant_container(c"s") else {
-            return false;
-        };
-        if !c.append_cstr(v) {
+    fn append_variant_bool(&mut self, v: bool) -> Result<(), NotEnoughMemory> {
+        let mut c = self.open_variant_container(c"b")?;
+        if c.append_bool(v) == Err(NotEnoughMemory) {
             c.abandon();
-            return false;
+            return Err(NotEnoughMemory);
         }
-        if !c.close() {
-            tracing::warn!("closing variant container has failed");
-            return false;
-        }
+        c.close()?;
 
-        true
+        Ok(())
+    }
+
+    fn append_variant_cstr(&mut self, v: &CStr) -> Result<(), NotEnoughMemory> {
+        let mut c = self.open_variant_container(c"s")?;
+        if c.append_cstr(v) == Err(NotEnoughMemory) {
+            c.abandon();
+            return Err(NotEnoughMemory);
+        }
+        c.close()?;
+
+        Ok(())
     }
 }
 
@@ -709,13 +685,13 @@ impl MessageIterAppendLike for MessageIterAppend<'_> {
     }
 }
 
-pub struct MessageIterAppendContainer<'p, P: MessageIterAppendLike + 'p>(
+pub struct MessageIterAppendContainer<'p, P: MessageIterAppendLike + ?Sized + 'p>(
     ffi::DBusMessageIter,
     &'p mut P,
 );
-unsafe impl<P: MessageIterAppendLike + Sync> Sync for MessageIterAppendContainer<'_, P> {}
-unsafe impl<P: MessageIterAppendLike + Send> Send for MessageIterAppendContainer<'_, P> {}
-impl<'p, P: MessageIterAppendLike + 'p> Drop for MessageIterAppendContainer<'_, P> {
+unsafe impl<P: MessageIterAppendLike + ?Sized + Sync> Sync for MessageIterAppendContainer<'_, P> {}
+unsafe impl<P: MessageIterAppendLike + ?Sized + Send> Send for MessageIterAppendContainer<'_, P> {}
+impl<'p, P: MessageIterAppendLike + ?Sized + 'p> Drop for MessageIterAppendContainer<'_, P> {
     #[inline]
     fn drop(&mut self) {
         tracing::warn!(
@@ -723,15 +699,15 @@ impl<'p, P: MessageIterAppendLike + 'p> Drop for MessageIterAppendContainer<'_, 
         );
     }
 }
-impl<'p, P: MessageIterAppendLike + 'p> MessageIterAppendContainer<'p, P> {
+impl<'p, P: MessageIterAppendLike + ?Sized + 'p> MessageIterAppendContainer<'p, P> {
     #[inline]
-    pub fn close(mut self) -> bool {
+    pub fn close(mut self) -> Result<(), NotEnoughMemory> {
         let r = unsafe {
             ffi::dbus_message_iter_close_container(self.1.ffi_pointer_mut(), &mut self.0 as *mut _)
                 != 0
         };
         core::mem::forget(self);
-        r
+        if r { Ok(()) } else { Err(NotEnoughMemory) }
     }
 
     #[inline]
@@ -745,7 +721,7 @@ impl<'p, P: MessageIterAppendLike + 'p> MessageIterAppendContainer<'p, P> {
         core::mem::forget(self);
     }
 }
-impl<'p, P: MessageIterAppendLike + 'p> MessageIterAppendLike
+impl<'p, P: MessageIterAppendLike + ?Sized + 'p> MessageIterAppendLike
     for MessageIterAppendContainer<'p, P>
 {
     #[inline(always)]
@@ -831,3 +807,6 @@ impl OwnedStr {
         unsafe { CStr::from_ptr(self.0.as_ptr()) }
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotEnoughMemory;

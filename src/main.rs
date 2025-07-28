@@ -246,10 +246,6 @@ struct CornerCutoutVshConstants {
     uv_trans_y: f32,
 }
 
-pub trait ViewUpdate {
-    fn update(&self, ct: &mut CompositeTree, ht: &mut HitTestTreeManager, current_sec: f32);
-}
-
 pub struct ViewInitContext<'r, 'app_system, 'subsystem> {
     pub base_system: &'app_system mut AppBaseSystem<'subsystem>,
     pub staging_scratch_buffer: &'r mut StagingScratchBufferManager<'subsystem>,
@@ -1402,7 +1398,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         &app_system.subsystem,
         2,
     )));
-
     let client_size = Cell::new(app_shell.client_size());
     let mut sc = PrimaryRenderTarget::new(SubsystemBoundSurface {
         handle: unsafe {
@@ -1412,9 +1407,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         },
         subsystem: app_system.subsystem,
     });
-
     let mut composite_renderer = CompositeRenderer::new(app_system, &sc);
-
     let mut corner_cutout_renderer = if !app_shell.server_side_decoration_provided() {
         // window decorations should be rendered by client size(not provided by window system server)
         Some(WindowCornerCutoutRenderer::new(

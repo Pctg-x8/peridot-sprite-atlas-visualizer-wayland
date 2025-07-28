@@ -2298,33 +2298,36 @@ impl<'subsystem> CompositeRenderer<'subsystem> {
                     if !in_render_pass {
                         in_render_pass = true;
 
-                        let (rp, fb) = match &render_data.render_passes[rpt_pointer] {
+                        let (rp, fb);
+                        match &render_data.render_passes[rpt_pointer] {
                             RenderPassRequirements {
                                 continued: false,
                                 after_operation: RenderPassAfterOperation::Grab,
-                            } => (self.rp_grabbed.as_transparent_ref(), unsafe {
-                                br::VkHandleRef::dangling(self.fbs_grabbed[backbuffer_index])
-                            }),
+                            } => {
+                                rp = &self.rp_grabbed;
+                                fb = self.fbs_grabbed[backbuffer_index];
+                            }
                             RenderPassRequirements {
                                 continued: false,
                                 after_operation: RenderPassAfterOperation::None,
-                            } => (self.rp_final.as_transparent_ref(), unsafe {
-                                br::VkHandleRef::dangling(self.fbs_final[backbuffer_index])
-                            }),
+                            } => {
+                                rp = &self.rp_final;
+                                fb = self.fbs_final[backbuffer_index];
+                            }
                             RenderPassRequirements {
                                 continued: true,
                                 after_operation: RenderPassAfterOperation::Grab,
-                            } => (self.rp_continue_grabbed.as_transparent_ref(), unsafe {
-                                br::VkHandleRef::dangling(
-                                    self.fbs_continue_grabbed[backbuffer_index],
-                                )
-                            }),
+                            } => {
+                                rp = &self.rp_continue_grabbed;
+                                fb = self.fbs_continue_grabbed[backbuffer_index];
+                            }
                             RenderPassRequirements {
                                 continued: true,
                                 after_operation: RenderPassAfterOperation::None,
-                            } => (self.rp_continue_final.as_transparent_ref(), unsafe {
-                                br::VkHandleRef::dangling(self.fbs_continue_final[backbuffer_index])
-                            }),
+                            } => {
+                                rp = &self.rp_continue_final;
+                                fb = self.fbs_continue_final[backbuffer_index];
+                            }
                         };
 
                         rec = rec.inject(|r| {
@@ -2332,8 +2335,8 @@ impl<'subsystem> CompositeRenderer<'subsystem> {
                                 r,
                                 self.gfx_device,
                                 &br::RenderPassBeginInfo::new(
-                                    &rp,
-                                    &fb,
+                                    rp,
+                                    br::VkHandleRef::from_raw_ref(&fb),
                                     render_region,
                                     &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 1.0])],
                                 ),
@@ -2395,33 +2398,36 @@ impl<'subsystem> CompositeRenderer<'subsystem> {
                     if !in_render_pass {
                         in_render_pass = true;
 
-                        let (rp, fb) = match &render_data.render_passes[rpt_pointer] {
+                        let (rp, fb);
+                        match &render_data.render_passes[rpt_pointer] {
                             RenderPassRequirements {
                                 continued: false,
                                 after_operation: RenderPassAfterOperation::Grab,
-                            } => (self.rp_grabbed.as_transparent_ref(), unsafe {
-                                br::VkHandleRef::dangling(self.fbs_grabbed[backbuffer_index])
-                            }),
+                            } => {
+                                rp = &self.rp_grabbed;
+                                fb = self.fbs_grabbed[backbuffer_index];
+                            }
                             RenderPassRequirements {
                                 continued: false,
                                 after_operation: RenderPassAfterOperation::None,
-                            } => (self.rp_final.as_transparent_ref(), unsafe {
-                                br::VkHandleRef::dangling(self.fbs_final[backbuffer_index])
-                            }),
+                            } => {
+                                rp = &self.rp_final;
+                                fb = self.fbs_final[backbuffer_index];
+                            }
                             RenderPassRequirements {
                                 continued: true,
                                 after_operation: RenderPassAfterOperation::Grab,
-                            } => (self.rp_continue_grabbed.as_transparent_ref(), unsafe {
-                                br::VkHandleRef::dangling(
-                                    self.fbs_continue_grabbed[backbuffer_index],
-                                )
-                            }),
+                            } => {
+                                rp = &self.rp_continue_grabbed;
+                                fb = self.fbs_continue_grabbed[backbuffer_index];
+                            }
                             RenderPassRequirements {
                                 continued: true,
                                 after_operation: RenderPassAfterOperation::None,
-                            } => (self.rp_continue_final.as_transparent_ref(), unsafe {
-                                br::VkHandleRef::dangling(self.fbs_continue_final[backbuffer_index])
-                            }),
+                            } => {
+                                rp = &self.rp_continue_final;
+                                fb = self.fbs_continue_final[backbuffer_index];
+                            }
                         };
 
                         rec = rec.inject(|r| {
@@ -2429,8 +2435,8 @@ impl<'subsystem> CompositeRenderer<'subsystem> {
                                 r,
                                 self.gfx_device,
                                 &br::RenderPassBeginInfo::new(
-                                    &rp,
-                                    &fb,
+                                    rp,
+                                    br::VkHandleRef::from_raw_ref(&fb),
                                     render_region,
                                     &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 1.0])],
                                 ),
@@ -2450,33 +2456,36 @@ impl<'subsystem> CompositeRenderer<'subsystem> {
                     if !in_render_pass {
                         in_render_pass = true;
 
-                        let (rp, fb) = match &render_data.render_passes[rpt_pointer] {
+                        let (rp, fb);
+                        match &render_data.render_passes[rpt_pointer] {
                             RenderPassRequirements {
                                 continued: false,
                                 after_operation: RenderPassAfterOperation::Grab,
-                            } => (self.rp_grabbed.as_transparent_ref(), unsafe {
-                                br::VkHandleRef::dangling(self.fbs_grabbed[backbuffer_index])
-                            }),
+                            } => {
+                                rp = &self.rp_grabbed;
+                                fb = self.fbs_grabbed[backbuffer_index];
+                            }
                             RenderPassRequirements {
                                 continued: false,
                                 after_operation: RenderPassAfterOperation::None,
-                            } => (self.rp_final.as_transparent_ref(), unsafe {
-                                br::VkHandleRef::dangling(self.fbs_final[backbuffer_index])
-                            }),
+                            } => {
+                                rp = &self.rp_final;
+                                fb = self.fbs_final[backbuffer_index];
+                            }
                             RenderPassRequirements {
                                 continued: true,
                                 after_operation: RenderPassAfterOperation::Grab,
-                            } => (self.rp_continue_grabbed.as_transparent_ref(), unsafe {
-                                br::VkHandleRef::dangling(
-                                    self.fbs_continue_grabbed[backbuffer_index],
-                                )
-                            }),
+                            } => {
+                                rp = &self.rp_continue_grabbed;
+                                fb = self.fbs_continue_grabbed[backbuffer_index];
+                            }
                             RenderPassRequirements {
                                 continued: true,
                                 after_operation: RenderPassAfterOperation::None,
-                            } => (self.rp_continue_final.as_transparent_ref(), unsafe {
-                                br::VkHandleRef::dangling(self.fbs_continue_final[backbuffer_index])
-                            }),
+                            } => {
+                                rp = &self.rp_continue_final;
+                                fb = self.fbs_continue_final[backbuffer_index];
+                            }
                         };
 
                         rec = rec.inject(|r| {
@@ -2484,8 +2493,8 @@ impl<'subsystem> CompositeRenderer<'subsystem> {
                                 r,
                                 self.gfx_device,
                                 &br::RenderPassBeginInfo::new(
-                                    &rp,
-                                    &fb,
+                                    rp,
+                                    br::VkHandleRef::from_raw_ref(&fb),
                                     render_region,
                                     &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 1.0])],
                                 ),
@@ -2553,33 +2562,36 @@ impl<'subsystem> CompositeRenderer<'subsystem> {
                     if !in_render_pass {
                         in_render_pass = true;
 
-                        let (rp, fb) = match &render_data.render_passes[rpt_pointer] {
+                        let (rp, fb);
+                        match &render_data.render_passes[rpt_pointer] {
                             RenderPassRequirements {
                                 continued: false,
                                 after_operation: RenderPassAfterOperation::Grab,
-                            } => (self.rp_grabbed.as_transparent_ref(), unsafe {
-                                br::VkHandleRef::dangling(self.fbs_grabbed[backbuffer_index])
-                            }),
+                            } => {
+                                rp = &self.rp_grabbed;
+                                fb = self.fbs_grabbed[backbuffer_index];
+                            }
                             RenderPassRequirements {
                                 continued: false,
                                 after_operation: RenderPassAfterOperation::None,
-                            } => (self.rp_final.as_transparent_ref(), unsafe {
-                                br::VkHandleRef::dangling(self.fbs_final[backbuffer_index])
-                            }),
+                            } => {
+                                rp = &self.rp_final;
+                                fb = self.fbs_final[backbuffer_index];
+                            }
                             RenderPassRequirements {
                                 continued: true,
                                 after_operation: RenderPassAfterOperation::Grab,
-                            } => (self.rp_continue_grabbed.as_transparent_ref(), unsafe {
-                                br::VkHandleRef::dangling(
-                                    self.fbs_continue_grabbed[backbuffer_index],
-                                )
-                            }),
+                            } => {
+                                rp = &self.rp_continue_grabbed;
+                                fb = self.fbs_continue_grabbed[backbuffer_index];
+                            }
                             RenderPassRequirements {
                                 continued: true,
                                 after_operation: RenderPassAfterOperation::None,
-                            } => (self.rp_continue_final.as_transparent_ref(), unsafe {
-                                br::VkHandleRef::dangling(self.fbs_continue_final[backbuffer_index])
-                            }),
+                            } => {
+                                rp = &self.rp_continue_final;
+                                fb = self.fbs_continue_final[backbuffer_index];
+                            }
                         };
 
                         rec = rec.inject(|r| {
@@ -2587,8 +2599,8 @@ impl<'subsystem> CompositeRenderer<'subsystem> {
                                 r,
                                 self.gfx_device,
                                 &br::RenderPassBeginInfo::new(
-                                    &rp,
-                                    &fb,
+                                    rp,
+                                    br::VkHandleRef::from_raw_ref(&fb),
                                     render_region,
                                     &[br::ClearValue::color_f32([0.0, 0.0, 0.0, 1.0])],
                                 ),

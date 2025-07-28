@@ -2079,7 +2079,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                         )],
                                     &[],
                                     &[
-                                        // Note: 0番目はbackdropなしの番兵としてつかっている
+                                        // Note: 0番目はbackdropなしの番兵としてつかわれるので初期化しておく
                                         br::ImageMemoryBarrier2::new(
                                             composite_renderer.default_backdrop_buffer(),
                                             br::ImageSubresourceRange::new(

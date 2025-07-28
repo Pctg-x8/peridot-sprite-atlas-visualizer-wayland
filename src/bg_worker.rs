@@ -59,7 +59,7 @@ pub struct BackgroundWorker<'subsystem> {
     teardown_signal: Arc<AtomicBool>,
     view_feedback_receiver: crossbeam::channel::Receiver<BackgroundWorkerViewFeedback>,
     #[cfg(target_os = "linux")]
-    main_thread_waker: Arc<crate::platform::linux::EventFD>,
+    main_thread_waker: Arc<linux_eventfd::EventFD>,
     #[cfg(windows)]
     main_thread_waker: Arc<crate::platform::win32::event::EventObject>,
     #[cfg(target_os = "macos")]
@@ -85,10 +85,9 @@ impl<'subsystem> BackgroundWorker<'subsystem> {
         let (view_feedback_sender, view_feedback_receiver) = crossbeam::channel::unbounded();
         #[cfg(target_os = "linux")]
         let main_thread_waker = Arc::new(
-            crate::platform::linux::EventFD::new(
+            linux_eventfd::EventFD::new(
                 0,
-                crate::platform::linux::EventFDOptions::CLOEXEC
-                    | crate::platform::linux::EventFDOptions::NONBLOCK,
+                linux_eventfd::EventFDOptions::CLOEXEC | linux_eventfd::EventFDOptions::NONBLOCK,
             )
             .unwrap(),
         );
@@ -193,7 +192,7 @@ impl<'subsystem> BackgroundWorker<'subsystem> {
 
     #[cfg(target_os = "linux")]
     #[inline(always)]
-    pub fn main_thread_waker(&self) -> &crate::platform::linux::EventFD {
+    pub fn main_thread_waker(&self) -> &linux_eventfd::EventFD {
         &self.main_thread_waker
     }
 

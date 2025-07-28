@@ -810,6 +810,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9fbbcab51052fe104eb5e5d351cf728d30a5be1fe14d9be8a3b097481fb97de"
 
 [[package]]
+name = "linux-epoll"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "linux-eventfd"
+version = "0.1.0"
+dependencies = [
+ "bitflags 2.9.1",
+ "libc",
+]
+
+[[package]]
+name = "linux-input-event-codes"
+version = "0.1.0"
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1061,6 +1080,9 @@ dependencies = [
  "harfbuzz",
  "image",
  "libc",
+ "linux-epoll",
+ "linux-eventfd",
+ "linux-input-event-codes",
  "lyon_geom",
  "microsoft-sdk-locator",
  "objc-rt",

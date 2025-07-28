@@ -1,6 +1,9 @@
 [workspace]
 members = [
     "devtools/perflog-printer",
+    "platform/linux/epoll",
+    "platform/linux/eventfd",
+    "platform/linux/input-event-codes",
     "platform/win32/registry",
     "shared/ffi-common",
     "shared/perflog-proto",
@@ -45,6 +48,7 @@ quick-xml = "0.37.5"
 thiserror = "2.0.12"
 freetype2 = { git = "https://github.com/Pctg-x8/ft2-rs" }
 windows = "0.61"
+libc = "0.2"
 
 [dependencies]
 # Note: MoltenVKが正しくVulkan 1.3以上に対応してないので（promoteされたシンボルの一部がないらしい）Allow1_4APIsはプラットフォームfeature側で有効にする
@@ -60,7 +64,7 @@ quick-xml.workspace = true
 lyon_geom = "1.0.6"
 tracing.workspace = true
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
-libc = "0.2.172"
+libc.workspace = true
 smol = "2"
 image = "0.25.6"
 crossbeam = "0.8.4"
@@ -76,6 +80,11 @@ desktop-portal-proto.path = "./thirdparty/proto/desktop-portal"
 wayland = { path = "./thirdparty/wayland", optional = true }
 dbus = { path = "./thirdparty/dbus" }
 fontconfig = { path = "./thirdparty/fontconfig" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+linux-epoll = { path = "./platform/linux/epoll" }
+linux-eventfd = { path = "./platform/linux/eventfd" }
+linux-input-event-codes = { path = "./platform/linux/input-event-codes" }
 
 [target.'cfg(windows)'.build-dependencies]
 microsoft-sdk-locator.path = "./thirdparty/microsoft-sdk-locator"

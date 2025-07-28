@@ -1,4 +1,4 @@
-#![allow(non_camel_case_types, dead_code)]
+#![allow(non_camel_case_types)]
 
 use std::os::fd::AsRawFd;
 
@@ -49,20 +49,23 @@ pub const EPOLL_IOC_TYPE: core::ffi::c_uint = 0x8a;
 pub const EPIOCSPARAMS: libc::Ioctl = libc::_IOW::<epoll_params>(EPOLL_IOC_TYPE, 0x01);
 pub const EPIOCGPARAMS: libc::Ioctl = libc::_IOR::<epoll_params>(EPOLL_IOC_TYPE, 0x02);
 
+#[link(name = "c")]
 unsafe extern "C" {
-    pub unsafe fn epoll_create1(flags: core::ffi::c_int) -> core::ffi::c_int;
-    pub unsafe fn epoll_ctl(
+    pub fn epoll_create1(flags: core::ffi::c_int) -> core::ffi::c_int;
+    pub fn epoll_ctl(
         epfd: core::ffi::c_int,
         op: core::ffi::c_int,
         fd: core::ffi::c_int,
         event: *mut epoll_event,
     ) -> core::ffi::c_int;
-    pub unsafe fn epoll_wait(
+    pub fn epoll_wait(
         epfd: core::ffi::c_int,
         events: *mut epoll_event,
         maxevents: core::ffi::c_int,
         timeout: core::ffi::c_int,
     ) -> core::ffi::c_int;
+
+    fn close(fd: core::ffi::c_int) -> core::ffi::c_int;
 }
 
 #[derive(Clone, Copy)]
@@ -89,7 +92,7 @@ impl Drop for Epoll {
     #[inline(always)]
     fn drop(&mut self) {
         unsafe {
-            libc::close(self.0);
+            close(self.0);
         }
     }
 }

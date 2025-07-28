@@ -5,6 +5,7 @@ use std::{
 };
 
 use bedrock::{self as br, SurfaceCreateInfo};
+use linux_input_event_codes::{BTN_LEFT, BTN_RIGHT};
 use wayland::{self as wl, WpCursorShapeDeviceV1Shape, WpCursorShapeManagerV1};
 
 use crate::{
@@ -12,10 +13,7 @@ use crate::{
     base_system::AppBaseSystem,
     hittest::{CursorShape, Role},
     input::PointerInputManager,
-    platform::linux::{
-        MemoryMapFlags, MemoryProtectionFlags, OpenFlags, TemporalSharedMemory,
-        input_event_codes::{BTN_LEFT, BTN_RIGHT},
-    },
+    platform::linux::{MemoryMapFlags, MemoryProtectionFlags, OpenFlags, TemporalSharedMemory},
 };
 
 struct DataOfferSession {
@@ -652,7 +650,6 @@ pub struct AppShell<'a, 'subsystem> {
     shell_event_handler: Box<UnsafeCell<WaylandShellEventHandler<'a, 'subsystem>>>,
     display: wl::Display,
     content_surface: core::ptr::NonNull<wl::Surface>,
-    xdg_surface: core::ptr::NonNull<wl::XdgSurface>,
     xdg_toplevel: core::ptr::NonNull<wl::XdgToplevel>,
     zxdg_exporter_v2: Option<core::ptr::NonNull<wl::ZxdgExporterV2>>,
     cursor_shape_device: core::ptr::NonNull<wl::WpCursorShapeDeviceV1>,
@@ -1078,6 +1075,7 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
         subcompositor.leak();
         viewporter.leak();
         xdg_wm_base.leak();
+        xdg_surface.leak();
         seat.leak();
         cursor_shape_manager.leak();
         pointer.leak();
@@ -1102,7 +1100,6 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             shell_event_handler,
             display: dp,
             content_surface: main_surface.unwrap(),
-            xdg_surface: xdg_surface.unwrap(),
             xdg_toplevel: xdg_toplevel.unwrap(),
             cursor_shape_device: cursor_shape_device.unwrap(),
             frame_callback: Cell::new(frame.unwrap()),

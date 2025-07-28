@@ -131,7 +131,7 @@ pub enum AppEvent {
 pub struct AppEventBus {
     queue: UnsafeCell<VecDeque<AppEvent>>,
     #[cfg(target_os = "linux")]
-    efd: platform::linux::EventFD,
+    efd: linux_eventfd::EventFD,
     #[cfg(windows)]
     event_notify: platform::win32::event::EventObject,
 }
@@ -1355,7 +1355,7 @@ fn main() {
     let events = AppEventBus {
         queue: UnsafeCell::new(VecDeque::new()),
         #[cfg(target_os = "linux")]
-        efd: platform::linux::EventFD::new(0, platform::linux::EventFDOptions::NONBLOCK).unwrap(),
+        efd: linux_eventfd::EventFD::new(0, linux_eventfd::EventFDOptions::NONBLOCK).unwrap(),
         #[cfg(windows)]
         event_notify: platform::win32::event::EventObject::new(None, true, false).unwrap(),
     };
@@ -2046,31 +2046,29 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     #[cfg(target_os = "linux")]
     let mut poll_fd_pool = RefCell::new(PollFDPool::new());
     #[cfg(target_os = "linux")]
-    let epoll = platform::linux::Epoll::new(0).unwrap();
+    let epoll = linux_epoll::Epoll::new(0).unwrap();
     #[cfg(target_os = "linux")]
     epoll
         .add(
             &events.efd,
-            platform::linux::EPOLLIN,
-            platform::linux::EpollData::U64(poll_fd_pool.get_mut().alloc(PollFDType::AppEventBus)),
+            linux_epoll::EPOLLIN,
+            linux_epoll::EpollData::U64(poll_fd_pool.get_mut().alloc(PollFDType::AppEventBus)),
         )
         .unwrap();
     #[cfg(target_os = "linux")]
     epoll
         .add(
             &app_shell.display_fd(),
-            platform::linux::EPOLLIN,
-            platform::linux::EpollData::U64(
-                poll_fd_pool.get_mut().alloc(PollFDType::AppShellDisplay),
-            ),
+            linux_epoll::EPOLLIN,
+            linux_epoll::EpollData::U64(poll_fd_pool.get_mut().alloc(PollFDType::AppShellDisplay)),
         )
         .unwrap();
     #[cfg(target_os = "linux")]
     epoll
         .add(
             bg_worker.main_thread_waker(),
-            platform::linux::EPOLLIN,
-            platform::linux::EpollData::U64(
+            linux_epoll::EPOLLIN,
+            linux_epoll::EpollData::U64(
                 poll_fd_pool
                     .get_mut()
                     .alloc(PollFDType::BackgroundWorkerViewFeedback),
@@ -2109,7 +2107,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
 
     #[cfg(target_os = "linux")]
     let mut epoll_events =
-        [const { core::mem::MaybeUninit::<platform::linux::epoll_event>::uninit() }; 8];
+        [const { core::mem::MaybeUninit::<linux_epoll::epoll_event>::uninit() }; 8];
     let t = std::time::Instant::now();
     let mut _profiler = ProfilingContext::init("./local/profile");
     'app: loop {
@@ -2161,16 +2159,16 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     Some(&PollFDType::DBusWatch(watch_ptr)) => {
                         let watch_ptr = unsafe { &mut *watch_ptr };
                         let mut flags = dbus::WatchFlags::empty();
-                        if (e.events & platform::linux::EPOLLIN) != 0 {
+                        if (e.events & linux_epoll::EPOLLIN) != 0 {
                             flags |= dbus::WatchFlags::READABLE;
                         }
-                        if (e.events & platform::linux::EPOLLOUT) != 0 {
+                        if (e.events & linux_epoll::EPOLLOUT) != 0 {
                             flags |= dbus::WatchFlags::WRITABLE;
                         }
-                        if (e.events & platform::linux::EPOLLERR) != 0 {
+                        if (e.events & linux_epoll::EPOLLERR) != 0 {
                             flags |= dbus::WatchFlags::ERROR;
                         }
-                        if (e.events & platform::linux::EPOLLHUP) != 0 {
+                        if (e.events & linux_epoll::EPOLLHUP) != 0 {
                             flags |= dbus::WatchFlags::HANGUP;
                         }
                         if !watch_ptr.handle(flags) {
@@ -4226,7 +4224,7 @@ impl PollFDPool {
 
 #[cfg(target_os = "linux")]
 struct DBusWatcher<'e> {
-    epoll: &'e platform::linux::Epoll,
+    epoll: &'e linux_epoll::Epoll,
     fd_pool: &'e RefCell<PollFDPool>,
     fd_to_pool_index: HashMap<core::ffi::c_int, u64>,
 }
@@ -4237,10 +4235,10 @@ impl dbus::WatchFunction for DBusWatcher<'_> {
             let mut event_type = 0;
             let flags = watch.flags();
             if flags.contains(dbus::WatchFlags::READABLE) {
-                event_type |= platform::linux::EPOLLIN;
+                event_type |= linux_epoll::EPOLLIN;
             }
             if flags.contains(dbus::WatchFlags::WRITABLE) {
-                event_type |= platform::linux::EPOLLOUT;
+                event_type |= linux_epoll::EPOLLOUT;
             }
 
             let pool_index = self
@@ -4252,7 +4250,7 @@ impl dbus::WatchFunction for DBusWatcher<'_> {
                 .add(
                     &watch.as_raw_fd(),
                     event_type,
-                    platform::linux::EpollData::U64(pool_index),
+                    linux_epoll::EpollData::U64(pool_index),
                 )
                 .unwrap();
             self.fd_to_pool_index.insert(watch.as_raw_fd(), pool_index);
@@ -4283,10 +4281,10 @@ impl dbus::WatchFunction for DBusWatcher<'_> {
         let mut event_type = 0;
         let flags = watch.flags();
         if flags.contains(dbus::WatchFlags::READABLE) {
-            event_type |= platform::linux::EPOLLIN;
+            event_type |= linux_epoll::EPOLLIN;
         }
         if flags.contains(dbus::WatchFlags::WRITABLE) {
-            event_type |= platform::linux::EPOLLOUT;
+            event_type |= linux_epoll::EPOLLOUT;
         }
 
         if watch.enabled() {
@@ -4299,7 +4297,7 @@ impl dbus::WatchFunction for DBusWatcher<'_> {
                 .add(
                     &watch.as_raw_fd(),
                     event_type,
-                    platform::linux::EpollData::U64(pool_index),
+                    linux_epoll::EpollData::U64(pool_index),
                 )
                 .unwrap();
             self.fd_to_pool_index.insert(watch.as_raw_fd(), pool_index);

@@ -1,14 +1,8 @@
-mod epoll;
-mod eventfd;
-pub mod input_event_codes;
 pub mod time;
 
 use core::ptr::NonNull;
 
 use bitflags::bitflags;
-
-pub use self::epoll::*;
-pub use self::eventfd::*;
 
 bitflags! {
     #[derive(Clone, Copy)]

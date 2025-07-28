@@ -3182,35 +3182,18 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     app_state.borrow_mut().toggle_menu();
                 }
                 AppEvent::AppMenuRequestAddSprite => {
-                    #[cfg(target_os = "linux")]
                     task_worker
                         .spawn(app_menu_on_add_sprite(
                             syslink, app_shell, events, app_state,
                         ))
                         .detach();
-                    #[cfg(windows)]
-                    task_worker
-                        .spawn(app_menu_on_add_sprite(
-                            syslink, app_shell, app_state, events,
-                        ))
-                        .detach();
                 }
                 AppEvent::AppMenuRequestOpen => {
-                    #[cfg(target_os = "linux")]
-                    task_worker
-                        .spawn(app_menu_on_open(syslink, app_shell, app_state, events))
-                        .detach();
-                    #[cfg(windows)]
                     task_worker
                         .spawn(app_menu_on_open(syslink, app_shell, app_state, events))
                         .detach();
                 }
                 AppEvent::AppMenuRequestSave => {
-                    #[cfg(target_os = "linux")]
-                    task_worker
-                        .spawn(app_menu_on_save(syslink, app_shell, app_state, events))
-                        .detach();
-                    #[cfg(windows)]
                     task_worker
                         .spawn(app_menu_on_save(syslink, app_shell, app_state, events))
                         .detach();
@@ -3254,17 +3237,16 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     }
 }
 
-#[cfg(windows)]
-async fn app_menu_on_add_sprite<'sys, 'subsystem>(
+async fn app_menu_on_add_sprite<'subsystem>(
     syslink: &SystemLink,
-    shell: &'sys AppShell<'sys, 'subsystem>,
-    app_state: &'sys RefCell<AppState<'subsystem>>,
-    event_bus: &AppEventBus,
+    shell: &AppShell<'_, 'subsystem>,
+    events: &AppEventBus,
+    app_state: &RefCell<AppState<'subsystem>>,
 ) {
     let added_paths = match syslink.select_sprite_files(shell).await {
         Ok(x) => x,
         Err(e) => {
-            e.ui_feedback(event_bus);
+            e.ui_feedback(events);
             return;
         }
     };
@@ -3274,19 +3256,15 @@ async fn app_menu_on_add_sprite<'sys, 'subsystem>(
         .add_sprites_from_file_paths(added_paths);
 }
 
-#[cfg(windows)]
 async fn app_menu_on_open<'sys, 'subsystem>(
-    syslink: &SystemLink,
-    shell: &'sys AppShell<'sys, 'subsystem>,
+    syslink: &'sys SystemLink,
+    shell: &'sys AppShell<'_, 'subsystem>,
     app_state: &'sys RefCell<AppState<'subsystem>>,
     event_bus: &AppEventBus,
 ) {
     let path = match syslink.select_open_file(shell).await {
         Ok(Some(x)) => x,
-        Ok(None) => {
-            tracing::warn!("operation was cancelled");
-            return;
-        }
+        Ok(None) => return,
         Err(e) => {
             e.ui_feedback(event_bus);
             return;
@@ -3300,91 +3278,22 @@ async fn app_menu_on_open<'sys, 'subsystem>(
     }
 }
 
-#[cfg(windows)]
 async fn app_menu_on_save<'sys, 'subsystem>(
-    syslink: &SystemLink,
-    shell: &'sys AppShell<'sys, 'subsystem>,
+    syslink: &'sys SystemLink,
+    shell: &'sys AppShell<'_, 'subsystem>,
     app_state: &'sys RefCell<AppState<'subsystem>>,
     event_bus: &AppEventBus,
 ) {
     let path = match syslink.select_save_file(shell).await {
         Ok(Some(x)) => x,
-        Ok(None) => {
-            tracing::warn!("operation was cancelled");
-            return;
-        }
+        Ok(None) => return,
         Err(e) => {
             e.ui_feedback(event_bus);
             return;
         }
     };
 
-    if app_state.borrow_mut().save(path).is_err() {
-        event_bus.push(AppEvent::UIMessageDialogRequest {
-            content: "Saving failed".into(),
-        });
-    }
-}
-
-#[cfg(target_os = "linux")]
-async fn app_menu_on_add_sprite<'subsystem>(
-    syslink: &SystemLink,
-    shell: &AppShell<'_, 'subsystem>,
-    events: &AppEventBus,
-    app_state: &RefCell<AppState<'subsystem>>,
-) {
-    // TODO: これUIだして待つべきか？ローカルだからあんまり待たないような気もするが......
-    let resp = match syslink.select_sprite_files(shell).await {
-        Ok(x) => x,
-        Err(e) => {
-            e.ui_feedback(events);
-            return;
-        }
-    };
-
-    app_state.borrow_mut().add_sprites_by_uri_list(resp.uris);
-}
-
-#[cfg(target_os = "linux")]
-async fn app_menu_on_open<'sys, 'subsystem>(
-    syslink: &'sys SystemLink,
-    shell: &'sys AppShell<'_, 'subsystem>,
-    app_state: &'sys RefCell<AppState<'subsystem>>,
-    event_bus: &AppEventBus,
-) {
-    let uri = match syslink.select_open_file(shell).await {
-        Ok(x) => x,
-        Err(e) => {
-            e.ui_feedback(event_bus);
-            return;
-        }
-    };
-
-    let path = uri.to_str().unwrap().strip_prefix("file://").unwrap();
-    if app_state.borrow_mut().load(path).is_err() {
-        event_bus.push(AppEvent::UIMessageDialogRequest {
-            content: "Opening failed".into(),
-        });
-    }
-}
-
-#[cfg(target_os = "linux")]
-async fn app_menu_on_save<'sys, 'subsystem>(
-    syslink: &'sys SystemLink,
-    shell: &'sys AppShell<'_, 'subsystem>,
-    app_state: &'sys RefCell<AppState<'subsystem>>,
-    event_bus: &AppEventBus,
-) {
-    let uri = match syslink.select_save_file(shell).await {
-        Ok(x) => x,
-        Err(e) => {
-            e.ui_feedback(event_bus);
-            return;
-        }
-    };
-
-    let path = uri.to_str().unwrap().strip_prefix("file://").unwrap();
-    if app_state.borrow_mut().save(path).is_err() {
+    if app_state.borrow_mut().save(&path).is_err() {
         event_bus.push(AppEvent::UIMessageDialogRequest {
             content: "Saving failed".into(),
         });
@@ -3869,6 +3778,13 @@ impl DesktopPortalFileChooserOpenFileResponse {
 
         data
     }
+
+    #[inline(always)]
+    fn uri_path_part(uri: &str) -> &str {
+        // desktop-portal file chooser returns uri strings that should start with "file://"(by protocol)
+        debug_assert!(uri.starts_with("file://"));
+        unsafe { uri.strip_prefix("file://").unwrap_unchecked() }
+    }
 }
 
 #[cfg(windows)]
@@ -4054,7 +3970,7 @@ impl SystemLink {
         {
             Ok(x) => x,
             Err(e) if e.code() == windows::Win32::Foundation::S_OK => {
-                // operation was cancelled
+                tracing::warn!("Operation was cancelled");
                 return Ok(None);
             }
             Err(e) => {
@@ -4112,7 +4028,7 @@ impl SystemLink {
             {
                 Ok(x) => x,
                 Err(e) if e.code() == windows::Win32::Foundation::S_OK => {
-                    // operation was cancelled
+                    tracing::warn!("Operation was cancelled");
                     return Ok(None);
                 }
                 Err(e) => {
@@ -4137,8 +4053,6 @@ pub enum SelectSpriteFilesError {
     OpenFileFailed(dbus::Error),
     #[error("FileChooser.SaveFile failed: {0:?}")]
     SaveFileFailed(dbus::Error),
-    #[error("Operation was cancelled")]
-    OperationCancelled,
 }
 #[cfg(target_os = "linux")]
 impl SelectSpriteFilesError {
@@ -4159,9 +4073,13 @@ impl SelectSpriteFilesError {
                     content: "FileChooser.SaveFile failed".into(),
                 });
             }
-            Self::OperationCancelled => (/* no feedback */),
         }
     }
+}
+
+const fn dbus_cstr2str<'s>(x: &'s core::ffi::CStr) -> &'s str {
+    // d-bus strings can be always assumed as valid UTF-8 sequence
+    unsafe { str::from_utf8_unchecked(x.to_bytes()) }
 }
 
 #[cfg(target_os = "linux")]
@@ -4186,7 +4104,7 @@ impl SystemLink {
     pub async fn select_sprite_files(
         &self,
         for_shell: &AppShell<'_, '_>,
-    ) -> Result<DesktopPortalFileChooserOpenFileResponse, SelectSpriteFilesError> {
+    ) -> Result<Vec<std::path::PathBuf>, SelectSpriteFilesError> {
         let file_chooser = self
             .dp
             .try_get_file_chooser(&self.dbus)
@@ -4243,13 +4161,21 @@ impl SystemLink {
         let mut resp_iter = resp.iter();
         let response = DesktopPortalRequestResponseCode::read(&mut resp_iter);
         if response != DesktopPortalRequestResponseCode::Success {
-            return Err(SelectSpriteFilesError::OperationCancelled);
+            tracing::warn!(?response, "Operation was cancelled");
+            return Ok(Vec::new());
         }
 
         resp_iter.next();
-        Ok(DesktopPortalFileChooserOpenFileResponse::read_all(
-            &mut resp_iter,
-        ))
+        let res = DesktopPortalFileChooserOpenFileResponse::read_all(&mut resp_iter);
+        Ok(res
+            .uris
+            .into_iter()
+            .map(|x| {
+                std::path::PathBuf::from(DesktopPortalFileChooserOpenFileResponse::uri_path_part(
+                    dbus_cstr2str(&x),
+                ))
+            })
+            .collect())
     }
 
     #[tracing::instrument(
@@ -4260,7 +4186,7 @@ impl SystemLink {
     pub async fn select_open_file(
         &self,
         for_shell: &AppShell<'_, '_>,
-    ) -> Result<std::ffi::CString, SelectSpriteFilesError> {
+    ) -> Result<Option<std::path::PathBuf>, SelectSpriteFilesError> {
         let file_chooser = self
             .dp
             .try_get_file_chooser(&self.dbus)
@@ -4317,13 +4243,18 @@ impl SystemLink {
         let mut resp_iter = resp.iter();
         let response = DesktopPortalRequestResponseCode::read(&mut resp_iter);
         if response != DesktopPortalRequestResponseCode::Success {
-            return Err(SelectSpriteFilesError::OperationCancelled);
+            tracing::warn!(?response, "Operation was cancelled");
+            return Ok(None);
         }
 
         resp_iter.next();
-        let mut res = DesktopPortalFileChooserOpenFileResponse::read_all(&mut resp_iter);
-        assert!(res.uris.len() == 1);
-        Ok(unsafe { res.uris.pop().unwrap_unchecked() })
+        let res = DesktopPortalFileChooserOpenFileResponse::read_all(&mut resp_iter);
+        match res.uris[..] {
+            [] => Ok(None),
+            [ref uri, ..] => Ok(Some(std::path::PathBuf::from(
+                DesktopPortalFileChooserOpenFileResponse::uri_path_part(dbus_cstr2str(uri)),
+            ))),
+        }
     }
 
     #[tracing::instrument(
@@ -4334,7 +4265,7 @@ impl SystemLink {
     pub async fn select_save_file(
         &self,
         for_shell: &AppShell<'_, '_>,
-    ) -> Result<std::ffi::CString, SelectSpriteFilesError> {
+    ) -> Result<Option<std::path::PathBuf>, SelectSpriteFilesError> {
         let file_chooser = self
             .dp
             .try_get_file_chooser(&self.dbus)
@@ -4410,13 +4341,18 @@ impl SystemLink {
         let mut resp_iter = resp.iter();
         let response = DesktopPortalRequestResponseCode::read(&mut resp_iter);
         if response != DesktopPortalRequestResponseCode::Success {
-            return Err(SelectSpriteFilesError::OperationCancelled);
+            tracing::warn!(?response, "Operation was cancelled");
+            return Ok(None);
         }
 
         resp_iter.next();
-        let mut res = DesktopPortalFileChooserOpenFileResponse::read_all(&mut resp_iter);
-        assert!(res.uris.len() == 1);
-        Ok(unsafe { res.uris.pop().unwrap_unchecked() })
+        let res = DesktopPortalFileChooserOpenFileResponse::read_all(&mut resp_iter);
+        match res.uris[..] {
+            [] => Ok(None),
+            [ref uri, ..] => Ok(Some(std::path::PathBuf::from(
+                DesktopPortalFileChooserOpenFileResponse::uri_path_part(dbus_cstr2str(uri)),
+            ))),
+        }
     }
 }
 

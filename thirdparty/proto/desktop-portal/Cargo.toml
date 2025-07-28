@@ -1,0 +1,9 @@
+[package]
+name = "desktop-portal-proto"
+description = "common protocols defined in Desktop Portal"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dbus.path = "../../dbus"
+dbus-proto.path = "../dbus"

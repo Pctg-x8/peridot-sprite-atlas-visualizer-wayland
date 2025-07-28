@@ -1,3 +1,15 @@
+macro_rules! warn_bailout_scope {
+    ($label: lifetime, $x: expr, $msg: literal) => {
+        match $x {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::warn!(reason = ?e, $msg);
+                break $label;
+            }
+        }
+    }
+}
+
 mod app_state;
 mod atlas;
 mod base_system;
@@ -3301,47 +3313,6 @@ async fn app_menu_on_save<'sys, 'subsystem>(
 }
 
 #[cfg(unix)]
-fn dbus_introspect(
-    dbus: &dbus::Connection,
-    dest: Option<&core::ffi::CStr>,
-    path: &core::ffi::CStr,
-) -> u32 {
-    dbus.send_with_serial(
-        &mut dbus::Message::new_method_call(
-            dest,
-            path,
-            Some(c"org.freedesktop.DBus.Introspectable"),
-            c"Introspect",
-        )
-        .expect("no enough memory"),
-    )
-    .expect("no enough memory")
-}
-
-#[cfg(unix)]
-fn dbus_properties_get(
-    dbus: &dbus::Connection,
-    dest: Option<&core::ffi::CStr>,
-    path: &core::ffi::CStr,
-    interface: &core::ffi::CStr,
-    name: &core::ffi::CStr,
-) -> u32 {
-    let mut msg = dbus::Message::new_method_call(
-        dest,
-        path,
-        Some(c"org.freedesktop.DBus.Properties"),
-        c"Get",
-    )
-    .expect("no enough memory");
-    let mut msg_args_appender = msg.iter_append();
-    msg_args_appender.append_cstr(interface);
-    msg_args_appender.append_cstr(name);
-    drop(msg_args_appender);
-
-    dbus.send_with_serial(&mut msg).expect("no enough memory")
-}
-
-#[cfg(unix)]
 pub struct DesktopPortal {
     file_chooser: smol::lock::OnceCell<Option<DesktopPortalFileChooser>>,
 }
@@ -3359,8 +3330,15 @@ impl DesktopPortal {
         dbus: &DBusLink,
     ) -> Option<&'x DesktopPortalFileChooser> {
         self.file_chooser.get_or_init(|| async {
-            let introspect_serial = dbus_introspect(dbus.underlying(), Some(c"org.freedesktop.portal.Desktop"), c"/org/freedesktop/portal/desktop");
-            let reply_msg = dbus.wait_for_reply(introspect_serial).await;
+            let reply_msg = dbus
+                .wait_for_reply(
+                    dbus_proto::introspect(
+                        dbus.underlying(),
+                        Some(c"org.freedesktop.portal.Desktop"),
+                        c"/org/freedesktop/portal/desktop",
+                    )
+                )
+                .await;
             let reply_iter = reply_msg.iter();
             let doc = reply_iter
                 .try_get_cstr()
@@ -3380,12 +3358,23 @@ impl DesktopPortal {
                 tracing::warn!(reason = ?e, "Failed to parse introspection document from portal object");
             }
 
-            has_file_chooser.then_some(DesktopPortalFileChooser { version: smol::lock::OnceCell::new() })
+            let version = match desktop_portal_proto::file_chooser::read_get_version_reply(
+                dbus.wait_for_reply(desktop_portal_proto::file_chooser::get_version(dbus.underlying())).await
+            ) {
+                Ok(x) => x,
+                Err(e) => {
+                    tracing::warn!(reason = ?e, "FileChooser get version failed, assuming v1");
+                    1
+                }
+            };
+
+            has_file_chooser.then_some(DesktopPortalFileChooser { version })
         }).await.as_ref()
     }
 
-    #[inline(always)]
-    pub fn open_request_object(path: std::ffi::CString) -> DesktopPortalRequestObject {
+    pub const fn open_request_object(
+        path: desktop_portal_proto::ObjectPath,
+    ) -> DesktopPortalRequestObject {
         DesktopPortalRequestObject::new(path)
     }
 
@@ -3399,139 +3388,12 @@ impl DesktopPortal {
 }
 
 #[cfg(unix)]
-pub struct DesktopPortalFileChooserProto;
-#[cfg(unix)]
-impl DesktopPortalFileChooserProto {
-    pub fn get_version(dbus: &dbus::Connection) -> u32 {
-        dbus_properties_get(
-            dbus,
-            Some(c"org.freedesktop.portal.Desktop"),
-            c"/org/freedesktop/portal/desktop",
-            c"org.freedesktop.portal.FileChooser",
-            c"version",
-        )
-    }
-
-    pub fn read_get_version_reply(msg: dbus::Message) -> Result<u32, dbus::Error> {
-        if let Some(e) = msg.try_get_error() {
-            return Err(e);
-        }
-
-        let mut reply_iter = msg.iter();
-        Ok(reply_iter
-            .try_begin_iter_variant_content()
-            .expect("property must returns variant")
-            .try_get_u32()
-            .expect("unexpected version value"))
-    }
-
-    /// https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.FileChooser.html#org-freedesktop-portal-filechooser-openfile
-    pub fn open_file(
-        dbus: &dbus::Connection,
-        parent_window: Option<&core::ffi::CStr>,
-        title: &core::ffi::CStr,
-        options_builder: impl FnOnce(&mut dbus::MessageIterAppendContainer<dbus::MessageIterAppend>),
-    ) -> u32 {
-        let mut msg = dbus::Message::new_method_call(
-            Some(c"org.freedesktop.portal.Desktop"),
-            c"/org/freedesktop/portal/desktop",
-            Some(c"org.freedesktop.portal.FileChooser"),
-            c"OpenFile",
-        )
-        .unwrap();
-        let mut msg_args_appender = msg.iter_append();
-        msg_args_appender.append_cstr(parent_window.unwrap_or(c""));
-        msg_args_appender.append_cstr(title);
-        let mut options_appender = msg_args_appender.open_array_container(c"{sv}").unwrap();
-        options_builder(&mut options_appender);
-        options_appender.close();
-
-        dbus.send_with_serial(&mut msg).expect("no enough memory")
-    }
-
-    pub fn read_open_file_reply(
-        msg: dbus::Message,
-    ) -> Result<DesktopPortalRequestObject, dbus::Error> {
-        if let Some(e) = msg.try_get_error() {
-            return Err(e);
-        }
-
-        let msg_iter = msg.iter();
-        let handle = DesktopPortalRequestObject::new(
-            msg_iter
-                .try_get_object_path()
-                .expect("invalid response")
-                .into(),
-        );
-        assert!(!msg_iter.has_next(), "reply data left");
-
-        Ok(handle)
-    }
-
-    /// https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.FileChooser.html#org-freedesktop-portal-filechooser-savefile
-    pub fn save_file(
-        dbus: &dbus::Connection,
-        parent_window: Option<&core::ffi::CStr>,
-        title: &core::ffi::CStr,
-        options_builder: impl FnOnce(&mut dbus::MessageIterAppendContainer<dbus::MessageIterAppend>),
-    ) -> u32 {
-        let mut msg = dbus::Message::new_method_call(
-            Some(c"org.freedesktop.portal.Desktop"),
-            c"/org/freedesktop/portal/desktop",
-            Some(c"org.freedesktop.portal.FileChooser"),
-            c"SaveFile",
-        )
-        .unwrap();
-        let mut msg_args_appender = msg.iter_append();
-        msg_args_appender.append_cstr(parent_window.unwrap_or(c""));
-        msg_args_appender.append_cstr(title);
-        let mut options_appender = msg_args_appender.open_array_container(c"{sv}").unwrap();
-        options_builder(&mut options_appender);
-        options_appender.close();
-
-        dbus.send_with_serial(&mut msg).expect("no enough memory")
-    }
-
-    pub fn read_save_file_reply(
-        msg: dbus::Message,
-    ) -> Result<DesktopPortalRequestObject, dbus::Error> {
-        if let Some(e) = msg.try_get_error() {
-            return Err(e);
-        }
-
-        let msg_iter = msg.iter();
-        let handle = DesktopPortalRequestObject::new(
-            msg_iter
-                .try_get_object_path()
-                .expect("invalid response")
-                .into(),
-        );
-        assert!(!msg_iter.has_next(), "reply data left");
-
-        Ok(handle)
-    }
-}
-
-#[cfg(unix)]
 pub struct DesktopPortalFileChooser {
-    version: smol::lock::OnceCell<u32>,
+    #[allow(dead_code)]
+    version: u32,
 }
 #[cfg(unix)]
 impl DesktopPortalFileChooser {
-    pub async fn get_version(&self, dbus: &DBusLink) -> Result<u32, dbus::Error> {
-        Ok(*self
-            .version
-            .get_or_try_init(|| async {
-                DesktopPortalFileChooserProto::read_get_version_reply(
-                    dbus.wait_for_reply(DesktopPortalFileChooserProto::get_version(
-                        dbus.underlying(),
-                    ))
-                    .await,
-                )
-            })
-            .await?)
-    }
-
     /// https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.FileChooser.html#org-freedesktop-portal-filechooser-openfile
     pub async fn open_file(
         &self,
@@ -3540,15 +3402,17 @@ impl DesktopPortalFileChooser {
         title: &core::ffi::CStr,
         options_builder: impl FnOnce(&mut dbus::MessageIterAppendContainer<dbus::MessageIterAppend>),
     ) -> Result<DesktopPortalRequestObject, dbus::Error> {
-        DesktopPortalFileChooserProto::read_open_file_reply(
-            dbus.wait_for_reply(DesktopPortalFileChooserProto::open_file(
-                dbus.underlying(),
-                parent_window,
-                title,
-                options_builder,
-            ))
-            .await,
-        )
+        Ok(DesktopPortal::open_request_object(
+            desktop_portal_proto::file_chooser::read_open_file_reply(
+                dbus.wait_for_reply(desktop_portal_proto::file_chooser::open_file(
+                    dbus.underlying(),
+                    parent_window,
+                    title,
+                    options_builder,
+                ))
+                .await,
+            )?,
+        ))
     }
 
     /// https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.FileChooser.html#org-freedesktop-portal-filechooser-savefile
@@ -3559,26 +3423,26 @@ impl DesktopPortalFileChooser {
         title: &core::ffi::CStr,
         options_builder: impl FnOnce(&mut dbus::MessageIterAppendContainer<dbus::MessageIterAppend>),
     ) -> Result<DesktopPortalRequestObject, dbus::Error> {
-        DesktopPortalFileChooserProto::read_save_file_reply(
-            dbus.wait_for_reply(DesktopPortalFileChooserProto::save_file(
-                dbus.underlying(),
-                parent_window,
-                title,
-                options_builder,
-            ))
-            .await,
-        )
+        Ok(DesktopPortal::open_request_object(
+            desktop_portal_proto::file_chooser::read_save_file_reply(
+                dbus.wait_for_reply(desktop_portal_proto::file_chooser::save_file(
+                    dbus.underlying(),
+                    parent_window,
+                    title,
+                    options_builder,
+                ))
+                .await,
+            )?,
+        ))
     }
 }
 
 #[cfg(unix)]
-pub struct DesktopPortalRequestObject {
-    object_path: std::ffi::CString,
-}
+pub struct DesktopPortalRequestObject(desktop_portal_proto::ObjectPath);
 #[cfg(unix)]
 impl DesktopPortalRequestObject {
-    pub fn new(object_path: std::ffi::CString) -> Self {
-        Self { object_path }
+    pub const fn new(object_path: desktop_portal_proto::ObjectPath) -> Self {
+        Self(object_path)
     }
 
     fn from_token(dbus: &DBusLink, token: &str) -> Self {
@@ -3596,12 +3460,16 @@ impl DesktopPortalRequestObject {
         );
         object_path.push_str(token);
 
-        Self::new(unsafe { std::ffi::CString::from_vec_unchecked(object_path.into_bytes()) })
+        Self::new(unsafe {
+            core::mem::transmute(std::ffi::CString::from_vec_unchecked(
+                object_path.into_bytes(),
+            ))
+        })
     }
 
     #[inline(always)]
     pub fn points_same_object(&self, other: &Self) -> bool {
-        self.object_path == other.object_path
+        self.0 == other.0
     }
 
     #[inline]
@@ -3610,7 +3478,7 @@ impl DesktopPortalRequestObject {
         dbus: &'link DBusLink,
     ) -> DBusWaitForSignalFuture<'link> {
         dbus.wait_for_signal(
-            std::rc::Rc::from(self.object_path.as_c_str()),
+            std::rc::Rc::from(self.0.as_c_str()),
             std::rc::Rc::from(c"org.freedesktop.portal.Request"),
             std::rc::Rc::from(c"Response"),
         )
@@ -3814,18 +3682,6 @@ macro_rules! syslink_unrecoverable {
             Err(e) => {
                 tracing::error!(reason = ?e, $msg);
                 return Err(SystemLinkError::UnrecoverableException(e));
-            }
-        }
-    }
-}
-
-macro_rules! warn_bailout_scope {
-    ($label: lifetime, $x: expr, $msg: literal) => {
-        match $x {
-            Ok(x) => x,
-            Err(e) => {
-                tracing::warn!(reason = ?e, $msg);
-                break $label;
             }
         }
     }
@@ -4111,16 +3967,6 @@ impl SystemLink {
             .await
             .ok_or(SelectSpriteFilesError::NoFileChooser)?;
 
-        // dbg
-        /*match file_chooser.get_version(&self.dbus).await {
-            Ok(version) => {
-                tracing::trace!(version, "AddSprite: file chooser found!");
-            }
-            Err(e) => {
-                tracing::warn!(reason = ?e, "FileChooser version get failed");
-            }
-        }*/
-
         let dialog_token = uuid::Uuid::new_v4().as_simple().to_string();
         let mut request_object =
             DesktopPortal::open_request_object_for_token(&self.dbus, &dialog_token);
@@ -4149,8 +3995,8 @@ impl SystemLink {
             .map_err(SelectSpriteFilesError::OpenFileFailed)?;
         if !request_object.points_same_object(&request_handle) {
             tracing::debug!(
-                open_file_dialog_handle = ?request_handle.object_path,
-                request_object_path = ?request_object.object_path,
+                open_file_dialog_handle = ?request_handle.0,
+                request_object_path = ?request_object.0,
                 "returned object_path did not match with the expected, switching request object..."
             );
             request_object = request_handle;
@@ -4193,16 +4039,6 @@ impl SystemLink {
             .await
             .ok_or(SelectSpriteFilesError::NoFileChooser)?;
 
-        // dbg
-        /*match file_chooser.get_version(&self.dbus).await {
-            Ok(version) => {
-                tracing::trace!(version, "AddSprite: file chooser found!");
-            }
-            Err(e) => {
-                tracing::warn!(reason = ?e, "FileChooser version get failed");
-            }
-        }*/
-
         let dialog_token = uuid::Uuid::new_v4().as_simple().to_string();
         let mut request_object =
             DesktopPortal::open_request_object_for_token(&self.dbus, &dialog_token);
@@ -4231,8 +4067,8 @@ impl SystemLink {
             .map_err(SelectSpriteFilesError::OpenFileFailed)?;
         if !request_object.points_same_object(&request_handle) {
             tracing::debug!(
-                open_file_dialog_handle = ?request_handle.object_path,
-                request_object_path = ?request_object.object_path,
+                open_file_dialog_handle = ?request_handle.0,
+                request_object_path = ?request_object.0,
                 "returned object_path did not match with the expected, switching request object..."
             );
             request_object = request_handle;
@@ -4271,16 +4107,6 @@ impl SystemLink {
             .try_get_file_chooser(&self.dbus)
             .await
             .ok_or(SelectSpriteFilesError::NoFileChooser)?;
-
-        // dbg
-        /*match file_chooser.get_version(&self.dbus).await {
-            Ok(version) => {
-                tracing::trace!(version, "AddSprite: file chooser found!");
-            }
-            Err(e) => {
-                tracing::warn!(reason = ?e, "FileChooser version get failed");
-            }
-        }*/
 
         let dialog_token = uuid::Uuid::new_v4().as_simple().to_string();
         let mut request_object =
@@ -4329,8 +4155,8 @@ impl SystemLink {
             .map_err(SelectSpriteFilesError::SaveFileFailed)?;
         if !request_object.points_same_object(&request_handle) {
             tracing::debug!(
-                open_file_dialog_handle = ?request_handle.object_path,
-                request_object_path = ?request_object.object_path,
+                open_file_dialog_handle = ?request_handle.0,
+                request_object_path = ?request_object.0,
                 "returned object_path did not match with the expected, switching request object..."
             );
             request_object = request_handle;

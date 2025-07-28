@@ -10,6 +10,8 @@ members = [
     "thirdparty/harfbuzz",
     "thirdparty/microsoft-sdk-locator",
     "thirdparty/objc-rt",
+    "thirdparty/proto/dbus",
+    "thirdparty/proto/desktop-portal",
     "thirdparty/wayland",
 ]
 
@@ -67,6 +69,8 @@ parking_lot = "0.12.4"
 freetype = { path = "./thirdparty/freetype" }
 harfbuzz = { path = "./thirdparty/harfbuzz" }
 shared-perflog-proto.path = "./shared/perflog-proto"
+dbus-proto.path = "./thirdparty/proto/dbus"
+desktop-portal-proto.path = "./thirdparty/proto/desktop-portal"
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 wayland = { path = "./thirdparty/wayland", optional = true }

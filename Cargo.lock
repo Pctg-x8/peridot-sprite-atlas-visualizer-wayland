@@ -407,6 +407,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbus-proto"
+version = "0.1.0"
+dependencies = [
+ "dbus",
+]
+
+[[package]]
 name = "derives"
 version = "0.1.0"
 source = "git+https://github.com/Pctg-x8/bedrock?branch=peridot#1cd692270a1dddf5273a154a052a746fbfd56825"
@@ -414,6 +421,14 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "desktop-portal-proto"
+version = "0.1.0"
+dependencies = [
+ "dbus",
+ "dbus-proto",
 ]
 
 [[package]]
@@ -1039,6 +1054,8 @@ dependencies = [
  "bitflags 2.9.1",
  "crossbeam",
  "dbus",
+ "dbus-proto",
+ "desktop-portal-proto",
  "fontconfig 0.1.0",
  "freetype",
  "harfbuzz",

@@ -90,13 +90,16 @@ pub enum AppEvent {
     ToplevelWindowClose,
     ToplevelWindowFrameTiming,
     ToplevelWindowMinimizeRequest,
-    ToplevelWindowMaximizeRequest,
+    ToplevelWindowToggleMaximizeRestoreRequest,
     MainWindowPointerMove {
         surface_x: f32,
         surface_y: f32,
     },
     MainWindowPointerLeftDown,
     MainWindowPointerLeftUp,
+    MainWindowTiledStateChanged {
+        is_tiled: bool,
+    },
     UIPopupClose {
         id: uuid::Uuid,
     },
@@ -1893,7 +1896,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                 AppEvent::ToplevelWindowMinimizeRequest => {
                     app_shell.minimize();
                 }
-                AppEvent::ToplevelWindowMaximizeRequest => {
+                AppEvent::ToplevelWindowToggleMaximizeRestoreRequest => {
                     app_shell.toggle_maximize_restore();
                 }
                 AppEvent::ToplevelWindowFrameTiming => {
@@ -2450,6 +2453,9 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                 }
                 AppEvent::UIHideDragAndDropOverlay => {
                     dnd_overlay.hide(app_system, t.elapsed().as_secs_f32());
+                }
+                AppEvent::MainWindowTiledStateChanged { is_tiled } => {
+                    app_header.on_shell_tiling_changed(app_system, is_tiled);
                 }
             }
             app_update_context.event_queue.notify_clear().unwrap();

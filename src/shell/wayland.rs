@@ -119,7 +119,12 @@ impl wl::XdgToplevelEventListener for WaylandShellEventHandler<'_, '_> {
 
         tracing::trace!("configure");
         let activated = states.contains(&4);
-        self.tiled = states.iter().any(|&x| x == 5 || x == 6 || x == 7 || x == 8);
+        let tiled = states.iter().any(|&x| x == 5 || x == 6 || x == 7 || x == 8);
+        if core::mem::replace(&mut self.tiled, tiled) != tiled {
+            // notify changes
+            self.app_event_bus
+                .push(AppEvent::MainWindowTiledStateChanged { is_tiled: tiled });
+        }
 
         if width == 0 {
             width = self.cached_client_size_px.0 as i32;

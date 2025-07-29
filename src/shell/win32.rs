@@ -50,12 +50,12 @@ use windows::{
                 HTCLIENT, HTCLOSE, HTLEFT, HTMAXBUTTON, HTMINBUTTON, HTRIGHT, HTTOP, HTTOPLEFT,
                 HTTOPRIGHT, IDC_ARROW, IDC_HAND, IDC_SIZEWE, IDI_APPLICATION, IsWindow, IsZoomed,
                 LoadCursorW, LoadIconW, MSG, NCCALCSIZE_PARAMS, PM_REMOVE, PeekMessageW,
-                RegisterClassExW, SM_CXSIZEFRAME, SM_CYSIZEFRAME, SW_RESTORE, SW_SHOWMAXIMIZED,
-                SW_SHOWNORMAL, SWP_FRAMECHANGED, SetCursor, SetWindowLongPtrW, SetWindowPos,
-                ShowWindow, TranslateMessage, WM_ACTIVATE, WM_CREATE, WM_DESTROY, WM_DPICHANGED,
-                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCHITTEST,
-                WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSEMOVE, WM_SIZE, WNDCLASS_STYLES,
-                WNDCLASSEXW, WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW,
+                RegisterClassExW, SIZE_MAXIMIZED, SIZE_RESTORED, SM_CXSIZEFRAME, SM_CYSIZEFRAME,
+                SW_RESTORE, SW_SHOWMAXIMIZED, SW_SHOWNORMAL, SWP_FRAMECHANGED, SetCursor,
+                SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_ACTIVATE,
+                WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+                WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSEMOVE,
+                WM_SIZE, WNDCLASS_STYLES, WNDCLASSEXW, WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW,
             },
         },
     },
@@ -396,12 +396,22 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
         }
 
         if msg == WM_SIZE {
-            Self::window_state_ref(hwnd)
-                .app_event_bus
-                .push(AppEvent::ToplevelWindowNewSize {
-                    width_px: (lparam.0 & 0xffff) as u16 as _,
-                    height_px: ((lparam.0 >> 16) & 0xffff) as u16 as _,
-                });
+            let stref = Self::window_state_ref(hwnd);
+            stref.app_event_bus.push(AppEvent::ToplevelWindowNewSize {
+                width_px: (lparam.0 & 0xffff) as u16 as _,
+                height_px: ((lparam.0 >> 16) & 0xffff) as u16 as _,
+            });
+
+            if wparam.0 == SIZE_MAXIMIZED as _ {
+                stref
+                    .app_event_bus
+                    .push(AppEvent::MainWindowTiledStateChanged { is_tiled: true });
+            }
+            if wparam.0 == SIZE_RESTORED as _ {
+                stref
+                    .app_event_bus
+                    .push(AppEvent::MainWindowTiledStateChanged { is_tiled: false });
+            }
 
             return LRESULT(0);
         }

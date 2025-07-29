@@ -1,0 +1,8 @@
+[package]
+name = "dbus-proto"
+description = "common protocols in DBus"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dbus.path = "../../dbus"

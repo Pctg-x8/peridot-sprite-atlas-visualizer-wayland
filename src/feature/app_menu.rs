@@ -3,7 +3,7 @@ use std::{cell::Cell, path::Path, rc::Rc};
 use crate::{
     AppEvent, AppUpdateContext, PresenterInitContext, ViewInitContext,
     base_system::{
-        AppBaseSystem, FontType, scratch_buffer::StagingScratchBufferManager, svg::SinglePathSVG,
+        AppBaseSystem, FontType, scratch_buffer::StagingScratchBuffer, svg::SinglePathSVG,
     },
     composite::{
         AnimatableColor, AnimatableFloat, AnimationCurve, CompositeMode, CompositeRect,
@@ -195,7 +195,7 @@ impl CommandButtonView {
     fn rescale(
         &self,
         base_system: &mut AppBaseSystem,
-        staging_scratch_buffer: &mut StagingScratchBufferManager,
+        staging_scratch_buffer: &mut StagingScratchBuffer,
         ui_scale_factor: f32,
     ) {
         base_system
@@ -762,7 +762,7 @@ impl Presenter {
     pub fn rescale(
         &self,
         base_system: &mut AppBaseSystem,
-        staging_scratch_buffer: &mut StagingScratchBufferManager,
+        staging_scratch_buffer: &mut StagingScratchBuffer,
         ui_scale_factor: f32,
     ) {
         for v in self.action_handler.item_views.iter() {

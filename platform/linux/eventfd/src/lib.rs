@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use std::os::fd::AsRawFd;
 
 use bitflags::bitflags;

@@ -31,7 +31,7 @@ use bedrock::{
 use bitflags::bitflags;
 use cache::Cache;
 use parking_lot::RwLock;
-use scratch_buffer::StagingScratchBufferManager;
+use scratch_buffer::StagingScratchBuffer;
 
 mod cache;
 #[macro_use]
@@ -506,7 +506,7 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
     )]
     pub fn text_mask(
         &mut self,
-        staging_scratch_buffer: &mut StagingScratchBufferManager,
+        staging_scratch_buffer: &mut StagingScratchBuffer,
         font_type: FontType,
         text: &str,
     ) -> br::Result<AtlasRect> {

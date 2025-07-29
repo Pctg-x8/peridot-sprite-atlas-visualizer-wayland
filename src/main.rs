@@ -59,7 +59,7 @@ use app_state::{AppState, SpriteInfo};
 use base_system::{
     AppBaseSystem, RenderPassOptions,
     prof::ProfilingContext,
-    scratch_buffer::{BufferedStagingScratchBuffer, StagingScratchBufferManager},
+    scratch_buffer::{FlippableStagingScratchBufferGroup, StagingScratchBuffer},
 };
 
 use bedrock::{
@@ -248,7 +248,7 @@ struct CornerCutoutVshConstants {
 
 pub struct ViewInitContext<'r, 'app_system, 'subsystem> {
     pub base_system: &'app_system mut AppBaseSystem<'subsystem>,
-    pub staging_scratch_buffer: &'r mut StagingScratchBufferManager<'subsystem>,
+    pub staging_scratch_buffer: &'r mut StagingScratchBuffer<'subsystem>,
     pub ui_scale_factor: f32,
 }
 
@@ -544,7 +544,7 @@ impl DragAndDropOverlayView {
     pub fn rescale(
         &self,
         base_system: &mut AppBaseSystem,
-        staging_scratch_buffer: &mut StagingScratchBufferManager,
+        staging_scratch_buffer: &mut StagingScratchBuffer,
         ui_scale_factor: f32,
     ) {
         base_system.free_mask_atlas_rect(
@@ -1394,7 +1394,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     tracing::info!("Initializing Peridot SpriteAtlas Visualizer/Editor");
     let setup_timer = std::time::Instant::now();
 
-    let staging_scratch_buffers = Arc::new(RwLock::new(BufferedStagingScratchBuffer::new(
+    let staging_scratch_buffers = Arc::new(RwLock::new(FlippableStagingScratchBufferGroup::new(
         &app_system.subsystem,
         2,
     )));

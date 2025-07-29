@@ -2,7 +2,7 @@ use freetype as ft;
 use harfbuzz as hb;
 
 use crate::base_system::scratch_buffer::{
-    StagingScratchBufferManager, StagingScratchBufferMapMode, StagingScratchBufferReservation,
+    StagingScratchBuffer, StagingScratchBufferMapMode, StagingScratchBufferReservation,
 };
 
 struct GlyphBitmap {
@@ -127,7 +127,7 @@ impl TextLayout {
 
     pub fn build_stg_image_pixel_buffer(
         &self,
-        staging_scratch_buffer: &mut StagingScratchBufferManager,
+        staging_scratch_buffer: &mut StagingScratchBuffer,
     ) -> StagingScratchBufferReservation {
         let buf = staging_scratch_buffer.reserve((self.width_px() * self.height_px()) as _);
         let ptr = staging_scratch_buffer

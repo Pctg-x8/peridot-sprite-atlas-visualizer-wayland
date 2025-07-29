@@ -2699,176 +2699,6 @@ impl DesktopPortalRequestObject {
     }
 }
 
-#[cfg(target_os = "linux")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DesktopPortalRequestResponseCode {
-    Success,
-    Cancelled,
-    InteractionEnded,
-    Unknown(u32),
-}
-#[cfg(target_os = "linux")]
-impl DesktopPortalRequestResponseCode {
-    pub fn read(msg_iter: &mut dbus::MessageIter) -> Self {
-        match msg_iter.try_get_u32().expect("invalid response code") {
-            0 => Self::Success,
-            1 => Self::Cancelled,
-            2 => Self::InteractionEnded,
-            code => Self::Unknown(code),
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-#[derive(Debug, Clone)]
-pub enum DesktopPortalFileChooserFilter {
-    Glob(std::ffi::CString),
-    MIME(std::ffi::CString),
-    Unknown(u32, std::ffi::CString),
-}
-#[cfg(target_os = "linux")]
-#[derive(Debug, Clone)]
-pub struct DesktopPortalFileChooserOpenFileCurrentFilterResponse {
-    pub name: std::ffi::CString,
-    pub filters: Vec<DesktopPortalFileChooserFilter>,
-}
-#[cfg(target_os = "linux")]
-impl DesktopPortalFileChooserOpenFileCurrentFilterResponse {
-    pub fn read_all(value_content_iter: &mut dbus::MessageIter) -> Self {
-        let mut struct_iter = value_content_iter
-            .try_begin_iter_struct_content()
-            .expect("invalid current_filter value content");
-        let filter_name = struct_iter
-            .try_get_cstr()
-            .expect("unexpected filter name value")
-            .to_owned();
-        struct_iter.next();
-        let mut array_iter = struct_iter
-            .try_begin_iter_array_content()
-            .expect("invalid current_filter value content");
-        let mut filters = Vec::new();
-        while array_iter.arg_type() != dbus::TYPE_INVALID {
-            let mut struct_iter = array_iter
-                .try_begin_iter_struct_content()
-                .expect("invalid current_filter value content element");
-            let v = struct_iter.try_get_u32().expect("unexpected type");
-            struct_iter.next();
-            let f = struct_iter.try_get_cstr().expect("unexpected filter value");
-            filters.push(match v {
-                0 => DesktopPortalFileChooserFilter::Glob(f.into()),
-                1 => DesktopPortalFileChooserFilter::MIME(f.into()),
-                x => DesktopPortalFileChooserFilter::Unknown(x, f.into()),
-            });
-            drop(struct_iter);
-
-            array_iter.next();
-        }
-
-        Self {
-            name: filter_name,
-            filters,
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-#[derive(Debug, Clone)]
-pub struct DesktopPortalFileChooserOpenFileResponse {
-    pub uris: Vec<std::ffi::CString>,
-    pub current_filter: Option<DesktopPortalFileChooserOpenFileCurrentFilterResponse>,
-}
-#[cfg(target_os = "linux")]
-impl DesktopPortalFileChooserOpenFileResponse {
-    pub fn read_all(msg_iter: &mut dbus::MessageIter) -> Self {
-        let mut results_iter = msg_iter
-            .try_begin_iter_array_content()
-            .expect("invalid response results");
-        let mut data = DesktopPortalFileChooserOpenFileResponse {
-            uris: Vec::new(),
-            current_filter: None,
-        };
-        while results_iter.arg_type() != dbus::TYPE_INVALID {
-            let mut kv_iter = results_iter
-                .try_begin_iter_dict_entry_content()
-                .expect("invalid results kv pair");
-
-            match kv_iter.try_get_cstr().expect("unexpected key value") {
-                x if x == c"uris" => {
-                    kv_iter.next();
-
-                    let mut value_iter = kv_iter
-                        .try_begin_iter_variant_content()
-                        .expect("invalid uris value");
-                    let mut iter = value_iter
-                        .try_begin_iter_array_content()
-                        .expect("invalid uris value content");
-                    while iter.arg_type() != dbus::TYPE_INVALID {
-                        data.uris.push(std::ffi::CString::from(
-                            iter.try_get_cstr().expect("unexpected uris value"),
-                        ));
-                        iter.next();
-                    }
-                }
-                x if x == c"choices" => {
-                    kv_iter.next();
-
-                    let mut value_iter = kv_iter
-                        .try_begin_iter_variant_content()
-                        .expect("invalid choices value");
-                    let mut iter = value_iter
-                        .try_begin_iter_array_content()
-                        .expect("invalid choices value content");
-                    while iter.arg_type() != dbus::TYPE_INVALID {
-                        let mut elements_iter = iter
-                            .try_begin_iter_struct_content()
-                            .expect("invalid choices value content element");
-                        let key = elements_iter
-                            .try_get_cstr()
-                            .expect("unexpected key value")
-                            .to_owned();
-                        elements_iter.next();
-                        let value = elements_iter
-                            .try_get_cstr()
-                            .expect("unexpected value")
-                            .to_owned();
-                        println!("choices {key:?} -> {value:?}");
-                        drop(elements_iter);
-
-                        iter.next();
-                    }
-                }
-                x if x == c"current_filter" => {
-                    if data.current_filter.is_some() {
-                        panic!("current_filter received twice");
-                    }
-
-                    kv_iter.next();
-                    let mut value_iter = kv_iter
-                        .try_begin_iter_variant_content()
-                        .expect("invalid content_filter value");
-                    data.current_filter = Some(
-                        DesktopPortalFileChooserOpenFileCurrentFilterResponse::read_all(
-                            &mut value_iter,
-                        ),
-                    );
-                }
-                c => unreachable!("unexpected result entry: {c:?}"),
-            }
-
-            results_iter.next();
-        }
-
-        data
-    }
-
-    #[inline(always)]
-    fn uri_path_part(uri: &str) -> &str {
-        // desktop-portal file chooser returns uri strings that should start with "file://"(by protocol)
-        debug_assert!(uri.starts_with("file://"));
-        unsafe { uri.strip_prefix("file://").unwrap_unchecked() }
-    }
-}
-
 #[cfg(windows)]
 #[derive(Debug, thiserror::Error)]
 pub enum SystemLinkError {
@@ -3147,11 +2977,6 @@ impl SelectSpriteFilesError {
     }
 }
 
-const fn dbus_cstr2str<'s>(x: &'s core::ffi::CStr) -> &'s str {
-    // d-bus strings can be always assumed as valid UTF-8 sequence
-    unsafe { str::from_utf8_unchecked(x.to_bytes()) }
-}
-
 #[cfg(target_os = "linux")]
 pub struct SystemLink {
     dbus: DBusLink,
@@ -3219,20 +3044,20 @@ impl SystemLink {
         drop(exported_shell);
 
         let mut resp_iter = resp.iter();
-        let response = DesktopPortalRequestResponseCode::read(&mut resp_iter);
-        if response != DesktopPortalRequestResponseCode::Success {
+        let response = desktop_portal_proto::RequestResponseCode::read(&resp_iter);
+        if response != desktop_portal_proto::RequestResponseCode::Success {
             tracing::warn!(?response, "Operation was cancelled");
             return Ok(Vec::new());
         }
 
         resp_iter.next();
-        let res = DesktopPortalFileChooserOpenFileResponse::read_all(&mut resp_iter);
+        let res = desktop_portal_proto::file_chooser::ResponseResults::read_all(&mut resp_iter);
         Ok(res
             .uris
             .into_iter()
             .map(|x| {
-                std::path::PathBuf::from(DesktopPortalFileChooserOpenFileResponse::uri_path_part(
-                    dbus_cstr2str(&x),
+                std::path::PathBuf::from(desktop_portal_proto::file_chooser::uri_path_part(
+                    dbus_proto::cstr2str(&x),
                 ))
             })
             .collect())
@@ -3291,18 +3116,18 @@ impl SystemLink {
         drop(exported_shell);
 
         let mut resp_iter = resp.iter();
-        let response = DesktopPortalRequestResponseCode::read(&mut resp_iter);
-        if response != DesktopPortalRequestResponseCode::Success {
+        let response = desktop_portal_proto::RequestResponseCode::read(&resp_iter);
+        if response != desktop_portal_proto::RequestResponseCode::Success {
             tracing::warn!(?response, "Operation was cancelled");
             return Ok(None);
         }
 
         resp_iter.next();
-        let res = DesktopPortalFileChooserOpenFileResponse::read_all(&mut resp_iter);
+        let res = desktop_portal_proto::file_chooser::ResponseResults::read_all(&mut resp_iter);
         match res.uris[..] {
             [] => Ok(None),
             [ref uri, ..] => Ok(Some(std::path::PathBuf::from(
-                DesktopPortalFileChooserOpenFileResponse::uri_path_part(dbus_cstr2str(uri)),
+                desktop_portal_proto::file_chooser::uri_path_part(dbus_proto::cstr2str(uri)),
             ))),
         }
     }
@@ -3381,18 +3206,18 @@ impl SystemLink {
         drop(exported_shell);
 
         let mut resp_iter = resp.iter();
-        let response = DesktopPortalRequestResponseCode::read(&mut resp_iter);
-        if response != DesktopPortalRequestResponseCode::Success {
+        let response = desktop_portal_proto::RequestResponseCode::read(&resp_iter);
+        if response != desktop_portal_proto::RequestResponseCode::Success {
             tracing::warn!(?response, "Operation was cancelled");
             return Ok(None);
         }
 
         resp_iter.next();
-        let res = DesktopPortalFileChooserOpenFileResponse::read_all(&mut resp_iter);
+        let res = desktop_portal_proto::file_chooser::ResponseResults::read_all(&mut resp_iter);
         match res.uris[..] {
             [] => Ok(None),
             [ref uri, ..] => Ok(Some(std::path::PathBuf::from(
-                DesktopPortalFileChooserOpenFileResponse::uri_path_part(dbus_cstr2str(uri)),
+                desktop_portal_proto::file_chooser::uri_path_part(dbus_proto::cstr2str(uri)),
             ))),
         }
     }

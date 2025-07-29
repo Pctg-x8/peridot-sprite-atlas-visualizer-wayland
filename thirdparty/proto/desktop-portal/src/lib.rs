@@ -8,4 +8,22 @@ impl ObjectPath {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestResponseCode {
+    Success,
+    Cancelled,
+    InteractionEnded,
+    Unknown(u32),
+}
+impl RequestResponseCode {
+    pub fn read(msg_iter: &dbus::MessageIter) -> Self {
+        match msg_iter.try_get_u32().expect("invalid response code") {
+            0 => Self::Success,
+            1 => Self::Cancelled,
+            2 => Self::InteractionEnded,
+            code => Self::Unknown(code),
+        }
+    }
+}
+
 pub mod file_chooser;

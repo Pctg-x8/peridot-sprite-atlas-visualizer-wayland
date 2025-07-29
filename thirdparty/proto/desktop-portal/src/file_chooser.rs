@@ -40,11 +40,15 @@ pub fn open_file(
     )
     .unwrap();
     let mut msg_args_appender = msg.iter_append();
-    msg_args_appender.append_cstr(parent_window.unwrap_or(c""));
-    msg_args_appender.append_cstr(title);
+    msg_args_appender
+        .append_cstr(parent_window.unwrap_or(c""))
+        .expect("no enough memory");
+    msg_args_appender
+        .append_cstr(title)
+        .expect("no enough memory");
     let mut options_appender = msg_args_appender.open_array_container(c"{sv}").unwrap();
     options_builder(&mut options_appender);
-    options_appender.close();
+    options_appender.close().expect("no enough memory");
 
     dbus.send_with_serial(&mut msg).expect("no enough memory")
 }
@@ -81,11 +85,15 @@ pub fn save_file(
     )
     .unwrap();
     let mut msg_args_appender = msg.iter_append();
-    msg_args_appender.append_cstr(parent_window.unwrap_or(c""));
-    msg_args_appender.append_cstr(title);
+    msg_args_appender
+        .append_cstr(parent_window.unwrap_or(c""))
+        .expect("no enough memory");
+    msg_args_appender
+        .append_cstr(title)
+        .expect("no enough memory");
     let mut options_appender = msg_args_appender.open_array_container(c"{sv}").unwrap();
     options_builder(&mut options_appender);
-    options_appender.close();
+    options_appender.close().expect("no enough memory");
 
     dbus.send_with_serial(&mut msg).expect("no enough memory")
 }
@@ -105,4 +113,145 @@ pub fn read_save_file_reply(msg: dbus::Message) -> Result<ObjectPath, dbus::Erro
     debug_assert!(!msg_iter.has_next(), "reply data left");
 
     Ok(handle)
+}
+
+#[derive(Debug, Clone)]
+pub enum Filter {
+    Glob(std::ffi::CString),
+    MIME(std::ffi::CString),
+    Unknown(u32, std::ffi::CString),
+}
+#[derive(Debug, Clone)]
+pub struct CurrentFilterResponse {
+    pub name: std::ffi::CString,
+    pub filters: Vec<Filter>,
+}
+impl CurrentFilterResponse {
+    pub fn read_all(value_content_iter: &mut dbus::MessageIter) -> Self {
+        let mut struct_iter = value_content_iter
+            .try_begin_iter_struct_content()
+            .expect("invalid current_filter value content");
+        let filter_name = struct_iter
+            .try_get_cstr()
+            .expect("unexpected filter name value")
+            .to_owned();
+        struct_iter.next();
+        let mut array_iter = struct_iter
+            .try_begin_iter_array_content()
+            .expect("invalid current_filter value content");
+        let mut filters = Vec::new();
+        while array_iter.arg_type() != dbus::TYPE_INVALID {
+            let mut struct_iter = array_iter
+                .try_begin_iter_struct_content()
+                .expect("invalid current_filter value content element");
+            let v = struct_iter.try_get_u32().expect("unexpected type");
+            struct_iter.next();
+            let f = struct_iter.try_get_cstr().expect("unexpected filter value");
+            filters.push(match v {
+                0 => Filter::Glob(f.into()),
+                1 => Filter::MIME(f.into()),
+                x => Filter::Unknown(x, f.into()),
+            });
+            drop(struct_iter);
+
+            array_iter.next();
+        }
+
+        Self {
+            name: filter_name,
+            filters,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ResponseResults {
+    pub uris: Vec<std::ffi::CString>,
+    pub current_filter: Option<CurrentFilterResponse>,
+}
+impl ResponseResults {
+    pub fn read_all(msg_iter: &mut dbus::MessageIter) -> Self {
+        let mut results_iter = msg_iter
+            .try_begin_iter_array_content()
+            .expect("invalid response results");
+        let mut data = ResponseResults {
+            uris: Vec::new(),
+            current_filter: None,
+        };
+        while results_iter.arg_type() != dbus::TYPE_INVALID {
+            let mut kv_iter = results_iter
+                .try_begin_iter_dict_entry_content()
+                .expect("invalid results kv pair");
+
+            match kv_iter.try_get_cstr().expect("unexpected key value") {
+                x if x == c"uris" => {
+                    kv_iter.next();
+
+                    let mut value_iter = kv_iter
+                        .try_begin_iter_variant_content()
+                        .expect("invalid uris value");
+                    let mut iter = value_iter
+                        .try_begin_iter_array_content()
+                        .expect("invalid uris value content");
+                    while iter.arg_type() != dbus::TYPE_INVALID {
+                        data.uris.push(std::ffi::CString::from(
+                            iter.try_get_cstr().expect("unexpected uris value"),
+                        ));
+                        iter.next();
+                    }
+                }
+                x if x == c"choices" => {
+                    kv_iter.next();
+
+                    let mut value_iter = kv_iter
+                        .try_begin_iter_variant_content()
+                        .expect("invalid choices value");
+                    let mut iter = value_iter
+                        .try_begin_iter_array_content()
+                        .expect("invalid choices value content");
+                    while iter.arg_type() != dbus::TYPE_INVALID {
+                        let mut elements_iter = iter
+                            .try_begin_iter_struct_content()
+                            .expect("invalid choices value content element");
+                        let key = elements_iter
+                            .try_get_cstr()
+                            .expect("unexpected key value")
+                            .to_owned();
+                        elements_iter.next();
+                        let value = elements_iter
+                            .try_get_cstr()
+                            .expect("unexpected value")
+                            .to_owned();
+                        println!("choices {key:?} -> {value:?}");
+                        drop(elements_iter);
+
+                        iter.next();
+                    }
+                }
+                x if x == c"current_filter" => {
+                    if data.current_filter.is_some() {
+                        panic!("current_filter received twice");
+                    }
+
+                    kv_iter.next();
+                    let mut value_iter = kv_iter
+                        .try_begin_iter_variant_content()
+                        .expect("invalid content_filter value");
+                    data.current_filter = Some(CurrentFilterResponse::read_all(&mut value_iter));
+                }
+                c => unreachable!("unexpected result entry: {c:?}"),
+            }
+
+            results_iter.next();
+        }
+
+        data
+    }
+}
+
+#[inline(always)]
+pub fn uri_path_part(uri: &str) -> &str {
+    // desktop-portal file chooser returns uri strings that should start with "file://"(by protocol)
+    debug_assert!(uri.starts_with("file://"));
+    unsafe { uri.strip_prefix("file://").unwrap_unchecked() }
 }

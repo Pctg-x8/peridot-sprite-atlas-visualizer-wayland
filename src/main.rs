@@ -3004,6 +3004,26 @@ impl SystemLink {
                         &std::ffi::CString::new(dialog_token.clone()).unwrap(),
                     );
                     options_appender.append_multiple(true);
+                    options_appender.append_current_filter(
+                        c"Images",
+                        [desktop_portal_proto::file_chooser::Filter::MIME(
+                            c"image/*".into(),
+                        )],
+                    );
+                    options_appender.append_filters([
+                        (
+                            c"Images",
+                            [desktop_portal_proto::file_chooser::Filter::MIME(
+                                c"image/*".into(),
+                            )],
+                        ),
+                        (
+                            c"All files",
+                            [desktop_portal_proto::file_chooser::Filter::Glob(
+                                c"*.*".into(),
+                            )],
+                        ),
+                    ]);
                 },
             )
             .await

@@ -30,7 +30,7 @@ pub fn open_file(
     dbus: &dbus::Connection,
     parent_window: Option<&core::ffi::CStr>,
     title: &core::ffi::CStr,
-    options_builder: impl FnOnce(&mut dbus::MessageIterAppendContainer<dbus::MessageIterAppend>),
+    options_builder: impl FnOnce(OpenFileOptionsAppender),
 ) -> u32 {
     let mut msg = dbus::Message::new_method_call(
         Some(c"org.freedesktop.portal.Desktop"),
@@ -47,10 +47,113 @@ pub fn open_file(
         .append_cstr(title)
         .expect("no enough memory");
     let mut options_appender = msg_args_appender.open_array_container(c"{sv}").unwrap();
-    options_builder(&mut options_appender);
+    options_builder(OpenFileOptionsAppender(&mut options_appender));
     options_appender.close().expect("no enough memory");
 
     dbus.send_with_serial(&mut msg).expect("no enough memory")
+}
+
+#[repr(transparent)]
+pub struct OpenFileOptionsAppender<'a, 'm>(
+    &'a mut dbus::MessageIterAppendContainer<'m, dbus::MessageIterAppend<'m>>,
+);
+impl OpenFileOptionsAppender<'_, '_> {
+    pub fn append_handle_token(&mut self, value: &core::ffi::CStr) {
+        let mut dict_appender = self.0.open_dict_entry_container().unwrap();
+        dict_appender.append_cstr(c"handle_token").unwrap();
+        dict_appender.append_variant_cstr(value).unwrap();
+        dict_appender.close().unwrap();
+    }
+
+    pub fn append_multiple(&mut self, value: bool) {
+        let mut dict_appender = self.0.open_dict_entry_container().unwrap();
+        dict_appender.append_cstr(c"multiple").unwrap();
+        dict_appender.append_variant_bool(value).unwrap();
+        dict_appender.close().unwrap();
+    }
+
+    pub fn append_filters<'fname>(
+        &mut self,
+        filters: impl IntoIterator<Item = (&'fname core::ffi::CStr, impl IntoIterator<Item = Filter>)>,
+    ) {
+        let mut dict_appender = self.0.open_dict_entry_container().unwrap();
+        dict_appender.append_cstr(c"filters").unwrap();
+        let mut filter_variant_appender =
+            dict_appender.open_variant_container(c"a(sa(us))").unwrap();
+        let mut filters_appender = filter_variant_appender
+            .open_array_container(c"(sa(us))")
+            .unwrap();
+        for (name, filters) in filters {
+            let mut filter_struct_appender =
+                filters_appender.open_struct_container(c"sa(us)").unwrap();
+            filter_struct_appender.append_cstr(name).unwrap();
+            let mut filter_ext_appender = filter_struct_appender
+                .open_array_container(c"(us)")
+                .unwrap();
+            for f in filters {
+                let mut filter_ext_content_appender =
+                    filter_ext_appender.open_struct_container(c"us").unwrap();
+                match f {
+                    Filter::Glob(x) => {
+                        filter_ext_content_appender.append_u32(0).unwrap();
+                        filter_ext_content_appender.append_cstr(&x).unwrap();
+                    }
+                    Filter::MIME(x) => {
+                        filter_ext_content_appender.append_u32(1).unwrap();
+                        filter_ext_content_appender.append_cstr(&x).unwrap();
+                    }
+                    Filter::Unknown(n, x) => {
+                        filter_ext_content_appender.append_u32(n).unwrap();
+                        filter_ext_content_appender.append_cstr(&x).unwrap();
+                    }
+                }
+                filter_ext_content_appender.close().unwrap();
+            }
+            filter_ext_appender.close().unwrap();
+            filter_struct_appender.close().unwrap();
+        }
+        filters_appender.close().unwrap();
+        filter_variant_appender.close().unwrap();
+        dict_appender.close().unwrap();
+    }
+
+    pub fn append_current_filter(
+        &mut self,
+        filter_name: &core::ffi::CStr,
+        filters: impl IntoIterator<Item = Filter>,
+    ) {
+        let mut dict_appender = self.0.open_dict_entry_container().unwrap();
+        dict_appender.append_cstr(c"current_filter").unwrap();
+        let mut filters_appender = dict_appender.open_variant_container(c"(sa(us))").unwrap();
+        let mut filter_struct_appender = filters_appender.open_struct_container(c"sa(us)").unwrap();
+        filter_struct_appender.append_cstr(filter_name).unwrap();
+        let mut filter_ext_appender = filter_struct_appender
+            .open_array_container(c"(us)")
+            .unwrap();
+        for f in filters {
+            let mut filter_ext_content_appender =
+                filter_ext_appender.open_struct_container(c"us").unwrap();
+            match f {
+                Filter::Glob(x) => {
+                    filter_ext_content_appender.append_u32(0).unwrap();
+                    filter_ext_content_appender.append_cstr(&x).unwrap();
+                }
+                Filter::MIME(x) => {
+                    filter_ext_content_appender.append_u32(1).unwrap();
+                    filter_ext_content_appender.append_cstr(&x).unwrap();
+                }
+                Filter::Unknown(n, x) => {
+                    filter_ext_content_appender.append_u32(n).unwrap();
+                    filter_ext_content_appender.append_cstr(&x).unwrap();
+                }
+            }
+            filter_ext_content_appender.close().unwrap();
+        }
+        filter_ext_appender.close().unwrap();
+        filter_struct_appender.close().unwrap();
+        filters_appender.close().unwrap();
+        dict_appender.close().unwrap();
+    }
 }
 
 pub fn read_open_file_reply(msg: dbus::Message) -> Result<ObjectPath, dbus::Error> {
@@ -75,7 +178,7 @@ pub fn save_file(
     dbus: &dbus::Connection,
     parent_window: Option<&core::ffi::CStr>,
     title: &core::ffi::CStr,
-    options_builder: impl FnOnce(&mut dbus::MessageIterAppendContainer<dbus::MessageIterAppend>),
+    options_builder: impl FnOnce(SaveFileOptionsAppender),
 ) -> u32 {
     let mut msg = dbus::Message::new_method_call(
         Some(c"org.freedesktop.portal.Desktop"),
@@ -92,10 +195,75 @@ pub fn save_file(
         .append_cstr(title)
         .expect("no enough memory");
     let mut options_appender = msg_args_appender.open_array_container(c"{sv}").unwrap();
-    options_builder(&mut options_appender);
+    options_builder(SaveFileOptionsAppender(&mut options_appender));
     options_appender.close().expect("no enough memory");
 
     dbus.send_with_serial(&mut msg).expect("no enough memory")
+}
+
+#[repr(transparent)]
+pub struct SaveFileOptionsAppender<'a, 'm>(
+    &'a mut dbus::MessageIterAppendContainer<'m, dbus::MessageIterAppend<'m>>,
+);
+impl SaveFileOptionsAppender<'_, '_> {
+    pub fn append_handle_token(&mut self, value: &core::ffi::CStr) {
+        let mut dict_appender = self
+            .0
+            .open_dict_entry_container()
+            .expect("no enough memory");
+        dict_appender
+            .append_cstr(c"handle_token")
+            .expect("no enough memory");
+        dict_appender
+            .append_variant_cstr(value)
+            .expect("no enough memory");
+        dict_appender.close().expect("no enough memory");
+    }
+
+    pub fn append_filters<'fname>(
+        &mut self,
+        filters: impl IntoIterator<Item = (&'fname core::ffi::CStr, impl IntoIterator<Item = Filter>)>,
+    ) {
+        let mut dict_appender = self.0.open_dict_entry_container().unwrap();
+        dict_appender.append_cstr(c"filters").unwrap();
+        let mut filter_variant_appender =
+            dict_appender.open_variant_container(c"a(sa(us))").unwrap();
+        let mut filters_appender = filter_variant_appender
+            .open_array_container(c"(sa(us))")
+            .unwrap();
+        for (name, filters) in filters {
+            let mut filter_struct_appender =
+                filters_appender.open_struct_container(c"sa(us)").unwrap();
+            filter_struct_appender.append_cstr(name).unwrap();
+            let mut filter_ext_appender = filter_struct_appender
+                .open_array_container(c"(us)")
+                .unwrap();
+            for f in filters {
+                let mut filter_ext_content_appender =
+                    filter_ext_appender.open_struct_container(c"us").unwrap();
+                match f {
+                    Filter::Glob(x) => {
+                        filter_ext_content_appender.append_u32(0).unwrap();
+                        filter_ext_content_appender.append_cstr(&x).unwrap();
+                    }
+                    Filter::MIME(x) => {
+                        filter_ext_content_appender.append_u32(1).unwrap();
+                        filter_ext_content_appender.append_cstr(&x).unwrap();
+                    }
+                    Filter::Unknown(n, x) => {
+                        filter_ext_content_appender.append_u32(n).unwrap();
+                        filter_ext_content_appender.append_cstr(&x).unwrap();
+                    }
+                }
+                filter_ext_content_appender.close().unwrap();
+            }
+            filter_ext_appender.close().unwrap();
+            filter_struct_appender.close().unwrap();
+        }
+        filters_appender.close().unwrap();
+        filter_variant_appender.close().unwrap();
+        dict_appender.close().unwrap();
+    }
 }
 
 pub fn read_save_file_reply(msg: dbus::Message) -> Result<ObjectPath, dbus::Error> {

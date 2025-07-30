@@ -31,8 +31,6 @@ mod text;
 mod trigger_cell;
 mod uikit;
 
-#[cfg(unix)]
-use dbus::MessageIterAppendLike;
 use helper_types::SafeF32;
 use shared_perflog_proto::{ProfileMarker, ProfileMarkerCategory};
 use uikit::popup::PopupManager;
@@ -2599,7 +2597,7 @@ impl DesktopPortalFileChooser {
         dbus: &DBusLink,
         parent_window: Option<&core::ffi::CStr>,
         title: &core::ffi::CStr,
-        options_builder: impl FnOnce(&mut dbus::MessageIterAppendContainer<dbus::MessageIterAppend>),
+        options_builder: impl FnOnce(desktop_portal_proto::file_chooser::OpenFileOptionsAppender),
     ) -> Result<DesktopPortalRequestObject, dbus::Error> {
         Ok(DesktopPortal::open_request_object(
             desktop_portal_proto::file_chooser::read_open_file_reply(
@@ -2620,7 +2618,7 @@ impl DesktopPortalFileChooser {
         dbus: &DBusLink,
         parent_window: Option<&core::ffi::CStr>,
         title: &core::ffi::CStr,
-        options_builder: impl FnOnce(&mut dbus::MessageIterAppendContainer<dbus::MessageIterAppend>),
+        options_builder: impl FnOnce(desktop_portal_proto::file_chooser::SaveFileOptionsAppender),
     ) -> Result<DesktopPortalRequestObject, dbus::Error> {
         Ok(DesktopPortal::open_request_object(
             desktop_portal_proto::file_chooser::read_save_file_reply(
@@ -3001,18 +2999,11 @@ impl SystemLink {
                 &self.dbus,
                 exported_shell.as_ref().map(|x| x.handle.as_c_str()),
                 c"Add Sprite",
-                |options_appender| {
-                    let mut dict_appender = options_appender.open_dict_entry_container().unwrap();
-                    dict_appender.append_cstr(c"handle_token").unwrap();
-                    dict_appender
-                        .append_variant_cstr(&std::ffi::CString::new(dialog_token.clone()).unwrap())
-                        .unwrap();
-                    dict_appender.close().unwrap();
-
-                    let mut dict_appender = options_appender.open_dict_entry_container().unwrap();
-                    dict_appender.append_cstr(c"multiple").unwrap();
-                    dict_appender.append_variant_bool(true).unwrap();
-                    dict_appender.close().unwrap();
+                |mut options_appender| {
+                    options_appender.append_handle_token(
+                        &std::ffi::CString::new(dialog_token.clone()).unwrap(),
+                    );
+                    options_appender.append_multiple(true);
                 },
             )
             .await
@@ -3073,18 +3064,17 @@ impl SystemLink {
                 &self.dbus,
                 exported_shell.as_ref().map(|x| x.handle.as_c_str()),
                 c"Open",
-                |options_appender| {
-                    let mut dict_appender = options_appender.open_dict_entry_container().unwrap();
-                    dict_appender.append_cstr(c"handle_token").unwrap();
-                    dict_appender
-                        .append_variant_cstr(&std::ffi::CString::new(dialog_token.clone()).unwrap())
-                        .unwrap();
-                    dict_appender.close().unwrap();
-
-                    let mut dict_appender = options_appender.open_dict_entry_container().unwrap();
-                    dict_appender.append_cstr(c"multiple").unwrap();
-                    dict_appender.append_variant_bool(false).unwrap();
-                    dict_appender.close().unwrap();
+                |mut options_appender| {
+                    options_appender.append_handle_token(
+                        &std::ffi::CString::new(dialog_token.clone()).unwrap(),
+                    );
+                    options_appender.append_multiple(false);
+                    options_appender.append_current_filter(
+                        c"Peridot Sprite Atlas asset",
+                        [desktop_portal_proto::file_chooser::Filter::Glob(
+                            c"*.psa".into(),
+                        )],
+                    );
                 },
             )
             .await
@@ -3142,39 +3132,16 @@ impl SystemLink {
                 &self.dbus,
                 exported_shell.as_ref().map(|x| x.handle.as_c_str()),
                 c"Save",
-                |options_appender| {
-                    let mut dict_appender = options_appender.open_dict_entry_container().unwrap();
-                    dict_appender.append_cstr(c"handle_token").unwrap();
-                    dict_appender
-                        .append_variant_cstr(&std::ffi::CString::new(dialog_token.clone()).unwrap())
-                        .unwrap();
-                    dict_appender.close().unwrap();
-
-                    let mut dict_appender = options_appender.open_dict_entry_container().unwrap();
-                    dict_appender.append_cstr(c"filters").unwrap();
-                    let mut filter_variant_appender =
-                        dict_appender.open_variant_container(c"a(sa(us))").unwrap();
-                    let mut filter_appender = filter_variant_appender
-                        .open_array_container(c"(sa(us))")
-                        .unwrap();
-                    let mut filter_struct_appender =
-                        filter_appender.open_struct_container(c"sa(us)").unwrap();
-                    filter_struct_appender
-                        .append_cstr(c"Peridot Sprite Atlas asset")
-                        .unwrap();
-                    let mut filter_ext_appender = filter_struct_appender
-                        .open_array_container(c"(us)")
-                        .unwrap();
-                    let mut filter_ext_content_appender =
-                        filter_ext_appender.open_struct_container(c"us").unwrap();
-                    filter_ext_content_appender.append_u32(0).unwrap();
-                    filter_ext_content_appender.append_cstr(c"*.psa").unwrap();
-                    filter_ext_content_appender.close().unwrap();
-                    filter_ext_appender.close().unwrap();
-                    filter_struct_appender.close().unwrap();
-                    filter_appender.close().unwrap();
-                    filter_variant_appender.close().unwrap();
-                    dict_appender.close().unwrap();
+                |mut options_appender| {
+                    options_appender.append_handle_token(
+                        &std::ffi::CString::new(dialog_token.clone()).unwrap(),
+                    );
+                    options_appender.append_filters([(
+                        c"Peridot Sprite Atlas asset",
+                        [desktop_portal_proto::file_chooser::Filter::Glob(
+                            c"*.psa".into(),
+                        )],
+                    )]);
                 },
             )
             .await

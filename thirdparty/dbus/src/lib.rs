@@ -628,19 +628,18 @@ pub trait MessageIterAppendLike {
     }
 
     #[inline(always)]
+    fn open_struct_container<'p1>(
+        &'p1 mut self,
+    ) -> Result<MessageIterAppendContainer<'p1, Self>, NotEnoughMemory> {
+        self.open_container(ffi::DBUS_TYPE_STRUCT, None)
+    }
+
+    #[inline(always)]
     fn open_array_container<'p1>(
         &'p1 mut self,
         contained_signature: &CStr,
     ) -> Result<MessageIterAppendContainer<'p1, Self>, NotEnoughMemory> {
         self.open_container(ffi::DBUS_TYPE_ARRAY, Some(contained_signature))
-    }
-
-    #[inline(always)]
-    fn open_struct_container<'p1>(
-        &'p1 mut self,
-        contained_signature: &CStr,
-    ) -> Result<MessageIterAppendContainer<'p1, Self>, NotEnoughMemory> {
-        self.open_container(ffi::DBUS_TYPE_STRUCT, Some(contained_signature))
     }
 
     #[inline(always)]

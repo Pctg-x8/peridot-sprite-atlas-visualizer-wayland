@@ -78,42 +78,38 @@ impl OpenFileOptionsAppender<'_, '_> {
     ) {
         let mut dict_appender = self.0.open_dict_entry_container().unwrap();
         dict_appender.append_cstr(c"filters").unwrap();
-        let mut filter_variant_appender =
+        let mut values_variant_appender =
             dict_appender.open_variant_container(c"a(sa(us))").unwrap();
-        let mut filters_appender = filter_variant_appender
+        let mut values_appender = values_variant_appender
             .open_array_container(c"(sa(us))")
             .unwrap();
         for (name, filters) in filters {
-            let mut filter_struct_appender =
-                filters_appender.open_struct_container(c"sa(us)").unwrap();
-            filter_struct_appender.append_cstr(name).unwrap();
-            let mut filter_ext_appender = filter_struct_appender
-                .open_array_container(c"(us)")
-                .unwrap();
+            let mut pair_appender = values_appender.open_struct_container().unwrap();
+            pair_appender.append_cstr(name).unwrap();
+            let mut filters_appender = pair_appender.open_array_container(c"(us)").unwrap();
             for f in filters {
-                let mut filter_ext_content_appender =
-                    filter_ext_appender.open_struct_container(c"us").unwrap();
+                let mut content_appender = filters_appender.open_struct_container().unwrap();
                 match f {
                     Filter::Glob(x) => {
-                        filter_ext_content_appender.append_u32(0).unwrap();
-                        filter_ext_content_appender.append_cstr(&x).unwrap();
+                        content_appender.append_u32(0).unwrap();
+                        content_appender.append_cstr(&x).unwrap();
                     }
                     Filter::MIME(x) => {
-                        filter_ext_content_appender.append_u32(1).unwrap();
-                        filter_ext_content_appender.append_cstr(&x).unwrap();
+                        content_appender.append_u32(1).unwrap();
+                        content_appender.append_cstr(&x).unwrap();
                     }
                     Filter::Unknown(n, x) => {
-                        filter_ext_content_appender.append_u32(n).unwrap();
-                        filter_ext_content_appender.append_cstr(&x).unwrap();
+                        content_appender.append_u32(n).unwrap();
+                        content_appender.append_cstr(&x).unwrap();
                     }
                 }
-                filter_ext_content_appender.close().unwrap();
+                content_appender.close().unwrap();
             }
-            filter_ext_appender.close().unwrap();
-            filter_struct_appender.close().unwrap();
+            filters_appender.close().unwrap();
+            pair_appender.close().unwrap();
         }
-        filters_appender.close().unwrap();
-        filter_variant_appender.close().unwrap();
+        values_appender.close().unwrap();
+        values_variant_appender.close().unwrap();
         dict_appender.close().unwrap();
     }
 
@@ -124,34 +120,31 @@ impl OpenFileOptionsAppender<'_, '_> {
     ) {
         let mut dict_appender = self.0.open_dict_entry_container().unwrap();
         dict_appender.append_cstr(c"current_filter").unwrap();
-        let mut filters_appender = dict_appender.open_variant_container(c"(sa(us))").unwrap();
-        let mut filter_struct_appender = filters_appender.open_struct_container(c"sa(us)").unwrap();
-        filter_struct_appender.append_cstr(filter_name).unwrap();
-        let mut filter_ext_appender = filter_struct_appender
-            .open_array_container(c"(us)")
-            .unwrap();
+        let mut value_variant_appender = dict_appender.open_variant_container(c"(sa(us))").unwrap();
+        let mut value_pair_appender = value_variant_appender.open_struct_container().unwrap();
+        value_pair_appender.append_cstr(filter_name).unwrap();
+        let mut filters_appender = value_pair_appender.open_array_container(c"(us)").unwrap();
         for f in filters {
-            let mut filter_ext_content_appender =
-                filter_ext_appender.open_struct_container(c"us").unwrap();
+            let mut content_appender = filters_appender.open_struct_container().unwrap();
             match f {
                 Filter::Glob(x) => {
-                    filter_ext_content_appender.append_u32(0).unwrap();
-                    filter_ext_content_appender.append_cstr(&x).unwrap();
+                    content_appender.append_u32(0).unwrap();
+                    content_appender.append_cstr(&x).unwrap();
                 }
                 Filter::MIME(x) => {
-                    filter_ext_content_appender.append_u32(1).unwrap();
-                    filter_ext_content_appender.append_cstr(&x).unwrap();
+                    content_appender.append_u32(1).unwrap();
+                    content_appender.append_cstr(&x).unwrap();
                 }
                 Filter::Unknown(n, x) => {
-                    filter_ext_content_appender.append_u32(n).unwrap();
-                    filter_ext_content_appender.append_cstr(&x).unwrap();
+                    content_appender.append_u32(n).unwrap();
+                    content_appender.append_cstr(&x).unwrap();
                 }
             }
-            filter_ext_content_appender.close().unwrap();
+            content_appender.close().unwrap();
         }
-        filter_ext_appender.close().unwrap();
-        filter_struct_appender.close().unwrap();
         filters_appender.close().unwrap();
+        value_pair_appender.close().unwrap();
+        value_variant_appender.close().unwrap();
         dict_appender.close().unwrap();
     }
 }
@@ -226,42 +219,38 @@ impl SaveFileOptionsAppender<'_, '_> {
     ) {
         let mut dict_appender = self.0.open_dict_entry_container().unwrap();
         dict_appender.append_cstr(c"filters").unwrap();
-        let mut filter_variant_appender =
+        let mut values_variant_appender =
             dict_appender.open_variant_container(c"a(sa(us))").unwrap();
-        let mut filters_appender = filter_variant_appender
+        let mut values_appender = values_variant_appender
             .open_array_container(c"(sa(us))")
             .unwrap();
         for (name, filters) in filters {
-            let mut filter_struct_appender =
-                filters_appender.open_struct_container(c"sa(us)").unwrap();
-            filter_struct_appender.append_cstr(name).unwrap();
-            let mut filter_ext_appender = filter_struct_appender
-                .open_array_container(c"(us)")
-                .unwrap();
+            let mut pair_appender = values_appender.open_struct_container().unwrap();
+            pair_appender.append_cstr(name).unwrap();
+            let mut filters_appender = pair_appender.open_array_container(c"(us)").unwrap();
             for f in filters {
-                let mut filter_ext_content_appender =
-                    filter_ext_appender.open_struct_container(c"us").unwrap();
+                let mut content_appender = filters_appender.open_struct_container().unwrap();
                 match f {
                     Filter::Glob(x) => {
-                        filter_ext_content_appender.append_u32(0).unwrap();
-                        filter_ext_content_appender.append_cstr(&x).unwrap();
+                        content_appender.append_u32(0).unwrap();
+                        content_appender.append_cstr(&x).unwrap();
                     }
                     Filter::MIME(x) => {
-                        filter_ext_content_appender.append_u32(1).unwrap();
-                        filter_ext_content_appender.append_cstr(&x).unwrap();
+                        content_appender.append_u32(1).unwrap();
+                        content_appender.append_cstr(&x).unwrap();
                     }
                     Filter::Unknown(n, x) => {
-                        filter_ext_content_appender.append_u32(n).unwrap();
-                        filter_ext_content_appender.append_cstr(&x).unwrap();
+                        content_appender.append_u32(n).unwrap();
+                        content_appender.append_cstr(&x).unwrap();
                     }
                 }
-                filter_ext_content_appender.close().unwrap();
+                content_appender.close().unwrap();
             }
-            filter_ext_appender.close().unwrap();
-            filter_struct_appender.close().unwrap();
+            filters_appender.close().unwrap();
+            pair_appender.close().unwrap();
         }
-        filters_appender.close().unwrap();
-        filter_variant_appender.close().unwrap();
+        values_appender.close().unwrap();
+        values_variant_appender.close().unwrap();
         dict_appender.close().unwrap();
     }
 }

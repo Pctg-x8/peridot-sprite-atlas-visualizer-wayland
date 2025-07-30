@@ -330,7 +330,7 @@ impl wl::PointerEventListener for WaylandShellEventHandler<'_, '_> {
                             {
                                 // double click
                                 self.app_event_bus
-                                    .push(AppEvent::ToplevelWindowMaximizeRequest);
+                                    .push(AppEvent::ToplevelWindowToggleMaximizeRestoreRequest);
                             } else {
                                 unsafe { &*self.xdg_toplevel_proxy_ptr }
                                     .r#move(unsafe { &*self.primary_seat_ptr }, serial)

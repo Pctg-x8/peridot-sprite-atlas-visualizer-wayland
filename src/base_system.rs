@@ -36,8 +36,11 @@ use scratch_buffer::StagingScratchBufferManager;
 mod cache;
 #[macro_use]
 pub mod prof;
+mod corner_cutout;
 pub mod scratch_buffer;
 pub mod svg;
+
+pub use self::corner_cutout::WindowCornerCutoutRenderer;
 
 pub struct FontSet {
     pub ui_default: freetype::Owned<freetype::Face>,
@@ -1984,7 +1987,7 @@ impl PixelFormat {
 
 pub struct RenderTexture<'subsystem> {
     res: br::ImageViewObject<br::ImageObject<&'subsystem Subsystem>>,
-    mem: br::DeviceMemoryObject<&'subsystem Subsystem>,
+    _mem: br::DeviceMemoryObject<&'subsystem Subsystem>,
     size: br::Extent2D,
     pixel_format: PixelFormat,
     msaa_count: Option<br::vk::VkSampleCountFlagBits>,
@@ -2050,7 +2053,7 @@ impl<'subsystem> RenderTexture<'subsystem> {
                 br::ImageSubresourceRange::new(format.aspect_mask(), 0..1, 0..1),
             )
             .create()?,
-            mem,
+            _mem: mem,
             size,
             pixel_format: format,
             msaa_count: options.msaa_count,

@@ -13,7 +13,7 @@ use crate::{
         AppBaseSystem, BufferMapMode, FontType, MemoryBoundBuffer, PixelFormat, RenderPassOptions,
         RenderTexture, RenderTextureFlags, RenderTextureOptions, inject_cmd_begin_render_pass2,
         inject_cmd_end_render_pass2, inject_cmd_pipeline_barrier_2,
-        scratch_buffer::StagingScratchBufferManager,
+        scratch_buffer::StagingScratchBuffer,
     },
     composite::{
         AnimatableColor, AnimatableFloat, AnimationCurve, ClipConfig, CompositeMode, CompositeRect,
@@ -708,7 +708,7 @@ impl CellView {
     fn rescale(
         &self,
         base_system: &mut AppBaseSystem,
-        staging_scratch_buffer: &mut StagingScratchBufferManager,
+        staging_scratch_buffer: &mut StagingScratchBuffer,
         ui_scale_factor: SafeF32,
     ) {
         base_system
@@ -816,7 +816,7 @@ impl CellView {
         &self,
         label: &str,
         base_system: &mut AppBaseSystem,
-        staging_scratch_buffer: &mut StagingScratchBufferManager,
+        staging_scratch_buffer: &mut StagingScratchBuffer,
     ) {
         if label == self.label.borrow().as_str() {
             // no changes
@@ -1304,7 +1304,7 @@ impl FrameView {
     fn rescale(
         &self,
         base_system: &mut AppBaseSystem,
-        staging_scratch_buffer: &mut StagingScratchBufferManager,
+        staging_scratch_buffer: &mut StagingScratchBuffer,
         ui_scale_factor: SafeF32,
     ) {
         base_system.free_mask_atlas_rect(
@@ -1689,7 +1689,7 @@ impl Presenter {
     pub fn rescale(
         &mut self,
         base_system: &mut AppBaseSystem,
-        staging_scratch_buffer: &mut StagingScratchBufferManager,
+        staging_scratch_buffer: &mut StagingScratchBuffer,
         ui_scale_factor: SafeF32,
     ) {
         self.ui_scale_factor = ui_scale_factor.value();
@@ -1708,7 +1708,7 @@ impl Presenter {
         &mut self,
         app_system: &'base_system mut AppBaseSystem<'subsystem>,
         current_sec: f32,
-        staging_scratch_buffer: &'r mut StagingScratchBufferManager<'subsystem>,
+        staging_scratch_buffer: &'r mut StagingScratchBuffer<'subsystem>,
     ) {
         self.ht_action_handler.view.update(app_system, current_sec);
         self.ht_action_handler

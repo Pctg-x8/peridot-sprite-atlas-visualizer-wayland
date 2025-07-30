@@ -1,5 +1,4 @@
 use bedrock::{self as br, Device, MemoryBound, VkHandle};
-use parking_lot::RwLock;
 
 use crate::subsystem::Subsystem;
 
@@ -10,7 +9,7 @@ pub struct StagingScratchBufferReservation {
 }
 
 /// Potentially resource leak
-pub struct UnsafeStagingScratchBufferRaw {
+pub struct UnsafeStagingScratchBufferRawBlock {
     buffer: br::vk::VkBuffer,
     memory: br::vk::VkDeviceMemory,
     requires_explicit_flush: bool,
@@ -18,9 +17,9 @@ pub struct UnsafeStagingScratchBufferRaw {
     size: br::DeviceSize,
     top: br::DeviceSize,
 }
-unsafe impl Sync for UnsafeStagingScratchBufferRaw {}
-unsafe impl Send for UnsafeStagingScratchBufferRaw {}
-impl br::VkHandle for UnsafeStagingScratchBufferRaw {
+unsafe impl Sync for UnsafeStagingScratchBufferRawBlock {}
+unsafe impl Send for UnsafeStagingScratchBufferRawBlock {}
+impl br::VkHandle for UnsafeStagingScratchBufferRawBlock {
     type Handle = br::vk::VkBuffer;
 
     #[inline(always)]
@@ -28,7 +27,7 @@ impl br::VkHandle for UnsafeStagingScratchBufferRaw {
         self.buffer
     }
 }
-impl UnsafeStagingScratchBufferRaw {
+impl UnsafeStagingScratchBufferRawBlock {
     unsafe fn drop_with_gfx_device(&mut self, gfx_device: &Subsystem) {
         unsafe {
             br::vkfn_wrapper::free_memory(gfx_device.native_ptr(), self.memory, None);
@@ -128,18 +127,18 @@ impl UnsafeStagingScratchBufferRaw {
     }
 }
 
-pub struct StagingScratchBuffer<'g> {
+pub struct StagingScratchBufferBlock<'g> {
     gfx_device_ref: &'g Subsystem,
-    raw: UnsafeStagingScratchBufferRaw,
+    raw: UnsafeStagingScratchBufferRawBlock,
 }
-impl Drop for StagingScratchBuffer<'_> {
+impl Drop for StagingScratchBufferBlock<'_> {
     fn drop(&mut self) {
         unsafe {
             self.raw.drop_with_gfx_device(self.gfx_device_ref);
         }
     }
 }
-impl br::VkHandle for StagingScratchBuffer<'_> {
+impl br::VkHandle for StagingScratchBufferBlock<'_> {
     type Handle = br::vk::VkBuffer;
 
     #[inline(always)]
@@ -147,12 +146,12 @@ impl br::VkHandle for StagingScratchBuffer<'_> {
         self.raw.native_ptr()
     }
 }
-impl<'g> StagingScratchBuffer<'g> {
+impl<'g> StagingScratchBufferBlock<'g> {
     #[tracing::instrument(name = "StagingScratchBuffer::new", skip(gfx_device))]
     pub fn new(gfx_device: &'g Subsystem, size: br::DeviceSize) -> Self {
         Self {
             gfx_device_ref: gfx_device,
-            raw: UnsafeStagingScratchBufferRaw::new(gfx_device, size),
+            raw: UnsafeStagingScratchBufferRawBlock::new(gfx_device, size),
         }
     }
 
@@ -179,17 +178,16 @@ impl<'g> StagingScratchBuffer<'g> {
 /// alloc-only buffer resource manager: using tlsf algorithm for best-fit buffer block finding.
 ///
 /// Safety: must be used with compatible gfx_device
-pub struct UnsafeStagingScratchBufferManagerRaw {
-    buffer_blocks: Vec<UnsafeStagingScratchBufferRaw>,
+pub struct UnsafeStagingScratchBufferRaw {
+    buffer_blocks: Vec<UnsafeStagingScratchBufferRawBlock>,
     first_level_free_residency_bit: u64,
-    second_level_free_residency_bit:
-        [u16; UnsafeStagingScratchBufferManagerRaw::FIRST_LEVEL_MAX_COUNT],
+    second_level_free_residency_bit: [u16; UnsafeStagingScratchBufferRaw::FIRST_LEVEL_MAX_COUNT],
     suitable_block_head_index: [usize;
-        UnsafeStagingScratchBufferManagerRaw::SECOND_LEVEL_ENTRY_COUNT
-            * UnsafeStagingScratchBufferManagerRaw::FIRST_LEVEL_MAX_COUNT],
+        UnsafeStagingScratchBufferRaw::SECOND_LEVEL_ENTRY_COUNT
+            * UnsafeStagingScratchBufferRaw::FIRST_LEVEL_MAX_COUNT],
     total_reserve_amount: br::DeviceSize,
 }
-impl UnsafeStagingScratchBufferManagerRaw {
+impl UnsafeStagingScratchBufferRaw {
     pub unsafe fn drop_with_gfx_device(&mut self, gfx_device: &Subsystem) {
         for b in &mut self.buffer_blocks {
             unsafe {
@@ -214,7 +212,7 @@ impl UnsafeStagingScratchBufferManagerRaw {
 
     pub fn new(gfx_device: &Subsystem) -> Self {
         let mut this = Self {
-            buffer_blocks: vec![UnsafeStagingScratchBufferRaw::new(
+            buffer_blocks: vec![UnsafeStagingScratchBufferRawBlock::new(
                 gfx_device,
                 Self::BLOCK_SIZE,
             )],
@@ -423,14 +421,14 @@ impl UnsafeStagingScratchBufferManagerRaw {
     }
 }
 
-pub struct BufferedStagingScratchBuffer<'subsystem> {
-    buffers: Vec<StagingScratchBufferManager<'subsystem>>,
+pub struct FlippableStagingScratchBufferGroup<'subsystem> {
+    buffers: Vec<StagingScratchBuffer<'subsystem>>,
     active_index: usize,
 }
-impl<'subsystem> BufferedStagingScratchBuffer<'subsystem> {
+impl<'subsystem> FlippableStagingScratchBufferGroup<'subsystem> {
     pub fn new(subsystem: &'subsystem Subsystem, count: usize) -> Self {
         Self {
-            buffers: core::iter::repeat_with(|| StagingScratchBufferManager::new(subsystem))
+            buffers: core::iter::repeat_with(|| StagingScratchBuffer::new(subsystem))
                 .take(count)
                 .collect(),
             active_index: 0,
@@ -442,21 +440,21 @@ impl<'subsystem> BufferedStagingScratchBuffer<'subsystem> {
         self.buffers[self.active_index].reset();
     }
 
-    pub fn active_buffer<'s>(&'s self) -> &'s StagingScratchBufferManager<'subsystem> {
+    pub fn active_buffer<'s>(&'s self) -> &'s StagingScratchBuffer<'subsystem> {
         &self.buffers[self.active_index]
     }
 
-    pub fn active_buffer_mut<'s>(&'s mut self) -> &'s mut StagingScratchBufferManager<'subsystem> {
+    pub fn active_buffer_mut<'s>(&'s mut self) -> &'s mut StagingScratchBuffer<'subsystem> {
         &mut self.buffers[self.active_index]
     }
 }
 
 // alloc-only buffer resource manager: using tlsf algorithm for best-fit buffer block finding.
-pub struct StagingScratchBufferManager<'g> {
+pub struct StagingScratchBuffer<'g> {
     gfx_device_ref: &'g Subsystem,
-    raw: UnsafeStagingScratchBufferManagerRaw,
+    raw: UnsafeStagingScratchBufferRaw,
 }
-impl Drop for StagingScratchBufferManager<'_> {
+impl Drop for StagingScratchBuffer<'_> {
     #[inline(always)]
     fn drop(&mut self) {
         unsafe {
@@ -464,11 +462,11 @@ impl Drop for StagingScratchBufferManager<'_> {
         }
     }
 }
-impl<'g> StagingScratchBufferManager<'g> {
-    #[tracing::instrument(name = "StagingScratchBufferManager::new", skip(gfx_device))]
+impl<'g> StagingScratchBuffer<'g> {
+    #[tracing::instrument(name = "StagingScratchBuffer::new", skip(gfx_device))]
     pub fn new(gfx_device: &'g Subsystem) -> Self {
         Self {
-            raw: UnsafeStagingScratchBufferManagerRaw::new(gfx_device),
+            raw: UnsafeStagingScratchBufferRaw::new(gfx_device),
             gfx_device_ref: gfx_device,
         }
     }
@@ -547,7 +545,7 @@ pub struct MappedStagingScratchBuffer<'r, 'g> {
     range: core::ops::Range<br::DeviceSize>,
     explicit_flush: bool,
     ptr: *mut core::ffi::c_void,
-    _marker: core::marker::PhantomData<&'r mut StagingScratchBuffer<'g>>,
+    _marker: core::marker::PhantomData<&'r mut StagingScratchBufferBlock<'g>>,
 }
 impl Drop for MappedStagingScratchBuffer<'_, '_> {
     fn drop(&mut self) {

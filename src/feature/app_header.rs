@@ -13,7 +13,7 @@ use crate::{
         AppBaseSystem, BufferMapMode, FontType, MemoryBoundBuffer, PixelFormat, RenderPassOptions,
         RenderTexture, RenderTextureFlags, RenderTextureOptions, inject_cmd_begin_render_pass2,
         inject_cmd_end_render_pass2, inject_cmd_pipeline_barrier_2,
-        scratch_buffer::{StagingScratchBufferManager, StagingScratchBufferMapMode},
+        scratch_buffer::{StagingScratchBuffer, StagingScratchBufferMapMode},
     },
     composite::{
         AnimatableColor, AnimatableFloat, AnimationCurve, CompositeMode, CompositeRect,
@@ -23,7 +23,7 @@ use crate::{
     input::EventContinueControl,
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SystemCommand {
     Close,
     Minimize,
@@ -80,12 +80,33 @@ impl SystemCommandButtonView {
         0, 2, 3, 3, 1, 0, 2, 4, 5, 5, 3, 2, 4, 6, 7, 7, 5, 4, 6, 0, 1, 1, 7, 6,
     ];
 
+    const RESTORE_ICON_VERTICES: &'static [[f32; 2]] = &[
+        [0.0, 2.0 / Self::ICON_SIZE],
+        [1.0 - 2.0 / Self::ICON_SIZE, 2.0 / Self::ICON_SIZE],
+        [1.0 - 2.0 / Self::ICON_SIZE, 1.0],
+        [0.0, 1.0],
+        [1.0 / Self::ICON_SIZE, 3.0 / Self::ICON_SIZE],
+        [1.0 - 3.0 / Self::ICON_SIZE, 3.0 / Self::ICON_SIZE],
+        [1.0 - 3.0 / Self::ICON_SIZE, 1.0 - 1.0 / Self::ICON_SIZE],
+        [1.0 / Self::ICON_SIZE, 1.0 - 1.0 / Self::ICON_SIZE],
+        [3.0 / Self::ICON_SIZE, 0.0],
+        [1.0, 0.0],
+        [1.0, 1.0 - 3.0 / Self::ICON_SIZE],
+        [3.0 / Self::ICON_SIZE, 1.0 / Self::ICON_SIZE],
+        [1.0 - 1.0 / Self::ICON_SIZE, 1.0 / Self::ICON_SIZE],
+        [1.0 - 1.0 / Self::ICON_SIZE, 1.0 - 3.0 / Self::ICON_SIZE],
+    ];
+    const RESTORE_ICON_INDICES: &'static [u16] = &[
+        0, 1, 4, 4, 1, 5, 1, 2, 5, 5, 2, 6, 2, 3, 6, 6, 3, 7, 3, 0, 7, 7, 0, 4, 8, 9, 11, 11, 9,
+        12, 9, 10, 12, 12, 10, 13,
+    ];
+
     const fn select_vertices_indices(cmd: SystemCommand) -> (&'static [[f32; 2]], &'static [u16]) {
         match cmd {
             SystemCommand::Close => (Self::CLOSE_ICON_VERTICES, Self::CLOSE_ICON_INDICES),
             SystemCommand::Minimize => (Self::MINIMIZE_ICON_VERTICES, Self::MINIMIZE_ICON_INDICES),
             SystemCommand::Maximize => (Self::MAXIMIZE_ICON_VERTICES, Self::MAXIMIZE_ICON_INDICES),
-            SystemCommand::Restore => unimplemented!(),
+            SystemCommand::Restore => (Self::RESTORE_ICON_VERTICES, Self::RESTORE_ICON_INDICES),
         }
     }
 
@@ -413,6 +434,16 @@ impl SystemCommandButtonView {
         self.hovering.set(false);
         self.pressing.set(false);
         self.is_dirty.set(true);
+    }
+
+    fn replace_cmd(&self, base_sys: &mut AppBaseSystem, cmd: SystemCommand) {
+        if self.cmd.replace(cmd) == cmd {
+            // no changes
+            return;
+        }
+
+        Self::render_icon(base_sys, cmd, &self.icon_atlas_rect.get());
+        self.ct_hover.mark_dirty(&mut base_sys.composite_tree);
     }
 }
 
@@ -869,7 +900,7 @@ impl BaseView {
     fn rescale(
         &self,
         base_system: &mut AppBaseSystem,
-        staging_scratch_buffer: &mut StagingScratchBufferManager,
+        staging_scratch_buffer: &mut StagingScratchBuffer,
         ui_scale_factor: f32,
     ) {
         base_system.free_mask_atlas_rect(self.text_atlas_rect.get());
@@ -905,7 +936,7 @@ impl BaseView {
     fn rebuild_active_file_name_surface(
         &self,
         base_system: &mut AppBaseSystem,
-        staging_scratch_buffer: &mut StagingScratchBufferManager,
+        staging_scratch_buffer: &mut StagingScratchBuffer,
     ) {
         if self
             .ct_active_file_name
@@ -942,7 +973,7 @@ impl BaseView {
     fn update(
         &self,
         base_system: &mut AppBaseSystem,
-        staging_scratch_buffer: &mut StagingScratchBufferManager,
+        staging_scratch_buffer: &mut StagingScratchBuffer,
     ) {
         if self.has_active_file_name_changed.replace(false) {
             self.rebuild_active_file_name_surface(base_system, staging_scratch_buffer);
@@ -1100,12 +1131,11 @@ impl HitTestTreeActionHandler for ActionHandler {
                                 .event_queue
                                 .push(AppEvent::ToplevelWindowMinimizeRequest);
                         }
-                        SystemCommand::Maximize => {
+                        SystemCommand::Maximize | SystemCommand::Restore => {
                             context
                                 .event_queue
-                                .push(AppEvent::ToplevelWindowMaximizeRequest);
+                                .push(AppEvent::ToplevelWindowToggleMaximizeRestoreRequest);
                         }
-                        SystemCommand::Restore => (),
                     }
                     return EventContinueControl::STOP_PROPAGATION;
                 }
@@ -1135,7 +1165,7 @@ impl Presenter {
                 SystemCommandButtonView::new(
                     &mut init.for_view,
                     SystemCommandButtonView::WIDTH,
-                    SystemCommand::Maximize,
+                    SystemCommand::Restore,
                 ),
                 SystemCommandButtonView::new(
                     &mut init.for_view,
@@ -1214,7 +1244,7 @@ impl Presenter {
     pub fn rescale(
         &self,
         base_system: &mut AppBaseSystem,
-        staging_scratch_buffer: &mut StagingScratchBufferManager,
+        staging_scratch_buffer: &mut StagingScratchBuffer,
         ui_scale_factor: f32,
     ) {
         self.base_view
@@ -1232,7 +1262,7 @@ impl Presenter {
     pub fn update(
         &self,
         base_system: &mut AppBaseSystem,
-        staging_scratch_buffer: &mut StagingScratchBufferManager,
+        staging_scratch_buffer: &mut StagingScratchBuffer,
         current_sec: f32,
     ) {
         self.base_view.update(base_system, staging_scratch_buffer);
@@ -1248,5 +1278,22 @@ impl Presenter {
 
     pub fn height(&self) -> f32 {
         self.base_view.height
+    }
+
+    pub fn on_shell_tiling_changed(&self, base_sys: &mut AppBaseSystem, is_tiled: bool) {
+        let Some(ref syscmds) = self.action_handler.system_command_button_views else {
+            // no syscmds on the current wm
+            return;
+        };
+
+        // always middle position is maximize/restore(ほんまか......？)
+        syscmds[1].replace_cmd(
+            base_sys,
+            if is_tiled {
+                SystemCommand::Restore
+            } else {
+                SystemCommand::Maximize
+            },
+        );
     }
 }

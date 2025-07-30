@@ -21,7 +21,7 @@ use crate::{
     base_system::{
         AppBaseSystem, inject_cmd_pipeline_barrier_2,
         scratch_buffer::{
-            BufferedStagingScratchBuffer, StagingScratchBufferManager, StagingScratchBufferMapMode,
+            FlippableStagingScratchBufferGroup, StagingScratchBuffer, StagingScratchBufferMapMode,
         },
     },
     bg_worker::{BackgroundWork, BackgroundWorkerEnqueueAccess},
@@ -650,7 +650,7 @@ impl<'d> EditingAtlasRenderer<'d> {
         &self,
         sprites: &[SpriteInfo],
         bg_worker_access: &BackgroundWorkerEnqueueAccess<'d>,
-        staging_scratch_buffers: &std::sync::Weak<RwLock<BufferedStagingScratchBuffer<'d>>>,
+        staging_scratch_buffers: &std::sync::Weak<RwLock<FlippableStagingScratchBufferGroup<'d>>>,
     ) {
         let mut buffers_mref = self.sprite_instance_buffers.borrow_mut();
         let mut rects_mref = self.sprite_atlas_rect_by_path.borrow_mut();
@@ -808,7 +808,7 @@ impl<'d> EditingAtlasRenderer<'d> {
     pub fn process_dirty_data<'c>(
         &mut self,
         subsystem: &Subsystem,
-        staging_scratch_buffer: &StagingScratchBufferManager<'d>,
+        staging_scratch_buffer: &StagingScratchBuffer<'d>,
         rec: br::CmdRecord<'c>,
     ) -> br::CmdRecord<'c> {
         if !self.is_dirty() {

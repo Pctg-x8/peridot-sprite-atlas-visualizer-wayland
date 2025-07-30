@@ -2,176 +2,77 @@ use bedrock::{self as br, Device, MemoryBound, VkHandle};
 
 use crate::subsystem::Subsystem;
 
-pub struct StagingScratchBufferReservation {
-    block_index: usize,
-    offset: br::DeviceSize,
-    size: br::DeviceSize,
-}
-
-/// Potentially resource leak
-pub struct UnsafeStagingScratchBufferRawBlock {
-    buffer: br::vk::VkBuffer,
-    memory: br::vk::VkDeviceMemory,
-    requires_explicit_flush: bool,
-    next_suitable_index: Option<usize>,
-    size: br::DeviceSize,
-    top: br::DeviceSize,
-}
-unsafe impl Sync for UnsafeStagingScratchBufferRawBlock {}
-unsafe impl Send for UnsafeStagingScratchBufferRawBlock {}
-impl br::VkHandle for UnsafeStagingScratchBufferRawBlock {
-    type Handle = br::vk::VkBuffer;
-
-    #[inline(always)]
-    fn native_ptr(&self) -> Self::Handle {
-        self.buffer
-    }
-}
-impl UnsafeStagingScratchBufferRawBlock {
-    unsafe fn drop_with_gfx_device(&mut self, gfx_device: &Subsystem) {
-        unsafe {
-            br::vkfn_wrapper::free_memory(gfx_device.native_ptr(), self.memory, None);
-            br::vkfn_wrapper::destroy_buffer(gfx_device.native_ptr(), self.buffer, None);
-        }
-    }
-
-    fn new(gfx_device: &Subsystem, size: br::DeviceSize) -> Self {
-        let mut buf = match br::BufferObject::new(
-            gfx_device,
-            &br::BufferCreateInfo::new(size as _, br::BufferUsage::TRANSFER_SRC),
-        ) {
-            Ok(x) => x,
-            Err(e) => {
-                tracing::error!(reason = ?e, "Failed to create buffer object");
-                std::process::abort();
-            }
-        };
-        let mreq = buf.requirements();
-        let Some(memindex) = gfx_device.find_host_visible_memory_index(mreq.memoryTypeBits) else {
-            tracing::error!("No suitable memory");
-            std::process::abort();
-        };
-        let is_coherent = gfx_device.is_coherent_memory_type(memindex);
-        let mem = match br::DeviceMemoryObject::new(
-            gfx_device,
-            &br::MemoryAllocateInfo::new(mreq.size, memindex),
-        ) {
-            Ok(x) => x,
-            Err(e) => {
-                tracing::error!(reason = ?e, "Failed to allocate memory");
-                std::process::abort();
-            }
-        };
-        if let Err(e) = buf.bind(&mem, 0) {
-            tracing::error!(reason = ?e, "Failed to bind memory to buffer");
-            std::process::abort();
-        }
-
-        Self {
-            buffer: buf.unmanage().0,
-            memory: mem.unmanage().0,
-            requires_explicit_flush: !is_coherent,
-            next_suitable_index: None,
-            size,
-            top: 0,
-        }
-    }
-
-    pub const fn reminder(&self) -> br::DeviceSize {
-        self.size - self.top
-    }
-
-    pub const fn reserve(&mut self, size: br::DeviceSize) -> br::DeviceSize {
-        let base = self.top;
-
-        self.top = base + size;
-        base
-    }
-
-    /// Safety: must be used with compatible gfx_device
-    pub unsafe fn map<'s, 'g>(
-        &'s self,
-        gfx_device: &'g Subsystem,
-        mode: StagingScratchBufferMapMode,
-        range: core::ops::Range<br::DeviceSize>,
-    ) -> br::Result<MappedStagingScratchBuffer<'s, 'g>> {
-        let ptr = unsafe {
-            br::vkfn_wrapper::map_memory(
-                gfx_device.native_ptr(),
-                self.memory,
-                range.start,
-                range.end - range.start,
-                0,
-            )?
-        };
-        if mode.is_read() && self.requires_explicit_flush {
-            if let Err(e) = unsafe {
-                gfx_device.invalidate_memory_range(&[br::MappedMemoryRange::new_raw(
-                    self.memory,
-                    range.start,
-                    range.end - range.start,
-                )])
-            } {
-                tracing::warn!(reason = ?e, "Failed to invalidate mapped memory range");
-            }
-        }
-
-        Ok(MappedStagingScratchBuffer {
-            gfx_device_ref: gfx_device,
-            memory: self.memory,
-            explicit_flush: self.requires_explicit_flush && mode.is_write(),
-            ptr,
-            range,
-            _marker: core::marker::PhantomData,
-        })
-    }
-}
-
-pub struct StagingScratchBufferBlock<'g> {
+// alloc-only buffer resource manager: using tlsf algorithm for best-fit buffer block finding.
+pub struct StagingScratchBuffer<'g> {
     gfx_device_ref: &'g Subsystem,
-    raw: UnsafeStagingScratchBufferRawBlock,
+    raw: UnsafeStagingScratchBufferRaw,
 }
-impl Drop for StagingScratchBufferBlock<'_> {
+impl Drop for StagingScratchBuffer<'_> {
+    #[inline(always)]
     fn drop(&mut self) {
         unsafe {
             self.raw.drop_with_gfx_device(self.gfx_device_ref);
         }
     }
 }
-impl br::VkHandle for StagingScratchBufferBlock<'_> {
-    type Handle = br::vk::VkBuffer;
-
-    #[inline(always)]
-    fn native_ptr(&self) -> Self::Handle {
-        self.raw.native_ptr()
-    }
-}
-impl<'g> StagingScratchBufferBlock<'g> {
+impl<'g> StagingScratchBuffer<'g> {
     #[tracing::instrument(name = "StagingScratchBuffer::new", skip(gfx_device))]
-    pub fn new(gfx_device: &'g Subsystem, size: br::DeviceSize) -> Self {
+    pub fn new(gfx_device: &'g Subsystem) -> Self {
         Self {
+            raw: UnsafeStagingScratchBufferRaw::new(gfx_device),
             gfx_device_ref: gfx_device,
-            raw: UnsafeStagingScratchBufferRawBlock::new(gfx_device, size),
         }
     }
 
     #[inline(always)]
-    pub const fn reminder(&self) -> br::DeviceSize {
-        self.raw.reminder()
+    pub const fn total_reserved_amount(&self) -> br::DeviceSize {
+        self.raw.total_reserved_amount()
     }
 
     #[inline(always)]
-    pub const fn reserve(&mut self, size: br::DeviceSize) -> br::DeviceSize {
+    fn reset(&mut self) {
+        self.raw.reset();
+    }
+
+    #[inline(always)]
+    pub fn reserve(&mut self, size: br::DeviceSize) -> StagingScratchBufferReservation {
         self.raw.reserve(size)
     }
 
     #[inline(always)]
-    pub fn map<'s>(
+    pub fn of<'s>(
         &'s self,
+        reservation: &StagingScratchBufferReservation,
+    ) -> (
+        &'s (impl br::VkHandle<Handle = br::vk::VkBuffer> + use<'g>),
+        br::DeviceSize,
+    ) {
+        self.raw.of(self.gfx_device_ref, reservation)
+    }
+
+    #[inline(always)]
+    pub fn of_index(
+        &self,
+        reservation: &StagingScratchBufferReservation,
+    ) -> (usize, br::DeviceSize) {
+        self.raw.of_index(reservation)
+    }
+
+    #[inline(always)]
+    pub fn buffer_of<'s>(
+        &'s self,
+        index: usize,
+    ) -> &'s (impl br::VkHandle<Handle = br::vk::VkBuffer> + use<'g>) {
+        self.raw.buffer_of(self.gfx_device_ref, index)
+    }
+
+    #[inline(always)]
+    pub fn map<'s>(
+        &'s mut self,
+        reservation: &StagingScratchBufferReservation,
         mode: StagingScratchBufferMapMode,
-        range: core::ops::Range<br::DeviceSize>,
     ) -> br::Result<MappedStagingScratchBuffer<'s, 'g>> {
-        unsafe { self.raw.map(self.gfx_device_ref, mode, range) }
+        unsafe { self.raw.map(self.gfx_device_ref, reservation, mode) }
     }
 }
 
@@ -421,105 +322,129 @@ impl UnsafeStagingScratchBufferRaw {
     }
 }
 
-pub struct FlippableStagingScratchBufferGroup<'subsystem> {
-    buffers: Vec<StagingScratchBuffer<'subsystem>>,
-    active_index: usize,
-}
-impl<'subsystem> FlippableStagingScratchBufferGroup<'subsystem> {
-    pub fn new(subsystem: &'subsystem Subsystem, count: usize) -> Self {
-        Self {
-            buffers: core::iter::repeat_with(|| StagingScratchBuffer::new(subsystem))
-                .take(count)
-                .collect(),
-            active_index: 0,
-        }
-    }
-
-    pub fn flip_next_and_ready(&mut self) {
-        self.active_index = (self.active_index + 1) % self.buffers.len();
-        self.buffers[self.active_index].reset();
-    }
-
-    pub fn active_buffer<'s>(&'s self) -> &'s StagingScratchBuffer<'subsystem> {
-        &self.buffers[self.active_index]
-    }
-
-    pub fn active_buffer_mut<'s>(&'s mut self) -> &'s mut StagingScratchBuffer<'subsystem> {
-        &mut self.buffers[self.active_index]
-    }
+#[derive(Debug, Clone)]
+pub struct StagingScratchBufferReservation {
+    block_index: usize,
+    offset: br::DeviceSize,
+    size: br::DeviceSize,
 }
 
-// alloc-only buffer resource manager: using tlsf algorithm for best-fit buffer block finding.
-pub struct StagingScratchBuffer<'g> {
-    gfx_device_ref: &'g Subsystem,
-    raw: UnsafeStagingScratchBufferRaw,
+/// Potentially resource leak
+pub struct UnsafeStagingScratchBufferRawBlock {
+    buffer: br::vk::VkBuffer,
+    memory: br::vk::VkDeviceMemory,
+    requires_explicit_flush: bool,
+    next_suitable_index: Option<usize>,
+    size: br::DeviceSize,
+    top: br::DeviceSize,
 }
-impl Drop for StagingScratchBuffer<'_> {
+unsafe impl Sync for UnsafeStagingScratchBufferRawBlock {}
+unsafe impl Send for UnsafeStagingScratchBufferRawBlock {}
+impl br::VkHandle for UnsafeStagingScratchBufferRawBlock {
+    type Handle = br::vk::VkBuffer;
+
     #[inline(always)]
-    fn drop(&mut self) {
+    fn native_ptr(&self) -> Self::Handle {
+        self.buffer
+    }
+}
+impl UnsafeStagingScratchBufferRawBlock {
+    unsafe fn drop_with_gfx_device(&mut self, gfx_device: &Subsystem) {
         unsafe {
-            self.raw.drop_with_gfx_device(self.gfx_device_ref);
+            br::vkfn_wrapper::free_memory(gfx_device.native_ptr(), self.memory, None);
+            br::vkfn_wrapper::destroy_buffer(gfx_device.native_ptr(), self.buffer, None);
         }
     }
-}
-impl<'g> StagingScratchBuffer<'g> {
-    #[tracing::instrument(name = "StagingScratchBuffer::new", skip(gfx_device))]
-    pub fn new(gfx_device: &'g Subsystem) -> Self {
+
+    fn new(gfx_device: &Subsystem, size: br::DeviceSize) -> Self {
+        let mut buf = match br::BufferObject::new(
+            gfx_device,
+            &br::BufferCreateInfo::new(size as _, br::BufferUsage::TRANSFER_SRC),
+        ) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to create buffer object");
+                std::process::abort();
+            }
+        };
+        let mreq = buf.requirements();
+        let Some(memindex) = gfx_device.find_host_visible_memory_index(mreq.memoryTypeBits) else {
+            tracing::error!("No suitable memory");
+            std::process::abort();
+        };
+        let is_coherent = gfx_device.is_coherent_memory_type(memindex);
+        let mem = match br::DeviceMemoryObject::new(
+            gfx_device,
+            &br::MemoryAllocateInfo::new(mreq.size, memindex),
+        ) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to allocate memory");
+                std::process::abort();
+            }
+        };
+        if let Err(e) = buf.bind(&mem, 0) {
+            tracing::error!(reason = ?e, "Failed to bind memory to buffer");
+            std::process::abort();
+        }
+
         Self {
-            raw: UnsafeStagingScratchBufferRaw::new(gfx_device),
-            gfx_device_ref: gfx_device,
+            buffer: buf.unmanage().0,
+            memory: mem.unmanage().0,
+            requires_explicit_flush: !is_coherent,
+            next_suitable_index: None,
+            size,
+            top: 0,
         }
     }
 
-    #[inline(always)]
-    pub const fn total_reserved_amount(&self) -> br::DeviceSize {
-        self.raw.total_reserved_amount()
+    pub const fn reminder(&self) -> br::DeviceSize {
+        self.size - self.top
     }
 
-    #[inline(always)]
-    fn reset(&mut self) {
-        self.raw.reset();
+    pub const fn reserve(&mut self, size: br::DeviceSize) -> br::DeviceSize {
+        let base = self.top;
+
+        self.top = base + size;
+        base
     }
 
-    #[inline(always)]
-    pub fn reserve(&mut self, size: br::DeviceSize) -> StagingScratchBufferReservation {
-        self.raw.reserve(size)
-    }
-
-    #[inline(always)]
-    pub fn of<'s>(
+    /// Safety: must be used with compatible gfx_device
+    pub unsafe fn map<'s, 'g>(
         &'s self,
-        reservation: &StagingScratchBufferReservation,
-    ) -> (
-        &'s (impl br::VkHandle<Handle = br::vk::VkBuffer> + use<'g>),
-        br::DeviceSize,
-    ) {
-        self.raw.of(self.gfx_device_ref, reservation)
-    }
-
-    #[inline(always)]
-    pub fn of_index(
-        &self,
-        reservation: &StagingScratchBufferReservation,
-    ) -> (usize, br::DeviceSize) {
-        self.raw.of_index(reservation)
-    }
-
-    #[inline(always)]
-    pub fn buffer_of<'s>(
-        &'s self,
-        index: usize,
-    ) -> &'s (impl br::VkHandle<Handle = br::vk::VkBuffer> + use<'g>) {
-        self.raw.buffer_of(self.gfx_device_ref, index)
-    }
-
-    #[inline(always)]
-    pub fn map<'s>(
-        &'s mut self,
-        reservation: &StagingScratchBufferReservation,
+        gfx_device: &'g Subsystem,
         mode: StagingScratchBufferMapMode,
+        range: core::ops::Range<br::DeviceSize>,
     ) -> br::Result<MappedStagingScratchBuffer<'s, 'g>> {
-        unsafe { self.raw.map(self.gfx_device_ref, reservation, mode) }
+        let ptr = unsafe {
+            br::vkfn_wrapper::map_memory(
+                gfx_device.native_ptr(),
+                self.memory,
+                range.start,
+                range.end - range.start,
+                0,
+            )?
+        };
+        if mode.is_read() && self.requires_explicit_flush {
+            if let Err(e) = unsafe {
+                gfx_device.invalidate_memory_range(&[br::MappedMemoryRange::new_raw(
+                    self.memory,
+                    range.start,
+                    range.end - range.start,
+                )])
+            } {
+                tracing::warn!(reason = ?e, "Failed to invalidate mapped memory range");
+            }
+        }
+
+        Ok(MappedStagingScratchBuffer {
+            gfx_device_ref: gfx_device,
+            memory: self.memory,
+            explicit_flush: self.requires_explicit_flush && mode.is_write(),
+            ptr,
+            range,
+            _marker: core::marker::PhantomData,
+        })
     }
 }
 
@@ -545,7 +470,7 @@ pub struct MappedStagingScratchBuffer<'r, 'g> {
     range: core::ops::Range<br::DeviceSize>,
     explicit_flush: bool,
     ptr: *mut core::ffi::c_void,
-    _marker: core::marker::PhantomData<&'r mut StagingScratchBufferBlock<'g>>,
+    _marker: core::marker::PhantomData<(&'r mut UnsafeStagingScratchBufferRawBlock, &'g Subsystem)>,
 }
 impl Drop for MappedStagingScratchBuffer<'_, '_> {
     fn drop(&mut self) {
@@ -570,5 +495,33 @@ impl Drop for MappedStagingScratchBuffer<'_, '_> {
 impl MappedStagingScratchBuffer<'_, '_> {
     pub const unsafe fn addr_of_mut<T>(&self, offset: usize) -> *mut T {
         unsafe { self.ptr.byte_add(offset).cast() }
+    }
+}
+
+pub struct FlippableStagingScratchBufferGroup<'subsystem> {
+    buffers: Vec<StagingScratchBuffer<'subsystem>>,
+    active_index: usize,
+}
+impl<'subsystem> FlippableStagingScratchBufferGroup<'subsystem> {
+    pub fn new(subsystem: &'subsystem Subsystem, count: usize) -> Self {
+        Self {
+            buffers: core::iter::repeat_with(|| StagingScratchBuffer::new(subsystem))
+                .take(count)
+                .collect(),
+            active_index: 0,
+        }
+    }
+
+    pub fn flip_next_and_ready(&mut self) {
+        self.active_index = (self.active_index + 1) % self.buffers.len();
+        self.buffers[self.active_index].reset();
+    }
+
+    pub fn active_buffer<'s>(&'s self) -> &'s StagingScratchBuffer<'subsystem> {
+        &self.buffers[self.active_index]
+    }
+
+    pub fn active_buffer_mut<'s>(&'s mut self) -> &'s mut StagingScratchBuffer<'subsystem> {
+        &mut self.buffers[self.active_index]
     }
 }

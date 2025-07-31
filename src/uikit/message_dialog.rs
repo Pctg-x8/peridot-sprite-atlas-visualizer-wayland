@@ -9,6 +9,7 @@ use crate::{
     },
     hittest::{HitTestTreeActionHandler, HitTestTreeRef, PointerActionArgs},
     input::EventContinueControl,
+    uikit::popup::{PopupPresenter, PopupPresenterSpawnable},
 };
 
 use super::{common_controls::CommonButtonView, popup};
@@ -69,6 +70,18 @@ struct ActionHandler {
     popup_id: uuid::Uuid,
 }
 impl HitTestTreeActionHandler for ActionHandler {
+    fn cursor_shape(
+        &self,
+        sender: HitTestTreeRef,
+        _context: &mut AppUpdateContext,
+    ) -> crate::hittest::CursorShape {
+        if let Some(c) = self.confirm_button.try_handle_cursor_shape(sender) {
+            return c;
+        }
+
+        return crate::hittest::CursorShape::Default;
+    }
+
     fn on_pointer_enter(
         &self,
         sender: HitTestTreeRef,
@@ -193,36 +206,43 @@ impl HitTestTreeActionHandler for ActionHandler {
 pub struct Presenter {
     action_handler: Rc<ActionHandler>,
 }
-impl Presenter {
-    pub fn new(init: &mut PresenterInitContext, popup_id: uuid::Uuid, content: &str) -> Self {
-        let content_view = ContentView::new(&mut init.for_view, content);
-        let confirm_button = CommonButtonView::new(&mut init.for_view, "OK");
+impl PopupPresenterSpawnable for Presenter {
+    type SpawnArgs<'a> = &'a str;
+
+    fn new<'a>(
+        init_context: &mut PresenterInitContext,
+        id: uuid::Uuid,
+        args: Self::SpawnArgs<'a>,
+    ) -> Self {
+        let content_view = ContentView::new(&mut init_context.for_view, args);
+        let confirm_button = CommonButtonView::new(&mut init_context.for_view, "OK");
         let frame_view = popup::CommonFrameView::new(
-            &mut init.for_view,
+            &mut init_context.for_view,
             content_view.preferred_width,
             content_view.preferred_height + 4.0 + confirm_button.preferred_height(),
         );
-        let mask_view = popup::MaskView::new(&mut init.for_view);
+        let mask_view = popup::MaskView::new(&mut init_context.for_view);
 
         frame_view.mount(
-            init.for_view.base_system,
+            init_context.for_view.base_system,
             mask_view.ct_root(),
             mask_view.ht_root(),
         );
         content_view.mount(
             frame_view.ct_root(),
-            &mut init.for_view.base_system.composite_tree,
+            &mut init_context.for_view.base_system.composite_tree,
         );
         confirm_button.mount(
-            init.for_view.base_system,
+            init_context.for_view.base_system,
             frame_view.ct_root(),
             frame_view.ht_root(),
         );
 
         {
             let confirm_button_ct =
-                confirm_button.ct_mut(&mut init.for_view.base_system.composite_tree);
-            let confirm_button_ht = confirm_button.ht_mut(&mut init.for_view.base_system.hit_tree);
+                confirm_button.ct_mut(&mut init_context.for_view.base_system.composite_tree);
+            let confirm_button_ht =
+                confirm_button.ht_mut(&mut init_context.for_view.base_system.hit_tree);
 
             confirm_button_ct.relative_offset_adjustment = [0.5, 0.0];
             confirm_button_ct.offset = [
@@ -238,31 +258,34 @@ impl Presenter {
             mask_view,
             frame_view,
             confirm_button,
-            popup_id,
+            popup_id: id,
         });
-        action_handler
-            .mask_view
-            .bind_action_handler(&action_handler, &mut init.for_view.base_system.hit_tree);
-        action_handler
-            .frame_view
-            .bind_action_handler(&action_handler, &mut init.for_view.base_system.hit_tree);
-        action_handler
-            .confirm_button
-            .bind_action_handler(&action_handler, &mut init.for_view.base_system.hit_tree);
+        action_handler.mask_view.bind_action_handler(
+            &action_handler,
+            &mut init_context.for_view.base_system.hit_tree,
+        );
+        action_handler.frame_view.bind_action_handler(
+            &action_handler,
+            &mut init_context.for_view.base_system.hit_tree,
+        );
+        action_handler.confirm_button.bind_action_handler(
+            &action_handler,
+            &mut init_context.for_view.base_system.hit_tree,
+        );
 
         Self { action_handler }
     }
-
-    pub fn show(
+}
+impl PopupPresenter for Presenter {
+    fn show(
         &self,
         app_system: &mut AppBaseSystem,
-        ct_parent: CompositeTreeRef,
-        ht_parent: HitTestTreeRef,
+        parents: (CompositeTreeRef, HitTestTreeRef),
         current_sec: f32,
     ) {
         self.action_handler
             .mask_view
-            .mount(app_system, ct_parent, ht_parent);
+            .mount(app_system, parents.0, parents.1);
         self.action_handler
             .mask_view
             .show(&mut app_system.composite_tree, current_sec);
@@ -271,7 +294,13 @@ impl Presenter {
             .show(&mut app_system.composite_tree, current_sec);
     }
 
-    pub fn hide(&self, app_system: &mut AppBaseSystem, current_sec: f32) {
+    fn update(&self, base_sys: &mut AppBaseSystem, current_sec: f32) {
+        self.action_handler
+            .confirm_button
+            .update(&mut base_sys.composite_tree, current_sec);
+    }
+
+    fn hide(&self, app_system: &mut AppBaseSystem, current_sec: f32) {
         self.action_handler
             .mask_view
             .unmount_ht(&mut app_system.hit_tree);
@@ -287,11 +316,9 @@ impl Presenter {
             .hide(&mut app_system.composite_tree, current_sec);
     }
 
-    pub fn unmount(&self, ct: &mut CompositeTree) {
-        self.action_handler.mask_view.unmount_visual(ct);
-    }
-
-    pub fn update(&self, ct: &mut CompositeTree, current_sec: f32) {
-        self.action_handler.confirm_button.update(ct, current_sec);
+    fn unmount(&self, base_sys: &mut AppBaseSystem) {
+        self.action_handler
+            .mask_view
+            .unmount_visual(&mut base_sys.composite_tree);
     }
 }

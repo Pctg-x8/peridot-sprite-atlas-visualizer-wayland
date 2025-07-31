@@ -1696,7 +1696,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     );
                 }
                 AppEvent::UIMessageDialogRequest { content } => {
-                    popup_manager.spawn(
+                    popup_manager.spawn::<uikit::message_dialog::Presenter>(
                         &mut PresenterInitContext {
                             for_view: ViewInitContext {
                                 base_system: app_system,

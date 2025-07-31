@@ -10,7 +10,9 @@ use crate::{
         CompositeTree, CompositeTreeRef,
     },
     helper_types::SafeF32,
-    hittest::{HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef},
+    hittest::{
+        CursorShape, HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef,
+    },
 };
 
 pub struct CommonButtonView {
@@ -182,6 +184,15 @@ impl CommonButtonView {
                 event_on_complete: None,
             });
         ct.mark_dirty(self.ct_root);
+    }
+
+    #[inline]
+    pub fn try_handle_cursor_shape(&self, sender: HitTestTreeRef) -> Option<CursorShape> {
+        if self.is_sender(sender) {
+            Some(CursorShape::Pointer)
+        } else {
+            None
+        }
     }
 
     pub fn on_hover(&self) {

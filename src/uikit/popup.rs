@@ -335,9 +335,34 @@ impl CommonFrameView {
     }
 }
 
-// TODO: message_dialog限定なのをあとでなおす
+pub trait PopupPresenter {
+    fn show(
+        &self,
+        base_sys: &mut AppBaseSystem,
+        parents: (CompositeTreeRef, HitTestTreeRef),
+        current_sec: f32,
+    );
+
+    #[allow(unused_variables)]
+    #[inline(always)]
+    fn update(&self, base_sys: &mut AppBaseSystem, current_sec: f32) {}
+
+    fn hide(&self, base_sys: &mut AppBaseSystem, current_sec: f32);
+    fn unmount(&self, base_sys: &mut AppBaseSystem);
+}
+
+pub trait PopupPresenterSpawnable: PopupPresenter {
+    type SpawnArgs<'a>;
+
+    fn new<'a>(
+        init_context: &mut PresenterInitContext,
+        id: uuid::Uuid,
+        args: Self::SpawnArgs<'a>,
+    ) -> Self;
+}
+
 pub struct PopupManager {
-    instance_by_id: HashMap<uuid::Uuid, super::message_dialog::Presenter>,
+    instance_by_id: HashMap<uuid::Uuid, Box<dyn PopupPresenter>>,
     hit_base_layer: HitTestTreeRef,
     composite_base_layer: CompositeTreeRef,
 }
@@ -350,22 +375,21 @@ impl PopupManager {
         }
     }
 
-    pub fn spawn(
+    pub fn spawn<'a, P: PopupPresenterSpawnable + 'static>(
         &mut self,
         presenter_init_context: &mut PresenterInitContext,
         current_sec: f32,
-        content: &str,
+        args: P::SpawnArgs<'a>,
     ) -> uuid::Uuid {
         let id = uuid::Uuid::new_v4();
-        let presenter = super::message_dialog::Presenter::new(presenter_init_context, id, content);
+        let presenter = P::new(presenter_init_context, id, args);
         presenter.show(
             presenter_init_context.for_view.base_system,
-            self.composite_base_layer,
-            self.hit_base_layer,
+            (self.composite_base_layer, self.hit_base_layer),
             current_sec,
         );
 
-        self.instance_by_id.insert(id, presenter);
+        self.instance_by_id.insert(id, Box::new(presenter) as _);
         id
     }
 
@@ -384,12 +408,12 @@ impl PopupManager {
             return;
         };
 
-        inst.unmount(&mut base_system.composite_tree);
+        inst.unmount(base_system);
     }
 
     pub fn update(&mut self, base_system: &mut AppBaseSystem, current_sec: f32) {
         for x in self.instance_by_id.values() {
-            x.update(&mut base_system.composite_tree, current_sec);
+            x.update(base_system, current_sec);
         }
     }
 }

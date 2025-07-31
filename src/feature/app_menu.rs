@@ -18,6 +18,7 @@ pub enum Command {
     AddSprite,
     Open,
     Save,
+    AutoArrange,
 }
 
 struct CommandButtonView {
@@ -610,6 +611,11 @@ impl HitTestTreeActionHandler for ActionHandler {
                     Command::Save => {
                         context.event_queue.push(AppEvent::AppMenuRequestSave);
                     }
+                    Command::AutoArrange => {
+                        context.event_queue.push(AppEvent::UIMessageDialogRequest {
+                            content: "[Not Implemented]AutoArrange".into(),
+                        });
+                    }
                 }
 
                 return EventContinueControl::STOP_PROPAGATION;
@@ -670,6 +676,15 @@ impl Presenter {
                 header_height + 32.0 + (CommandButtonView::BUTTON_HEIGHT + 16.0) * 2.0,
                 0.05 * 2.0,
                 Command::Save,
+            ),
+            CommandButtonView::new(
+                &mut init.for_view,
+                "Auto Arrange",
+                "resources/icons/arrange.svg",
+                64.0,
+                header_height + 32.0 + (CommandButtonView::BUTTON_HEIGHT + 16.0) * 3.0,
+                0.05 * 3.0,
+                Command::AutoArrange,
             ),
         ]);
 

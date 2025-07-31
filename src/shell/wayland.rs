@@ -137,6 +137,9 @@ impl wl::XdgToplevelEventListener for WaylandShellEventHandler<'_, '_> {
         let height_px = height as u32 * self.buffer_scale;
 
         self.cached_client_size_px = (width_px, height_px);
+        self.pointer_input_manager
+            .get_mut()
+            .set_client_size(width as _, height as _);
         self.app_event_bus.push(AppEvent::ToplevelWindowNewSize {
             width_px,
             height_px,
@@ -971,7 +974,8 @@ impl<'a, 'subsystem> AppShell<'a, 'subsystem> {
             None
         };
 
-        let pointer_input_manager = Box::pin(UnsafeCell::new(PointerInputManager::new()));
+        let pointer_input_manager =
+            Box::pin(UnsafeCell::new(PointerInputManager::new(640.0, 480.0)));
 
         let mut shell_event_handler = Box::new(UnsafeCell::new(WaylandShellEventHandler {
             app_event_bus: events,

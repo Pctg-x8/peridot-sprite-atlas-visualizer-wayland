@@ -26,16 +26,22 @@ pub struct PointerInputManager {
     last_client_pointer_pos: Option<(f32, f32)>,
     pointer_focus: PointerFocusState,
     click_base_client_pointer_pos: Option<(f32, f32)>,
+    client_size: (f32, f32),
 }
 impl PointerInputManager {
     const CLICK_DETECTION_MAX_DISTANCE: f32 = 4.0;
 
-    pub fn new() -> Self {
+    pub fn new(client_width: f32, client_height: f32) -> Self {
         PointerInputManager {
             last_client_pointer_pos: None,
             pointer_focus: PointerFocusState::None,
             click_base_client_pointer_pos: None,
+            client_size: (client_width, client_height),
         }
+    }
+
+    pub fn set_client_size(&mut self, client_width: f32, client_height: f32) {
+        self.client_size = (client_width, client_height);
     }
 
     fn dispatch_pointer_enter(
@@ -225,12 +231,12 @@ impl PointerInputManager {
         &mut self,
         client_x: f32,
         client_y: f32,
-        client_width: f32,
-        client_height: f32,
         ht: &mut HitTestTreeManager,
         action_context: &mut AppUpdateContext,
         ht_root: HitTestTreeRef,
     ) {
+        let (client_width, client_height) = self.client_size;
+
         let new_hit = ht.test(
             ht_root,
             client_x,
@@ -305,12 +311,11 @@ impl PointerInputManager {
         &mut self,
         client_x: f32,
         client_y: f32,
-        client_width: f32,
-        client_height: f32,
         ht: &mut HitTestTreeManager,
         action_context: &mut AppUpdateContext,
         ht_root: HitTestTreeRef,
     ) {
+        let (client_width, client_height) = self.client_size;
         self.last_client_pointer_pos = Some((client_x, client_y));
 
         if let Some((cbx, cby)) = self.click_base_client_pointer_pos {
@@ -340,15 +345,7 @@ impl PointerInputManager {
             return;
         }
 
-        self.handle_mouse_enter_leave(
-            client_x,
-            client_y,
-            client_width,
-            client_height,
-            ht,
-            action_context,
-            ht_root,
-        );
+        self.handle_mouse_enter_leave(client_x, client_y, ht, action_context, ht_root);
 
         if let PointerFocusState::Entering(ht_ref) = self.pointer_focus {
             let needs_recompute_pointer_enter = self.dispatch_pointer_move(
@@ -364,15 +361,7 @@ impl PointerInputManager {
             );
 
             if needs_recompute_pointer_enter {
-                self.handle_mouse_enter_leave(
-                    client_x,
-                    client_y,
-                    client_width,
-                    client_height,
-                    ht,
-                    action_context,
-                    ht_root,
-                );
+                self.handle_mouse_enter_leave(client_x, client_y, ht, action_context, ht_root);
             }
         }
     }
@@ -380,14 +369,16 @@ impl PointerInputManager {
     pub fn handle_mouse_left_down(
         &mut self,
         sh: &AppShell,
-        client_x: f32,
-        client_y: f32,
-        client_width: f32,
-        client_height: f32,
         ht: &mut HitTestTreeManager,
         action_context: &mut AppUpdateContext,
         ht_root: HitTestTreeRef,
     ) {
+        let Some((client_x, client_y)) = self.last_client_pointer_pos else {
+            // no pointer on the surface
+            return;
+        };
+        let (client_width, client_height) = self.client_size;
+
         self.click_base_client_pointer_pos = Some((client_x, client_y));
 
         match self.pointer_focus {
@@ -408,28 +399,12 @@ impl PointerInputManager {
                     },
                 );
                 if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
-                    self.handle_mouse_enter_leave(
-                        client_x,
-                        client_y,
-                        client_width,
-                        client_height,
-                        ht,
-                        action_context,
-                        ht_root,
-                    );
+                    self.handle_mouse_enter_leave(client_x, client_y, ht, action_context, ht_root);
                 }
                 if flags.contains(EventContinueControl::RELEASE_CAPTURE_ELEMENT) {
                     sh.release_pointer();
                     self.pointer_focus = PointerFocusState::Entering(ht_ref);
-                    self.handle_mouse_enter_leave(
-                        client_x,
-                        client_y,
-                        client_width,
-                        client_height,
-                        ht,
-                        action_context,
-                        ht_root,
-                    );
+                    self.handle_mouse_enter_leave(client_x, client_y, ht, action_context, ht_root);
                 }
             }
             PointerFocusState::Entering(ht_ref) => {
@@ -449,15 +424,7 @@ impl PointerInputManager {
                 if let Some(h) = new_captured {
                     self.pointer_focus = PointerFocusState::Capturing(h);
                 } else if needs_recompute_pointer_enter {
-                    self.handle_mouse_enter_leave(
-                        client_x,
-                        client_y,
-                        client_width,
-                        client_height,
-                        ht,
-                        action_context,
-                        ht_root,
-                    );
+                    self.handle_mouse_enter_leave(client_x, client_y, ht, action_context, ht_root);
                 }
             }
             PointerFocusState::None => (),
@@ -467,14 +434,16 @@ impl PointerInputManager {
     pub fn handle_mouse_left_up(
         &mut self,
         sh: &AppShell,
-        client_x: f32,
-        client_y: f32,
-        client_width: f32,
-        client_height: f32,
         ht: &mut HitTestTreeManager,
         action_context: &mut AppUpdateContext,
         ht_root: HitTestTreeRef,
     ) {
+        let Some((client_x, client_y)) = self.last_client_pointer_pos else {
+            // no pointer on the surface
+            return;
+        };
+        let (client_width, client_height) = self.client_size;
+
         match self.pointer_focus {
             PointerFocusState::Capturing(ht_ref) => {
                 let flags = ht.get_data(ht_ref).action_handler().map_or(
@@ -493,28 +462,12 @@ impl PointerInputManager {
                     },
                 );
                 if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
-                    self.handle_mouse_enter_leave(
-                        client_x,
-                        client_y,
-                        client_width,
-                        client_height,
-                        ht,
-                        action_context,
-                        ht_root,
-                    );
+                    self.handle_mouse_enter_leave(client_x, client_y, ht, action_context, ht_root);
                 }
                 if flags.contains(EventContinueControl::RELEASE_CAPTURE_ELEMENT) {
                     sh.release_pointer();
                     self.pointer_focus = PointerFocusState::Entering(ht_ref);
-                    self.handle_mouse_enter_leave(
-                        client_x,
-                        client_y,
-                        client_width,
-                        client_height,
-                        ht,
-                        action_context,
-                        ht_root,
-                    );
+                    self.handle_mouse_enter_leave(client_x, client_y, ht, action_context, ht_root);
                 }
             }
             PointerFocusState::Entering(ht_ref) => {
@@ -534,15 +487,7 @@ impl PointerInputManager {
                 if let Some(h) = new_captured {
                     self.pointer_focus = PointerFocusState::Capturing(h);
                 } else if needs_recompute_pointer_enter {
-                    self.handle_mouse_enter_leave(
-                        client_x,
-                        client_y,
-                        client_width,
-                        client_height,
-                        ht,
-                        action_context,
-                        ht_root,
-                    );
+                    self.handle_mouse_enter_leave(client_x, client_y, ht, action_context, ht_root);
                 }
             }
             PointerFocusState::None => (),
@@ -571,8 +516,6 @@ impl PointerInputManager {
                         self.handle_mouse_enter_leave(
                             client_x,
                             client_y,
-                            client_width,
-                            client_height,
                             ht,
                             action_context,
                             ht_root,
@@ -584,8 +527,6 @@ impl PointerInputManager {
                         self.handle_mouse_enter_leave(
                             client_x,
                             client_y,
-                            client_width,
-                            client_height,
                             ht,
                             action_context,
                             ht_root,
@@ -612,8 +553,6 @@ impl PointerInputManager {
                         self.handle_mouse_enter_leave(
                             client_x,
                             client_y,
-                            client_width,
-                            client_height,
                             ht,
                             action_context,
                             ht_root,
@@ -627,8 +566,6 @@ impl PointerInputManager {
 
     pub fn recompute_enter_leave(
         &mut self,
-        client_width: f32,
-        client_height: f32,
         ht: &mut HitTestTreeManager,
         action_context: &mut AppUpdateContext,
         ht_root: HitTestTreeRef,
@@ -637,15 +574,7 @@ impl PointerInputManager {
             return;
         };
 
-        self.handle_mouse_enter_leave(
-            last_client_x,
-            last_client_y,
-            client_width,
-            client_height,
-            ht,
-            action_context,
-            ht_root,
-        );
+        self.handle_mouse_enter_leave(last_client_x, last_client_y, ht, action_context, ht_root);
     }
 
     pub fn cursor_shape(

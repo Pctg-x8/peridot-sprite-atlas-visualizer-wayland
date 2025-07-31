@@ -1091,7 +1091,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
 
     // initialize misc state
     let mut newsize_request = None;
-    let mut last_pointer_pos = (0.0f32, 0.0f32);
     let mut last_composite_render_instructions = CompositeRenderingData {
         instructions: Vec::new(),
         render_passes: Vec::new(),
@@ -1653,13 +1652,10 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     surface_y,
                 } => {
                     app_update_context.ui_scale_factor = app_shell.ui_scale_factor();
-                    let (cw, ch) = app_shell.client_size();
 
                     unsafe { &mut *app_shell.pointer_input_manager().get() }.handle_mouse_move(
                         surface_x,
                         surface_y,
-                        cw,
-                        ch,
                         &mut app_system.hit_tree,
                         &mut app_update_context,
                         HitTestTreeManager::ROOT,
@@ -1668,20 +1664,13 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         unsafe { &mut *app_shell.pointer_input_manager().get() }
                             .cursor_shape(&mut app_system.hit_tree, &mut app_update_context),
                     );
-
-                    last_pointer_pos = (surface_x, surface_y);
                 }
                 AppEvent::MainWindowPointerLeftDown => {
                     app_update_context.ui_scale_factor = app_shell.ui_scale_factor();
-                    let (cw, ch) = app_shell.client_size();
 
                     unsafe { &mut *app_shell.pointer_input_manager().get() }
                         .handle_mouse_left_down(
                             &app_shell,
-                            last_pointer_pos.0,
-                            last_pointer_pos.1,
-                            cw,
-                            ch,
                             &mut app_system.hit_tree,
                             &mut app_update_context,
                             HitTestTreeManager::ROOT,
@@ -1693,14 +1682,9 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                 }
                 AppEvent::MainWindowPointerLeftUp => {
                     app_update_context.ui_scale_factor = app_shell.ui_scale_factor();
-                    let (cw, ch) = app_shell.client_size();
 
                     unsafe { &mut *app_shell.pointer_input_manager().get() }.handle_mouse_left_up(
                         &app_shell,
-                        last_pointer_pos.0,
-                        last_pointer_pos.1,
-                        cw,
-                        ch,
                         &mut app_system.hit_tree,
                         &mut app_update_context,
                         HitTestTreeManager::ROOT,
@@ -1711,8 +1695,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     );
                 }
                 AppEvent::UIMessageDialogRequest { content } => {
-                    let (cw, ch) = app_shell.client_size();
-
                     popup_manager.spawn(
                         &mut PresenterInitContext {
                             for_view: ViewInitContext {
@@ -1725,20 +1707,14 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         &content,
                     );
                     unsafe { &mut *app_shell.pointer_input_manager().get() }.recompute_enter_leave(
-                        cw,
-                        ch,
                         &mut app_system.hit_tree,
                         &mut app_update_context,
                         HitTestTreeManager::ROOT,
                     );
                 }
                 AppEvent::UIPopupClose { id } => {
-                    let (cw, ch) = app_shell.client_size();
-
                     popup_manager.close(app_system, t.elapsed().as_secs_f32(), &id);
                     unsafe { &mut *app_shell.pointer_input_manager().get() }.recompute_enter_leave(
-                        cw,
-                        ch,
                         &mut app_system.hit_tree,
                         &mut app_update_context,
                         HitTestTreeManager::ROOT,

@@ -29,10 +29,7 @@ impl CommonButtonView {
 
     #[tracing::instrument(name = "CommonButtonView::new", skip(init))]
     pub fn new(init: &mut ViewInitContext, label: &str) -> Self {
-        let text_atlas_rect = init
-            .base_system
-            .text_mask(init.staging_scratch_buffer, FontType::UI, label)
-            .unwrap();
+        let text_atlas_rect = init.base_system.text_mask(FontType::UI, label).unwrap();
         let frame_image_atlas_rect = init
             .base_system
             .rounded_fill_rect_mask(

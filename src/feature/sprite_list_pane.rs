@@ -13,7 +13,6 @@ use crate::{
         AppBaseSystem, BufferMapMode, FontType, MemoryBoundBuffer, PixelFormat, RenderPassOptions,
         RenderTexture, RenderTextureFlags, RenderTextureOptions, inject_cmd_begin_render_pass2,
         inject_cmd_end_render_pass2, inject_cmd_pipeline_barrier_2,
-        scratch_buffer::StagingScratchBuffer,
     },
     composite::{
         AnimatableColor, AnimatableFloat, AnimationCurve, ClipConfig, CompositeMode, CompositeRect,
@@ -585,7 +584,7 @@ impl CellView {
     ) -> Self {
         let label_atlas_rect = init
             .base_system
-            .text_mask(init.staging_scratch_buffer, FontType::UI, init_label)
+            .text_mask(FontType::UI, init_label)
             .unwrap();
         let bg_atlas_rect = init
             .base_system
@@ -705,12 +704,7 @@ impl CellView {
         base_system.set_tree_parent((self.ct_root, self.ht_root), (ct_parent, ht_parent));
     }
 
-    fn rescale(
-        &self,
-        base_system: &mut AppBaseSystem,
-        staging_scratch_buffer: &mut StagingScratchBuffer,
-        ui_scale_factor: SafeF32,
-    ) {
+    fn rescale(&self, base_system: &mut AppBaseSystem, ui_scale_factor: SafeF32) {
         base_system
             .free_mask_atlas_rect(self.ct_bg.entity(&base_system.composite_tree).texatlas_rect);
         base_system.free_mask_atlas_rect(
@@ -720,7 +714,7 @@ impl CellView {
         );
 
         let label_atlas_rect = base_system
-            .text_mask(staging_scratch_buffer, FontType::UI, &self.label.borrow())
+            .text_mask(FontType::UI, &self.label.borrow())
             .unwrap();
         let bg_atlas_rect = base_system
             .rounded_fill_rect_mask(ui_scale_factor, Self::CORNER_RADIUS)
@@ -812,12 +806,7 @@ impl CellView {
         self.top.set(top);
     }
 
-    fn set_label(
-        &self,
-        label: &str,
-        base_system: &mut AppBaseSystem,
-        staging_scratch_buffer: &mut StagingScratchBuffer,
-    ) {
+    fn set_label(&self, label: &str, base_system: &mut AppBaseSystem) {
         if label == self.label.borrow().as_str() {
             // no changes
             return;
@@ -829,9 +818,7 @@ impl CellView {
                 .texatlas_rect,
         );
 
-        let label_atlas_rect = base_system
-            .text_mask(staging_scratch_buffer, FontType::UI, label)
-            .unwrap();
+        let label_atlas_rect = base_system.text_mask(FontType::UI, label).unwrap();
 
         let cr = self
             .ct_label
@@ -1177,10 +1164,7 @@ impl FrameView {
                 Self::CORNER_RADIUS,
             )
             .unwrap();
-        let title_atlas_rect = init
-            .base_system
-            .text_mask(init.staging_scratch_buffer, FontType::UI, "Sprites")
-            .unwrap();
+        let title_atlas_rect = init.base_system.text_mask(FontType::UI, "Sprites").unwrap();
 
         let title_blur_pixels =
             (Self::BLUR_AMOUNT_ONEDIR as f32 * init.ui_scale_factor).ceil() as _;
@@ -1301,12 +1285,7 @@ impl FrameView {
         app_system.set_tree_parent((self.ct_root, self.ht_frame), (ct_parent, ht_parent));
     }
 
-    fn rescale(
-        &self,
-        base_system: &mut AppBaseSystem,
-        staging_scratch_buffer: &mut StagingScratchBuffer,
-        ui_scale_factor: SafeF32,
-    ) {
+    fn rescale(&self, base_system: &mut AppBaseSystem, ui_scale_factor: SafeF32) {
         base_system.free_mask_atlas_rect(
             self.ct_root
                 .entity(&base_system.composite_tree)
@@ -1326,9 +1305,7 @@ impl FrameView {
         let frame_atlas_rect = base_system
             .rounded_fill_rect_mask(ui_scale_factor, Self::CORNER_RADIUS)
             .unwrap();
-        let title_atlas_rect = base_system
-            .text_mask(staging_scratch_buffer, FontType::UI, "Sprites")
-            .unwrap();
+        let title_atlas_rect = base_system.text_mask(FontType::UI, "Sprites").unwrap();
         let title_blur_pixels =
             (Self::BLUR_AMOUNT_ONEDIR as f32 * ui_scale_factor.value()).ceil() as _;
         let title_blurred_atlas_rect = base_system.alloc_mask_atlas_rect(
@@ -1686,21 +1663,15 @@ impl Presenter {
         self.view.mount(app_system, ct_parent, ht_parent);
     }
 
-    pub fn rescale(
-        &self,
-        base_system: &mut AppBaseSystem,
-        staging_scratch_buffer: &mut StagingScratchBuffer,
-        ui_scale_factor: SafeF32,
-    ) {
+    pub fn rescale(&self, base_system: &mut AppBaseSystem, ui_scale_factor: SafeF32) {
         self.ui_scale_factor.set(ui_scale_factor.value());
 
-        self.view
-            .rescale(base_system, staging_scratch_buffer, ui_scale_factor);
+        self.view.rescale(base_system, ui_scale_factor);
         self.ht_action_handler
             .toggle_button_view
             .rescale(base_system, ui_scale_factor);
         for v in self.ht_action_handler.cell_views.borrow().iter() {
-            v.rescale(base_system, staging_scratch_buffer, ui_scale_factor);
+            v.rescale(base_system, ui_scale_factor);
         }
     }
 
@@ -1708,7 +1679,6 @@ impl Presenter {
         &self,
         app_system: &'base_system mut AppBaseSystem<'subsystem>,
         current_sec: f32,
-        staging_scratch_buffer: &'r mut StagingScratchBuffer<'subsystem>,
     ) {
         self.ht_action_handler.view.update(app_system, current_sec);
         self.ht_action_handler
@@ -1725,7 +1695,6 @@ impl Presenter {
                     let new_cell = CellView::new(
                         &mut ViewInitContext {
                             base_system: app_system,
-                            staging_scratch_buffer,
                             ui_scale_factor: self.ui_scale_factor.get(),
                         },
                         c,
@@ -1750,7 +1719,7 @@ impl Presenter {
 
                 // reuse existing
                 cell_views[n].set_top(32.0 + n as f32 * CellView::HEIGHT, app_system);
-                cell_views[n].set_label(c, app_system, staging_scratch_buffer);
+                cell_views[n].set_label(c, app_system);
                 cell_views[n].bind_sprite_index(n);
                 if sel {
                     cell_views[n].on_select(&mut app_system.composite_tree);

@@ -21,9 +21,7 @@ use crate::{
     atlas::{AtlasRect, DynamicAtlasManager},
     base_system::{
         AppBaseSystem, inject_cmd_pipeline_barrier_2,
-        scratch_buffer::{
-            FlippableStagingScratchBufferGroup, StagingScratchBuffer, StagingScratchBufferMapMode,
-        },
+        scratch_buffer::{StagingScratchBuffer, StagingScratchBufferMapMode},
     },
     bg_worker::{BackgroundWork, BackgroundWorkerEnqueueAccess},
     composite::{
@@ -45,7 +43,7 @@ pub struct Presenter<'subsystem> {
 }
 impl<'subsystem> Presenter<'subsystem> {
     pub fn new(
-        init: &mut PresenterInitContext<'_, '_, '_, 'subsystem>,
+        init: &mut PresenterInitContext<'_, '_, 'subsystem>,
         rendered_pass: br::SubpassRef<impl br::RenderPass + ?Sized>,
         main_buffer_size: br::Extent2D,
     ) -> Self {
@@ -157,22 +155,16 @@ impl<'subsystem> Presenter<'subsystem> {
 
     pub fn sync_with_app_state(
         &self,
+        base_sys: &AppBaseSystem<'subsystem>,
         app_state: &AppState<'subsystem>,
         bg_worker_enqueue: &BackgroundWorkerEnqueueAccess<'subsystem>,
-        staging_scratch_buffers: &std::sync::Arc<
-            RwLock<FlippableStagingScratchBufferGroup<'subsystem>>,
-        >,
     ) {
         if self.sprites_dirty.replace(false) {
             self.action_handler
                 .grid_view
                 .renderer
                 .borrow()
-                .update_sprites(
-                    app_state.sprites(),
-                    bg_worker_enqueue,
-                    staging_scratch_buffers,
-                );
+                .update_sprites(app_state.sprites(), base_sys, bg_worker_enqueue);
         }
     }
 
@@ -518,7 +510,7 @@ struct GridView<'d> {
 }
 impl<'d> GridView<'d> {
     fn new(
-        init: &mut ViewInitContext<'_, '_, 'd>,
+        init: &mut ViewInitContext<'_, 'd>,
         rendered_pass: br::SubpassRef<impl br::RenderPass + ?Sized>,
         main_buffer_size: br::Extent2D,
         init_atlas_size: SizePixels,
@@ -926,12 +918,12 @@ impl<'d> Renderer<'d> {
         buffers_mref.is_dirty = true;
     }
 
-    #[tracing::instrument(skip(self, sprites, bg_worker_access, staging_scratch_buffers))]
+    #[tracing::instrument(skip(self, sprites, base_sys, bg_worker_access))]
     fn update_sprites(
         &self,
         sprites: &[SpriteInfo],
+        base_sys: &AppBaseSystem<'d>,
         bg_worker_access: &BackgroundWorkerEnqueueAccess<'d>,
-        staging_scratch_buffers: &std::sync::Arc<RwLock<FlippableStagingScratchBufferGroup<'d>>>,
     ) {
         let mut buffers_mref = self.sprite_instance_buffers.borrow_mut();
         let mut rects_mref = self.sprite_atlas_rect_by_path.borrow_mut();
@@ -964,8 +956,7 @@ impl<'d> Renderer<'d> {
                             x.source_path.clone(),
                             Box::new({
                                 let sprite_image_copies = Arc::downgrade(&self.sprite_image_copies);
-                                let staging_scratch_buffers =
-                                    std::sync::Arc::downgrade(staging_scratch_buffers);
+                                let staging_scratch_buffers = base_sys.staging_buffers_wref();
                                 let &SpriteInfo { width, height, .. } = x;
 
                                 move |path, di| {

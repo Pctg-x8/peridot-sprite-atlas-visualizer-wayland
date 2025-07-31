@@ -24,10 +24,7 @@ impl ContentView {
 
     #[tracing::instrument(name = "ContentView::new", skip(init))]
     pub fn new(init: &mut ViewInitContext, content: &str) -> Self {
-        let text_atlas_rect = init
-            .base_system
-            .text_mask(init.staging_scratch_buffer, FontType::UI, content)
-            .unwrap();
+        let text_atlas_rect = init.base_system.text_mask(FontType::UI, content).unwrap();
 
         let preferred_width =
             Self::FRAME_PADDING_H * 2.0 + text_atlas_rect.width() as f32 / init.ui_scale_factor;

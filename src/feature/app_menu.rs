@@ -2,9 +2,7 @@ use std::{cell::Cell, path::Path, rc::Rc};
 
 use crate::{
     AppEvent, AppUpdateContext, PresenterInitContext, ViewInitContext,
-    base_system::{
-        AppBaseSystem, FontType, scratch_buffer::StagingScratchBuffer, svg::SinglePathSVG,
-    },
+    base_system::{AppBaseSystem, FontType, svg::SinglePathSVG},
     composite::{
         AnimatableColor, AnimatableFloat, AnimationCurve, CompositeMode, CompositeRect,
         CompositeTreeFloatParameterRef, CompositeTreeRef, FloatParameter,
@@ -75,10 +73,7 @@ impl CommandButtonView {
                 &icon_svg,
             )
             .unwrap();
-        let label_atlas_rect = init
-            .base_system
-            .text_mask(init.staging_scratch_buffer, FontType::UI, label)
-            .unwrap();
+        let label_atlas_rect = init.base_system.text_mask(FontType::UI, label).unwrap();
 
         let width = (Self::ICON_SIZE + Self::ICON_LABEL_GAP + Self::HPADDING * 2.0)
             + label_atlas_rect.width() as f32 / init.ui_scale_factor;
@@ -192,12 +187,7 @@ impl CommandButtonView {
         app_system.set_tree_parent((self.ct_root, self.ht_root), (ct_parent, ht_parent));
     }
 
-    fn rescale(
-        &self,
-        base_system: &mut AppBaseSystem,
-        staging_scratch_buffer: &mut StagingScratchBuffer,
-        ui_scale_factor: f32,
-    ) {
+    fn rescale(&self, base_system: &mut AppBaseSystem, ui_scale_factor: f32) {
         base_system
             .free_mask_atlas_rect(base_system.composite_tree.get(self.ct_root).texatlas_rect);
         base_system
@@ -226,9 +216,7 @@ impl CommandButtonView {
         base_system
             .composite_tree
             .get_mut(self.ct_label)
-            .texatlas_rect = base_system
-            .text_mask(staging_scratch_buffer, FontType::UI, &self.label)
-            .unwrap();
+            .texatlas_rect = base_system.text_mask(FontType::UI, &self.label).unwrap();
 
         base_system
             .composite_tree
@@ -759,14 +747,9 @@ impl Presenter {
         self.base_view.mount(app_system, ct_parent, ht_parent);
     }
 
-    pub fn rescale(
-        &self,
-        base_system: &mut AppBaseSystem,
-        staging_scratch_buffer: &mut StagingScratchBuffer,
-        ui_scale_factor: f32,
-    ) {
+    pub fn rescale(&self, base_system: &mut AppBaseSystem, ui_scale_factor: f32) {
         for v in self.action_handler.item_views.iter() {
-            v.rescale(base_system, staging_scratch_buffer, ui_scale_factor);
+            v.rescale(base_system, ui_scale_factor);
         }
     }
 

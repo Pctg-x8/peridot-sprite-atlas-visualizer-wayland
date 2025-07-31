@@ -6,8 +6,9 @@ pub enum ProfileMarker {
     Frame = 0,
     Resize = 1,
     PopulateCompositeInstances = 2,
-    MainCommandBufferPopulation = 3,
-    RenderWorkSubmission = 4,
+    UpdateWorkSubmission = 3,
+    MainCommandBufferPopulation = 4,
+    RenderWorkSubmission = 5,
 }
 
 #[repr(u8)]

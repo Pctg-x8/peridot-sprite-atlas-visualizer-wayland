@@ -4,7 +4,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     rc::Rc,
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
 };
 
 use crate::{
@@ -12,7 +12,7 @@ use crate::{
     MS_STATE_EMPTY, RASTER_STATE_DEFAULT_FILL_NOCULL, RoundedRectConstants, VI_STATE_EMPTY,
     VI_STATE_FLOAT2_ONLY,
     atlas::AtlasRect,
-    base_system::svg::SinglePathSVG,
+    base_system::{scratch_buffer::FlippableStagingScratchBufferGroup, svg::SinglePathSVG},
     composite::{
         CompositeInstanceManager, CompositeRect, CompositeTree, CompositeTreeRef,
         CompositionSurfaceAtlas, UnboundedCompositeInstanceManager,
@@ -76,6 +76,7 @@ pub struct AppBaseSystem<'subsystem> {
         RefCell<HashMap<RenderPassOptions, Rc<br::RenderPassObject<&'subsystem Subsystem>>>>,
     loaded_shader_modules: RwLock<HashMap<PathBuf, br::vk::VkShaderModule>>,
     empty_pipeline_layout: OnceLock<br::VkHandleRef<'static, br::vk::VkPipelineLayout>>,
+    staging_scratch_buffers: Arc<RwLock<FlippableStagingScratchBufferGroup<'subsystem>>>,
 }
 impl Drop for AppBaseSystem<'_> {
     fn drop(&mut self) {
@@ -385,15 +386,18 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
                 ui_default: ft_face,
                 ui_extra_large: ft_face_extra_large,
             },
-            fs_cache,
             pipeline_cache: pipeline_cache.unmanage().0,
-            subsystem,
             rounded_fill_rect_cache: HashMap::new(),
             rounded_rect_cache: HashMap::new(),
             text_cache: HashMap::new(),
             render_to_mask_atlas_pass_cache: RefCell::new(HashMap::new()),
             loaded_shader_modules: RwLock::new(HashMap::new()),
             empty_pipeline_layout: OnceLock::new(),
+            staging_scratch_buffers: Arc::new(RwLock::new(
+                FlippableStagingScratchBufferGroup::new(subsystem, 2),
+            )),
+            fs_cache,
+            subsystem,
         }
     }
 
@@ -502,17 +506,31 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         self.atlas.free(rect)
     }
 
-    #[tracing::instrument(
-        name = "AppBaseSystem::text_mask",
-        skip(self, staging_scratch_buffer),
-        err(Display)
-    )]
-    pub fn text_mask(
-        &mut self,
-        staging_scratch_buffer: &mut StagingScratchBuffer,
-        font_type: FontType,
-        text: &str,
-    ) -> br::Result<AtlasRect> {
+    #[inline]
+    pub fn active_staging_buffer_locked(
+        &self,
+    ) -> parking_lot::MappedRwLockWriteGuard<StagingScratchBuffer<'subsystem>> {
+        parking_lot::RwLockWriteGuard::map(self.staging_scratch_buffers.write(), |x| {
+            x.active_buffer_mut()
+        })
+    }
+
+    #[inline]
+    pub fn lock_staging_buffers(
+        &self,
+    ) -> parking_lot::RwLockWriteGuard<FlippableStagingScratchBufferGroup<'subsystem>> {
+        self.staging_scratch_buffers.write()
+    }
+
+    #[inline]
+    pub fn staging_buffers_wref(
+        &self,
+    ) -> std::sync::Weak<RwLock<FlippableStagingScratchBufferGroup<'subsystem>>> {
+        Arc::downgrade(&self.staging_scratch_buffers)
+    }
+
+    #[tracing::instrument(name = "AppBaseSystem::text_mask", skip(self), err(Display))]
+    pub fn text_mask(&mut self, font_type: FontType, text: &str) -> br::Result<AtlasRect> {
         if let Some(&r) = self.text_cache.get(&font_type).and_then(|x| x.get(text)) {
             // found in cache
             return Ok(r);
@@ -527,8 +545,9 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
             },
         );
         let atlas_rect = self.alloc_mask_atlas_rect(layout.width_px(), layout.height_px());
-        let image_pixels = layout.build_stg_image_pixel_buffer(staging_scratch_buffer);
 
+        let mut staging_buffer_locked = self.active_staging_buffer_locked();
+        let image_pixels = layout.build_stg_image_pixel_buffer(&mut staging_buffer_locked);
         self.sync_execute_graphics_commands(|rec| {
             rec.inject(|r| {
                 inject_cmd_pipeline_barrier_2(
@@ -548,7 +567,7 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
                 )
             })
             .inject(|r| {
-                let (b, o) = staging_scratch_buffer.of(&image_pixels);
+                let (b, o) = staging_buffer_locked.of(&image_pixels);
 
                 r.copy_buffer_to_image(
                     b,
@@ -593,6 +612,7 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
                 )
             })
         })?;
+        drop(staging_buffer_locked);
 
         self.text_cache
             .entry(font_type)

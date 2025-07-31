@@ -13,7 +13,7 @@ use crate::{
         AppBaseSystem, BufferMapMode, FontType, MemoryBoundBuffer, PixelFormat, RenderPassOptions,
         RenderTexture, RenderTextureFlags, RenderTextureOptions, inject_cmd_begin_render_pass2,
         inject_cmd_end_render_pass2, inject_cmd_pipeline_barrier_2,
-        scratch_buffer::{StagingScratchBuffer, StagingScratchBufferMapMode},
+        scratch_buffer::StagingScratchBufferMapMode,
     },
     composite::{
         AnimatableColor, AnimatableFloat, AnimationCurve, CompositeMode, CompositeRect,
@@ -739,18 +739,15 @@ impl BaseView {
     #[tracing::instrument(name = "BaseView::new", skip(ctx))]
     fn new(ctx: &mut ViewInitContext) -> Self {
         let title = "Peridot SpriteAtlas Visualizer/Editor";
-        let text_atlas_rect = ctx
-            .base_system
-            .text_mask(ctx.staging_scratch_buffer, FontType::UI, title)
-            .unwrap();
+        let text_atlas_rect = ctx.base_system.text_mask(FontType::UI, title).unwrap();
         let bg_atlas_rect = ctx.base_system.alloc_mask_atlas_rect(1, 2);
 
         let height =
             text_atlas_rect.height() as f32 / ctx.ui_scale_factor + Self::TITLE_SPACING * 2.0;
 
-        let bg_stg_image_pixels = ctx.staging_scratch_buffer.reserve(2);
-        let ptr = ctx
-            .staging_scratch_buffer
+        let mut stg_buffer_locked = ctx.base_system.active_staging_buffer_locked();
+        let bg_stg_image_pixels = stg_buffer_locked.reserve(2);
+        let ptr = stg_buffer_locked
             .map(&bg_stg_image_pixels, StagingScratchBufferMapMode::Write)
             .unwrap();
         unsafe {
@@ -776,7 +773,7 @@ impl BaseView {
                     )
                 })
                 .inject(|r| {
-                    let (b, o) = ctx.staging_scratch_buffer.of(&bg_stg_image_pixels);
+                    let (b, o) = stg_buffer_locked.of(&bg_stg_image_pixels);
 
                     r.copy_buffer_to_image(
                         b,
@@ -823,6 +820,7 @@ impl BaseView {
                 })
             })
             .unwrap();
+        drop(stg_buffer_locked);
 
         let ct_root = ctx.base_system.register_composite_rect(CompositeRect {
             base_scale_factor: ctx.ui_scale_factor,
@@ -897,19 +895,11 @@ impl BaseView {
         app_system.set_tree_parent((self.ct_root, self.ht_root), (ct_parent, ht_parent));
     }
 
-    fn rescale(
-        &self,
-        base_system: &mut AppBaseSystem,
-        staging_scratch_buffer: &mut StagingScratchBuffer,
-        ui_scale_factor: f32,
-    ) {
+    fn rescale(&self, base_system: &mut AppBaseSystem, ui_scale_factor: f32) {
         base_system.free_mask_atlas_rect(self.text_atlas_rect.get());
         let title = "Peridot SpriteAtlas Visualizer/Editor";
-        self.text_atlas_rect.set(
-            base_system
-                .text_mask(staging_scratch_buffer, FontType::UI, title)
-                .unwrap(),
-        );
+        self.text_atlas_rect
+            .set(base_system.text_mask(FontType::UI, title).unwrap());
 
         base_system
             .composite_tree
@@ -930,14 +920,10 @@ impl BaseView {
         base_system.composite_tree.mark_dirty(self.ct_root);
         base_system.composite_tree.mark_dirty(self.ct_title);
 
-        self.rebuild_active_file_name_surface(base_system, staging_scratch_buffer);
+        self.rebuild_active_file_name_surface(base_system);
     }
 
-    fn rebuild_active_file_name_surface(
-        &self,
-        base_system: &mut AppBaseSystem,
-        staging_scratch_buffer: &mut StagingScratchBuffer,
-    ) {
+    fn rebuild_active_file_name_surface(&self, base_system: &mut AppBaseSystem) {
         if self
             .ct_active_file_name
             .entity(&base_system.composite_tree)
@@ -951,9 +937,7 @@ impl BaseView {
         }
 
         if let Some(ref t) = *self.active_file_name.borrow() {
-            let atlas = base_system
-                .text_mask(staging_scratch_buffer, FontType::UI, t)
-                .unwrap();
+            let atlas = base_system.text_mask(FontType::UI, t).unwrap();
             let ct = self
                 .ct_active_file_name
                 .entity_mut_dirtified(&mut base_system.composite_tree);
@@ -970,13 +954,9 @@ impl BaseView {
         }
     }
 
-    fn update(
-        &self,
-        base_system: &mut AppBaseSystem,
-        staging_scratch_buffer: &mut StagingScratchBuffer,
-    ) {
+    fn update(&self, base_system: &mut AppBaseSystem) {
         if self.has_active_file_name_changed.replace(false) {
-            self.rebuild_active_file_name_surface(base_system, staging_scratch_buffer);
+            self.rebuild_active_file_name_surface(base_system);
         }
     }
 
@@ -1241,14 +1221,8 @@ impl Presenter {
         self.base_view.mount(app_system, ct_parent, ht_parent);
     }
 
-    pub fn rescale(
-        &self,
-        base_system: &mut AppBaseSystem,
-        staging_scratch_buffer: &mut StagingScratchBuffer,
-        ui_scale_factor: f32,
-    ) {
-        self.base_view
-            .rescale(base_system, staging_scratch_buffer, ui_scale_factor);
+    pub fn rescale(&self, base_system: &mut AppBaseSystem, ui_scale_factor: f32) {
+        self.base_view.rescale(base_system, ui_scale_factor);
         self.action_handler
             .menu_button_view
             .rescale(base_system, ui_scale_factor);
@@ -1259,13 +1233,8 @@ impl Presenter {
         }
     }
 
-    pub fn update(
-        &self,
-        base_system: &mut AppBaseSystem,
-        staging_scratch_buffer: &mut StagingScratchBuffer,
-        current_sec: f32,
-    ) {
-        self.base_view.update(base_system, staging_scratch_buffer);
+    pub fn update(&self, base_system: &mut AppBaseSystem, current_sec: f32) {
+        self.base_view.update(base_system);
         self.action_handler
             .menu_button_view
             .update(&mut base_system.composite_tree, current_sec);

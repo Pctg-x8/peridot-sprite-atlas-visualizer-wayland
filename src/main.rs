@@ -38,19 +38,17 @@ use uikit::popup::PopupManager;
 #[cfg(all(unix, not(target_os = "macos")))]
 use std::os::fd::AsRawFd;
 use std::{
-    cell::{Cell, RefCell, UnsafeCell},
+    cell::{RefCell, UnsafeCell},
     collections::{BTreeSet, HashMap, VecDeque},
     rc::Rc,
-    sync::Arc,
 };
 
-use crate::base_system::{FontType, inject_cmd_end_render_pass2, inject_cmd_pipeline_barrier_2};
-use app_state::AppState;
-use base_system::{
-    AppBaseSystem, WindowCornerCutoutRenderer,
-    prof::ProfilingContext,
-    scratch_buffer::{FlippableStagingScratchBufferGroup, StagingScratchBuffer},
+use crate::{
+    base_system::{FontType, inject_cmd_end_render_pass2, inject_cmd_pipeline_barrier_2},
+    coordinate::SizePixels,
 };
+use app_state::AppState;
+use base_system::{AppBaseSystem, WindowCornerCutoutRenderer, prof::ProfilingContext};
 
 use bedrock::{
     self as br, CommandBufferMut, CommandPoolMut, Device, Fence, FenceMut, InstanceChild,
@@ -63,7 +61,6 @@ use composite::{
     CompositeTreeRef, RenderPassAfterOperation, RenderPassRequirements,
 };
 use hittest::{HitTestTreeData, HitTestTreeManager};
-use parking_lot::RwLock;
 use shell::AppShell;
 use subsystem::Subsystem;
 
@@ -218,14 +215,13 @@ pub struct RoundedRectConstants {
     pub thickness: f32,
 }
 
-pub struct ViewInitContext<'r, 'app_system, 'subsystem> {
+pub struct ViewInitContext<'app_system, 'subsystem> {
     pub base_system: &'app_system mut AppBaseSystem<'subsystem>,
-    pub staging_scratch_buffer: &'r mut StagingScratchBuffer<'subsystem>,
     pub ui_scale_factor: f32,
 }
 
-pub struct PresenterInitContext<'r, 'state, 'app_system, 'subsystem> {
-    pub for_view: ViewInitContext<'r, 'app_system, 'subsystem>,
+pub struct PresenterInitContext<'state, 'app_system, 'subsystem> {
+    pub for_view: ViewInitContext<'app_system, 'subsystem>,
     pub app_state: &'state mut AppState<'subsystem>,
 }
 
@@ -262,11 +258,7 @@ impl DragAndDropOverlayView {
     pub fn new(init: &mut ViewInitContext) -> Self {
         let text_atlas_rect = init
             .base_system
-            .text_mask(
-                init.staging_scratch_buffer,
-                FontType::UIExtraLarge,
-                "Drop to add",
-            )
+            .text_mask(FontType::UIExtraLarge, "Drop to add")
             .unwrap();
 
         let ct_root = init.base_system.register_composite_rect(CompositeRect {
@@ -309,12 +301,7 @@ impl DragAndDropOverlayView {
         base_system.set_composite_tree_parent(self.ct_root, ct_parent);
     }
 
-    pub fn rescale(
-        &self,
-        base_system: &mut AppBaseSystem,
-        staging_scratch_buffer: &mut StagingScratchBuffer,
-        ui_scale_factor: f32,
-    ) {
+    pub fn rescale(&self, base_system: &mut AppBaseSystem, ui_scale_factor: f32) {
         base_system.free_mask_atlas_rect(
             self.ct_text
                 .entity(&base_system.composite_tree)
@@ -322,11 +309,7 @@ impl DragAndDropOverlayView {
         );
 
         let text_atlas_rect = base_system
-            .text_mask(
-                staging_scratch_buffer,
-                FontType::UIExtraLarge,
-                "Drop to add",
-            )
+            .text_mask(FontType::UIExtraLarge, "Drop to add")
             .unwrap();
 
         let cr = self
@@ -839,7 +822,7 @@ pub struct Application<'subsystem> {
 }
 impl<'subsystem> Application<'subsystem> {
     pub fn new(
-        init_context: &mut PresenterInitContext<'_, '_, '_, 'subsystem>,
+        init_context: &mut PresenterInitContext<'_, '_, 'subsystem>,
         composite_renderer: &CompositeRenderer<'subsystem>,
         rt_size: br::Extent2D,
         needs_window_command_buttons: bool,
@@ -898,37 +881,41 @@ impl<'subsystem> Application<'subsystem> {
         }
     }
 
-    pub fn rescale(
-        &self,
-        base_sys: &mut AppBaseSystem<'subsystem>,
-        staging_scratch_buffer: &mut StagingScratchBuffer<'subsystem>,
-        ui_scale_factor: f32,
-    ) {
-        self.app_header
-            .rescale(base_sys, staging_scratch_buffer, ui_scale_factor);
-        self.app_menu
-            .rescale(base_sys, staging_scratch_buffer, ui_scale_factor);
+    pub fn rescale(&self, base_sys: &mut AppBaseSystem<'subsystem>, ui_scale_factor: f32) {
+        self.app_header.rescale(base_sys, ui_scale_factor);
+        self.app_menu.rescale(base_sys, ui_scale_factor);
         self.editing_atlas_plane.rescale(base_sys, ui_scale_factor);
         self.sprite_list_pane
-            .rescale(base_sys, staging_scratch_buffer, unsafe {
-                SafeF32::new_unchecked(ui_scale_factor)
-            });
-        self.dnd_overlay
-            .rescale(base_sys, staging_scratch_buffer, ui_scale_factor);
+            .rescale(base_sys, unsafe { SafeF32::new_unchecked(ui_scale_factor) });
+        self.dnd_overlay.rescale(base_sys, ui_scale_factor);
     }
 
     pub fn update<'base_sys>(
         &self,
         base_sys: &'base_sys mut AppBaseSystem<'subsystem>,
-        staging_scratch_buffer: &mut StagingScratchBuffer<'subsystem>,
         current_sec: f32,
     ) {
         self.editing_atlas_plane.update(base_sys, current_sec);
-        self.app_header
-            .update(base_sys, staging_scratch_buffer, current_sec);
+        self.app_header.update(base_sys, current_sec);
         self.app_menu.update(base_sys, current_sec);
-        self.sprite_list_pane
-            .update(base_sys, current_sec, staging_scratch_buffer);
+        self.sprite_list_pane.update(base_sys, current_sec);
+    }
+
+    pub fn resize_frame(
+        &self,
+        size: SizePixels,
+        base_sys: &AppBaseSystem<'subsystem>,
+        composite_renderer: &CompositeRenderer,
+    ) {
+        self.editing_atlas_plane.recreate_render_resources(
+            base_sys,
+            composite_renderer.select_subpass(&self.editing_atlas_current_bound_pipeline),
+            size.into(),
+        );
+    }
+
+    pub fn needs_update_command(&self) -> bool {
+        self.editing_atlas_plane.needs_update()
     }
 }
 
@@ -944,16 +931,13 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     tracing::info!("Initializing Peridot SpriteAtlas Visualizer/Editor");
     let setup_timer = std::time::Instant::now();
 
-    let staging_scratch_buffers = Arc::new(RwLock::new(FlippableStagingScratchBufferGroup::new(
-        &app_system.subsystem,
-        2,
-    )));
-    let client_size = Cell::new(app_shell.client_size());
     let mut sc = PrimaryRenderTarget::new(SubsystemBoundSurface {
-        handle: unsafe {
-            app_shell
-                .create_vulkan_surface(app_system.subsystem.instance())
-                .unwrap()
+        handle: match unsafe { app_shell.create_vulkan_surface(app_system.subsystem.instance()) } {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(reason = ?e, "Failed to create vulkan surface");
+                std::process::abort();
+            }
         },
         subsystem: app_system.subsystem,
     });
@@ -970,35 +954,29 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         None
     };
 
-    let mut staging_scratch_buffer_locked =
-        parking_lot::RwLockWriteGuard::map(staging_scratch_buffers.write(), |x| {
-            x.active_buffer_mut()
-        });
     let mut active_ui_scale = app_shell.ui_scale_factor();
     tracing::info!(value = active_ui_scale, "initial ui scale");
-    let mut init_context = PresenterInitContext {
-        for_view: ViewInitContext {
-            base_system: app_system,
-            staging_scratch_buffer: &mut staging_scratch_buffer_locked,
-            ui_scale_factor: active_ui_scale,
-        },
-        app_state: app_state.get_mut(),
-    };
 
     let mut app = Application::new(
-        &mut init_context,
+        &mut PresenterInitContext {
+            for_view: ViewInitContext {
+                base_system: app_system,
+                ui_scale_factor: active_ui_scale,
+            },
+            app_state: app_state.get_mut(),
+        },
         &composite_renderer,
         sc.size,
         app_shell.needs_window_command_buttons(),
     );
 
-    drop(init_context);
     tracing::debug!(
-        byte_size = staging_scratch_buffer_locked.total_reserved_amount(),
+        byte_size = app_system
+            .active_staging_buffer_locked()
+            .total_reserved_amount(),
         "Reserved Staging Buffers during UI initialization",
     );
     app_system.hit_tree.dump(HitTestTreeManager::ROOT);
-    drop(staging_scratch_buffer_locked);
 
     // reordering hit for popups
     let popup_hit_layer = app_system.create_hit_tree(HitTestTreeData {
@@ -1007,7 +985,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         ..Default::default()
     });
     app_system.set_hit_tree_parent(popup_hit_layer, HitTestTreeManager::ROOT);
-
     let mut popup_manager = PopupManager::new(popup_hit_layer, CompositeTree::ROOT);
 
     let mut main_cp = br::CommandPoolObject::new(
@@ -1281,31 +1258,17 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                 "UI Rescaling"
             );
             active_ui_scale = current_ui_scale;
+
             app_system.rescale_fonts(active_ui_scale);
-
-            let mut staging_scratch_buffer_locked =
-                parking_lot::RwLockWriteGuard::map(staging_scratch_buffers.write(), |x| {
-                    x.active_buffer_mut()
-                });
-
-            app.rescale(
-                app_system,
-                &mut staging_scratch_buffer_locked,
-                active_ui_scale,
-            );
-
-            tracing::debug!(
-                byte_size = staging_scratch_buffer_locked.total_reserved_amount(),
-                "Reserved Staging Buffers during UI Rescaling",
-            );
+            app.rescale(app_system, active_ui_scale);
         }
 
         task_worker.try_tick();
 
         app.editing_atlas_plane.sync_with_app_state(
+            app_system,
             &app_state.borrow(),
             &bg_worker.enqueue_access(),
-            &staging_scratch_buffers,
         );
 
         while let Some(e) = app_update_context.event_queue.pop() {
@@ -1334,12 +1297,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
 
                     if let Some((width, height)) = newsize_request.take() {
                         let _pf = _pf.scoped(ProfileMarker::Resize);
-
-                        let w_dip = width as f32 / app_shell.ui_scale_factor();
-                        let h_dip = height as f32 / app_shell.ui_scale_factor();
                         tracing::trace!(width, height, "frame resize");
-
-                        client_size.set((w_dip, h_dip));
 
                         unsafe {
                             main_cp.reset(br::CommandPoolResetFlags::EMPTY).unwrap();
@@ -1367,21 +1325,11 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                             );
                         }
 
-                        app.editing_atlas_plane.recreate_render_resources(
-                            app_system,
-                            composite_renderer
-                                .select_subpass(&app.editing_atlas_current_bound_pipeline),
-                            sc.size,
-                        );
+                        app.resize_frame(sc.size.into(), app_system, &composite_renderer);
                     }
 
-                    let mut staging_scratch_buffer_locked =
-                        parking_lot::RwLockWriteGuard::map(staging_scratch_buffers.write(), |x| {
-                            x.active_buffer_mut()
-                        });
-                    app.update(app_system, &mut staging_scratch_buffer_locked, current_sec);
+                    app.update(app_system, current_sec);
                     popup_manager.update(app_system, current_sec);
-                    drop(staging_scratch_buffer_locked);
 
                     {
                         let _pf = _pf.scoped(ProfileMarker::PopulateCompositeInstances);
@@ -1458,23 +1406,51 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         composite_instance_buffer_dirty = true;
                     }
 
+                    let n = app_system
+                        .composite_instance_manager
+                        .streaming_memory_raw_handle();
+                    let flush_required = app_system
+                        .composite_instance_manager
+                        .streaming_memory_requires_flush();
+                    let mapped = unsafe {
+                        app_system
+                            .composite_instance_manager
+                            .map_streaming(&app_system.subsystem)
+                            .unwrap()
+                    };
+                    unsafe {
+                        core::ptr::write(&mut (*mapped.ptr()).current_sec, current_t.as_secs_f32());
+                    }
+                    if flush_required {
+                        unsafe {
+                            app_system
+                                .subsystem
+                                .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(
+                                    n,
+                                    0,
+                                    core::mem::size_of::<CompositeStreamingData>() as _,
+                                )])
+                                .unwrap();
+                        }
+                    }
+                    drop(mapped);
+
                     let composite_instance_buffer_dirty =
                         core::mem::replace(&mut composite_instance_buffer_dirty, false);
                     let mut needs_update =
-                        composite_instance_buffer_dirty || app.editing_atlas_plane.needs_update();
-
+                        composite_instance_buffer_dirty || app.needs_update_command();
                     if composite_renderer.update_backdrop_resources(app_system, &sc) {
                         needs_update = true;
                     }
 
                     if needs_update {
+                        let _pf = _pf.scoped(ProfileMarker::UpdateWorkSubmission);
+
                         if last_updating {
                             last_update_command_fence.wait().unwrap();
-                            last_updating = false;
                         }
 
-                        let mut staging_scratch_buffers_locked = staging_scratch_buffers.write();
-
+                        let mut staging_scratch_buffers_locked = app_system.lock_staging_buffers();
                         last_update_command_fence.reset().unwrap();
                         unsafe {
                             update_cp.reset(br::CommandPoolResetFlags::EMPTY).unwrap();
@@ -1527,40 +1503,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         })
                         .end()
                         .unwrap();
-
-                        staging_scratch_buffers_locked.flip_next_and_ready();
-                    }
-
-                    let n = app_system
-                        .composite_instance_manager
-                        .streaming_memory_raw_handle();
-                    let flush_required = app_system
-                        .composite_instance_manager
-                        .streaming_memory_requires_flush();
-                    let mapped = unsafe {
-                        app_system
-                            .composite_instance_manager
-                            .map_streaming(&app_system.subsystem)
-                            .unwrap()
-                    };
-                    unsafe {
-                        core::ptr::write(&mut (*mapped.ptr()).current_sec, current_t.as_secs_f32());
-                    }
-                    if flush_required {
-                        unsafe {
-                            app_system
-                                .subsystem
-                                .flush_mapped_memory_ranges(&[br::MappedMemoryRange::new_raw(
-                                    n,
-                                    0,
-                                    core::mem::size_of::<CompositeStreamingData>() as _,
-                                )])
-                                .unwrap();
-                        }
-                    }
-                    drop(mapped);
-
-                    if needs_update {
                         app_system
                             .subsystem
                             .submit_graphics_works(
@@ -1572,14 +1514,14 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                 Some(last_update_command_fence.as_transparent_ref_mut()),
                             )
                             .unwrap();
+
+                        staging_scratch_buffers_locked.flip_next_and_ready();
                         last_updating = true;
                     }
 
-                    _pf.record(
-                        ProfileMarker::MainCommandBufferPopulation,
-                        ProfileMarkerCategory::Begin,
-                    );
                     if main_cb_invalid {
+                        let _pf = _pf.scoped(ProfileMarker::MainCommandBufferPopulation);
+
                         for (n, cb) in main_cbs.iter_mut().enumerate() {
                             unsafe { cb.begin(&br::CommandBufferBeginInfo::new()).unwrap() }
                                 .inject(|r| {
@@ -1633,10 +1575,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
 
                         main_cb_invalid = false;
                     }
-                    _pf.record(
-                        ProfileMarker::MainCommandBufferPopulation,
-                        ProfileMarkerCategory::End,
-                    );
 
                     _pf.record(
                         ProfileMarker::RenderWorkSubmission,
@@ -1701,7 +1639,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     );
 
                     app_shell.request_next_frame();
-                    drop(_pf);
                 }
                 AppEvent::ToplevelWindowNewSize {
                     width_px,
@@ -1716,7 +1653,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     surface_y,
                 } => {
                     app_update_context.ui_scale_factor = app_shell.ui_scale_factor();
-                    let (cw, ch) = client_size.get();
+                    let (cw, ch) = app_shell.client_size();
 
                     unsafe { &mut *app_shell.pointer_input_manager().get() }.handle_mouse_move(
                         surface_x,
@@ -1736,7 +1673,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                 }
                 AppEvent::MainWindowPointerLeftDown => {
                     app_update_context.ui_scale_factor = app_shell.ui_scale_factor();
-                    let (cw, ch) = client_size.get();
+                    let (cw, ch) = app_shell.client_size();
 
                     unsafe { &mut *app_shell.pointer_input_manager().get() }
                         .handle_mouse_left_down(
@@ -1756,7 +1693,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                 }
                 AppEvent::MainWindowPointerLeftUp => {
                     app_update_context.ui_scale_factor = app_shell.ui_scale_factor();
-                    let (cw, ch) = client_size.get();
+                    let (cw, ch) = app_shell.client_size();
 
                     unsafe { &mut *app_shell.pointer_input_manager().get() }.handle_mouse_left_up(
                         &app_shell,
@@ -1774,16 +1711,12 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     );
                 }
                 AppEvent::UIMessageDialogRequest { content } => {
-                    let mut staging_scratch_buffer_locked =
-                        parking_lot::RwLockWriteGuard::map(staging_scratch_buffers.write(), |x| {
-                            x.active_buffer_mut()
-                        });
+                    let (cw, ch) = app_shell.client_size();
 
                     popup_manager.spawn(
                         &mut PresenterInitContext {
                             for_view: ViewInitContext {
                                 base_system: app_system,
-                                staging_scratch_buffer: &mut staging_scratch_buffer_locked,
                                 ui_scale_factor: active_ui_scale,
                             },
                             app_state: &mut *app_state.borrow_mut(),
@@ -1792,18 +1725,20 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         &content,
                     );
                     unsafe { &mut *app_shell.pointer_input_manager().get() }.recompute_enter_leave(
-                        client_size.get().0,
-                        client_size.get().1,
+                        cw,
+                        ch,
                         &mut app_system.hit_tree,
                         &mut app_update_context,
                         HitTestTreeManager::ROOT,
                     );
                 }
                 AppEvent::UIPopupClose { id } => {
+                    let (cw, ch) = app_shell.client_size();
+
                     popup_manager.close(app_system, t.elapsed().as_secs_f32(), &id);
                     unsafe { &mut *app_shell.pointer_input_manager().get() }.recompute_enter_leave(
-                        client_size.get().0,
-                        client_size.get().1,
+                        cw,
+                        ch,
                         &mut app_system.hit_tree,
                         &mut app_update_context,
                         HitTestTreeManager::ROOT,

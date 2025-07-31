@@ -123,7 +123,7 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
         let hwnd_state = Box::pin(WindowState {
             app_event_bus: events,
             ui_scale_factor: Cell::new(1.0),
-            pointer_input_manager: UnsafeCell::new(PointerInputManager::new()),
+            pointer_input_manager: UnsafeCell::new(PointerInputManager::new(640.0, 480.0)),
             base_sys,
         });
         let hwnd = unsafe {
@@ -271,9 +271,18 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
                     .lpCreateParams as *mut WindowState)
             };
             // 96dpi as base
-            state
-                .ui_scale_factor
-                .set(unsafe { GetDpiForWindow(hwnd) } as f32 / 96.0);
+            let ui_scale_factor = unsafe { GetDpiForWindow(hwnd) as f32 / 96.0 };
+            let mut rc = core::mem::MaybeUninit::uninit();
+            let rc = unsafe {
+                GetClientRect(hwnd, rc.as_mut_ptr()).unwrap_unchecked();
+                rc.assume_init_ref()
+            };
+
+            state.ui_scale_factor.set(ui_scale_factor);
+            state.pointer_input_manager.get_mut().set_client_size(
+                (rc.right - rc.left) as f32 / ui_scale_factor,
+                (rc.bottom - rc.top) as f32 / ui_scale_factor,
+            );
 
             // store state ptr
             unsafe {
@@ -397,10 +406,16 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
 
         if msg == WM_SIZE {
             let stref = Self::window_state_ref(hwnd);
+            let width_px = (lparam.0 & 0xffff) as u16 as u32;
+            let height_px = ((lparam.0 >> 16) & 0xffff) as u16 as u32;
             stref.app_event_bus.push(AppEvent::ToplevelWindowNewSize {
-                width_px: (lparam.0 & 0xffff) as u16 as _,
-                height_px: ((lparam.0 >> 16) & 0xffff) as u16 as _,
+                width_px,
+                height_px,
             });
+            unsafe { &mut *stref.pointer_input_manager.get() }.set_client_size(
+                width_px as f32 / stref.ui_scale_factor.get(),
+                height_px as f32 / stref.ui_scale_factor.get(),
+            );
 
             if wparam.0 == SIZE_MAXIMIZED as _ {
                 stref

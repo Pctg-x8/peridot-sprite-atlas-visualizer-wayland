@@ -81,6 +81,11 @@ impl<'subsystem> AppState<'subsystem> {
         }
     }
 
+    #[inline]
+    pub fn sprites(&self) -> &[SpriteInfo] {
+        &self.sprites
+    }
+
     pub fn add_sprites_from_file_paths(
         &mut self,
         paths: impl IntoIterator<Item = impl AsRef<Path>>,

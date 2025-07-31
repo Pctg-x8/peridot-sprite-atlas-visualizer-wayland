@@ -2,6 +2,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     path::PathBuf,
+    rc::Rc,
     sync::Arc,
 };
 
@@ -13,10 +14,10 @@ use image::EncodableLayout;
 use parking_lot::RwLock;
 
 use crate::{
-    BLEND_STATE_SINGLE_NONE, BLEND_STATE_SINGLE_PREMULTIPLIED, IA_STATE_TRILIST, IA_STATE_TRISTRIP,
-    MS_STATE_EMPTY, RASTER_STATE_DEFAULT_FILL_NOCULL, VI_STATE_EMPTY, VI_STATE_FLOAT4_ONLY,
-    ViewInitContext,
-    app_state::SpriteInfo,
+    AppEvent, AppUpdateContext, BLEND_STATE_SINGLE_NONE, BLEND_STATE_SINGLE_PREMULTIPLIED,
+    IA_STATE_TRILIST, IA_STATE_TRISTRIP, MS_STATE_EMPTY, PresenterInitContext,
+    RASTER_STATE_DEFAULT_FILL_NOCULL, VI_STATE_EMPTY, VI_STATE_FLOAT4_ONLY, ViewInitContext,
+    app_state::{AppState, SpriteInfo},
     atlas::{AtlasRect, DynamicAtlasManager},
     base_system::{
         AppBaseSystem, inject_cmd_pipeline_barrier_2,
@@ -25,24 +26,504 @@ use crate::{
         },
     },
     bg_worker::{BackgroundWork, BackgroundWorkerEnqueueAccess},
-    composite::{CompositeRect, CompositeTreeRef, CustomRenderToken},
+    composite::{
+        AnimatableColor, AnimatableFloat, AnimationCurve, CompositeMode, CompositeRect,
+        CompositeTree, CompositeTreeFloatParameterRef, CompositeTreeRef, CustomRenderToken,
+        FloatParameter,
+    },
     coordinate::SizePixels,
+    helper_types::SafeF32,
+    hittest::{HitTestTreeActionHandler, HitTestTreeData, HitTestTreeRef, PointerActionArgs},
+    input::EventContinueControl,
+    quadtree::QuadTree,
     subsystem::Subsystem,
 };
 
-pub struct EditingAtlasGridView<'d> {
-    ct_root: CompositeTreeRef,
-    custom_render_token: CustomRenderToken,
-    renderer: RefCell<EditingAtlasRenderer<'d>>,
+pub struct Presenter<'subsystem> {
+    sprites_dirty: Rc<Cell<bool>>,
+    action_handler: Rc<ActionHandler<'subsystem>>,
 }
-impl<'d> EditingAtlasGridView<'d> {
+impl<'subsystem> Presenter<'subsystem> {
     pub fn new(
+        init: &mut PresenterInitContext<'_, '_, '_, 'subsystem>,
+        rendered_pass: br::SubpassRef<impl br::RenderPass + ?Sized>,
+        main_buffer_size: br::Extent2D,
+    ) -> Self {
+        let grid_view = GridView::new(
+            &mut init.for_view,
+            rendered_pass,
+            main_buffer_size,
+            SizePixels {
+                width: 32,
+                height: 32,
+            },
+        );
+        let marker_view = CurrentSelectedSpriteMarkerView::new(&mut init.for_view);
+        let sprites_dirty = Rc::new(Cell::new(false));
+
+        marker_view.mount(
+            grid_view.ct_root,
+            &mut init.for_view.base_system.composite_tree,
+        );
+
+        let action_handler = Rc::new(ActionHandler {
+            sprites_qt: RefCell::new(QuadTree::new()),
+            sprite_rects_cached: RefCell::new(Vec::new()),
+            current_selected_sprite_marker_view: marker_view,
+            grid_view,
+            drag_state: RefCell::new(DragState::None),
+        });
+        init.for_view
+            .base_system
+            .hit_tree
+            .set_action_handler(action_handler.grid_view.ht_root, &action_handler);
+
+        init.app_state.register_atlas_size_view_feedback({
+            let action_handler = Rc::downgrade(&action_handler);
+
+            move |size| {
+                let Some(action_handler) = action_handler.upgrade() else {
+                    // app teardown-ed
+                    return;
+                };
+
+                action_handler
+                    .grid_view
+                    .renderer
+                    .borrow_mut()
+                    .set_atlas_size(*size);
+            }
+        });
+        init.app_state.register_sprites_view_feedback({
+            let sprites_dirty = Rc::downgrade(&sprites_dirty);
+            let action_handler = Rc::downgrade(&action_handler);
+            let mut last_selected_index = None;
+
+            move |sprites| {
+                let Some(sprites_dirty) = sprites_dirty.upgrade() else {
+                    // app teardown-ed
+                    return;
+                };
+                let Some(action_handler) = action_handler.upgrade() else {
+                    // app teardown-ed
+                    return;
+                };
+
+                sprites_dirty.set(true);
+                action_handler.update_sprite_rects(sprites);
+
+                // TODO: Model的には複数選択できる形にしてるけどViewはどうしようか......
+                let selected_index = sprites.iter().position(|x| x.selected);
+                if selected_index != last_selected_index {
+                    last_selected_index = selected_index;
+                    if let Some(x) = selected_index {
+                        action_handler.current_selected_sprite_marker_view.focus(
+                            sprites[x].left as _,
+                            sprites[x].top as _,
+                            sprites[x].width as _,
+                            sprites[x].height as _,
+                        );
+                    } else {
+                        action_handler.current_selected_sprite_marker_view.hide();
+                    }
+                }
+            }
+        });
+
+        Self {
+            sprites_dirty,
+            action_handler,
+        }
+    }
+
+    #[inline]
+    pub fn mount(&self, base_sys: &mut AppBaseSystem, parents: (CompositeTreeRef, HitTestTreeRef)) {
+        self.action_handler.grid_view.mount(base_sys, parents);
+    }
+
+    #[inline]
+    pub fn rescale(&self, base_sys: &mut AppBaseSystem, ui_scale_factor: f32) {
+        self.action_handler
+            .current_selected_sprite_marker_view
+            .rescale(base_sys, ui_scale_factor);
+    }
+
+    #[inline]
+    pub fn update(&self, base_sys: &mut AppBaseSystem, current_sec: f32) {
+        self.action_handler
+            .current_selected_sprite_marker_view
+            .update(&mut base_sys.composite_tree, current_sec);
+    }
+
+    pub fn sync_with_app_state(
+        &self,
+        app_state: &AppState<'subsystem>,
+        bg_worker_enqueue: &BackgroundWorkerEnqueueAccess<'subsystem>,
+        staging_scratch_buffers: &std::sync::Arc<
+            RwLock<FlippableStagingScratchBufferGroup<'subsystem>>,
+        >,
+    ) {
+        if self.sprites_dirty.replace(false) {
+            self.action_handler
+                .grid_view
+                .renderer
+                .borrow()
+                .update_sprites(
+                    app_state.sprites(),
+                    bg_worker_enqueue,
+                    staging_scratch_buffers,
+                );
+        }
+    }
+
+    #[inline]
+    pub fn set_offset(&self, x: f32, y: f32) {
+        self.action_handler
+            .grid_view
+            .renderer
+            .borrow_mut()
+            .set_offset(x, y);
+    }
+
+    #[inline]
+    pub fn recreate_render_resources(
+        &self,
+        app_system: &AppBaseSystem<'subsystem>,
+        rendered_pass: br::SubpassRef<impl br::RenderPass + ?Sized>,
+        main_buffer_size: br::Extent2D,
+    ) {
+        self.action_handler
+            .grid_view
+            .renderer
+            .borrow_mut()
+            .recreate(app_system, rendered_pass, main_buffer_size);
+    }
+
+    #[inline]
+    pub fn needs_update(&self) -> bool {
+        self.action_handler.grid_view.renderer.borrow().is_dirty()
+    }
+
+    #[inline]
+    pub fn process_dirty_data<'x>(
+        &self,
+        subsystem: &'subsystem Subsystem,
+        staging_scratch_buffer: &StagingScratchBuffer<'subsystem>,
+        rec: br::CmdRecord<'x>,
+    ) -> br::CmdRecord<'x> {
+        self.action_handler
+            .grid_view
+            .renderer
+            .borrow_mut()
+            .process_dirty_data(subsystem, staging_scratch_buffer, rec)
+    }
+
+    #[inline]
+    pub fn handle_custom_render<'x>(
+        &self,
+        token: &CustomRenderToken,
+        rt_size: br::Extent2D,
+        rec: br::CmdRecord<'x>,
+    ) -> br::CmdRecord<'x> {
+        if &self.action_handler.grid_view.custom_render_token == token {
+            return self
+                .action_handler
+                .grid_view
+                .renderer
+                .borrow()
+                .render_commands(rt_size, rec);
+        }
+
+        rec
+    }
+}
+
+enum DragState {
+    None,
+    Grid {
+        base_x_pixels: f32,
+        base_y_pixels: f32,
+        drag_start_client_x_pixels: f32,
+        drag_start_client_y_pixels: f32,
+    },
+    Sprite {
+        index: usize,
+        base_x_pixels: f32,
+        base_y_pixels: f32,
+        base_width_pixels: f32,
+        base_height_pixels: f32,
+        drag_start_client_x_pixels: f32,
+        drag_start_client_y_pixels: f32,
+    },
+}
+
+struct ActionHandler<'subsystem> {
+    sprites_qt: RefCell<QuadTree>,
+    sprite_rects_cached: RefCell<Vec<(u32, u32, u32, u32)>>,
+    current_selected_sprite_marker_view: CurrentSelectedSpriteMarkerView,
+    grid_view: GridView<'subsystem>,
+    drag_state: RefCell<DragState>,
+}
+impl<'subsystem> ActionHandler<'subsystem> {
+    fn update_sprite_rects(&self, sprites: &[SpriteInfo]) {
+        let mut sprite_rects_locked = self.sprite_rects_cached.borrow_mut();
+        let mut sprites_qt_locked = self.sprites_qt.borrow_mut();
+
+        while sprite_rects_locked.len() > sprites.len() {
+            // 削除分
+            let n = sprite_rects_locked.len() - 1;
+            let old = sprite_rects_locked.pop().unwrap();
+            let (index, level) = QuadTree::rect_index_and_level(old.0, old.1, old.2, old.3);
+
+            sprites_qt_locked.element_index_for_region[level][index as usize].remove(&n);
+        }
+        for (n, (old, new)) in sprite_rects_locked
+            .iter_mut()
+            .zip(sprites.iter())
+            .enumerate()
+        {
+            // 移動分
+            if old.0 == new.left
+                && old.1 == new.top
+                && old.2 == new.right()
+                && old.3 == new.bottom()
+            {
+                // 座標変化なし
+                continue;
+            }
+
+            let (old_index, old_level) = QuadTree::rect_index_and_level(old.0, old.1, old.2, old.3);
+            let (new_index, new_level) =
+                QuadTree::rect_index_and_level(new.left, new.top, new.right(), new.bottom());
+            *old = (new.left, new.top, new.right(), new.bottom());
+
+            if old_level == new_level && old_index == new_index {
+                // 所属ブロックに変化なし
+                continue;
+            }
+
+            sprites_qt_locked.element_index_for_region[old_level][old_index as usize].remove(&n);
+            sprites_qt_locked.bind(new_level, new_index, n);
+        }
+        let new_base = sprite_rects_locked.len();
+        for (n, new) in sprites.iter().enumerate().skip(new_base) {
+            // 追加分
+            let (index, level) =
+                QuadTree::rect_index_and_level(new.left, new.top, new.right(), new.bottom());
+            sprites_qt_locked.bind(level, index, n);
+            sprite_rects_locked.push((new.left, new.top, new.right(), new.bottom()));
+        }
+    }
+}
+impl<'c> HitTestTreeActionHandler for ActionHandler<'c> {
+    fn on_pointer_down(
+        &self,
+        _sender: HitTestTreeRef,
+        context: &mut AppUpdateContext,
+        args: &PointerActionArgs,
+    ) -> EventContinueControl {
+        let [cx, cy] = self.grid_view.renderer.borrow().offset();
+        let pointing_x = args.client_x * context.ui_scale_factor - cx;
+        let pointing_y = args.client_y * context.ui_scale_factor - cy;
+
+        let state_locked = context.state.borrow();
+        let sprite_drag_target_index =
+            state_locked
+                .selected_sprites_with_index()
+                .rev()
+                .find(|(_, x)| {
+                    x.left as f32 <= pointing_x
+                        && pointing_x <= x.right() as f32
+                        && x.top as f32 <= pointing_y
+                        && pointing_y <= x.bottom() as f32
+                });
+        if let Some((sprite_drag_target_index, target_sprite_ref)) = sprite_drag_target_index {
+            // 選択中のスプライトの上で操作が開始された
+            self.current_selected_sprite_marker_view.hide();
+            *self.drag_state.borrow_mut() = DragState::Sprite {
+                index: sprite_drag_target_index,
+                base_x_pixels: target_sprite_ref.left as f32,
+                base_y_pixels: target_sprite_ref.top as f32,
+                base_width_pixels: target_sprite_ref.width as f32,
+                base_height_pixels: target_sprite_ref.height as f32,
+                drag_start_client_x_pixels: args.client_x * context.ui_scale_factor,
+                drag_start_client_y_pixels: args.client_y * context.ui_scale_factor,
+            };
+        } else {
+            *self.drag_state.borrow_mut() = DragState::Grid {
+                base_x_pixels: cx,
+                base_y_pixels: cy,
+                drag_start_client_x_pixels: args.client_x * context.ui_scale_factor,
+                drag_start_client_y_pixels: args.client_y * context.ui_scale_factor,
+            };
+        }
+
+        EventContinueControl::CAPTURE_ELEMENT
+    }
+
+    fn on_pointer_move(
+        &self,
+        _sender: HitTestTreeRef,
+        context: &mut AppUpdateContext,
+        args: &PointerActionArgs,
+    ) -> EventContinueControl {
+        match &*self.drag_state.borrow() {
+            DragState::None => (),
+            DragState::Grid {
+                base_x_pixels,
+                base_y_pixels,
+                drag_start_client_x_pixels,
+                drag_start_client_y_pixels,
+            } => {
+                let dx = args.client_x * context.ui_scale_factor - drag_start_client_x_pixels;
+                let dy = args.client_y * context.ui_scale_factor - drag_start_client_y_pixels;
+                let ox = base_x_pixels + dx;
+                let oy = base_y_pixels + dy;
+
+                self.grid_view.renderer.borrow_mut().set_offset(ox, oy);
+                self.current_selected_sprite_marker_view
+                    .set_view_offset(ox, oy);
+
+                return EventContinueControl::STOP_PROPAGATION;
+            }
+            &DragState::Sprite {
+                index,
+                base_x_pixels,
+                base_y_pixels,
+                drag_start_client_x_pixels,
+                drag_start_client_y_pixels,
+                ..
+            } => {
+                let (dx, dy) = (
+                    (args.client_x * context.ui_scale_factor) - drag_start_client_x_pixels,
+                    (args.client_y * context.ui_scale_factor) - drag_start_client_y_pixels,
+                );
+                let (sx, sy) = (
+                    (base_x_pixels + dx).max(0.0) as u32,
+                    (base_y_pixels + dy).max(0.0) as u32,
+                );
+                self.grid_view
+                    .renderer
+                    .borrow_mut()
+                    .update_sprite_offset(index, sx as _, sy as _);
+
+                return EventContinueControl::STOP_PROPAGATION;
+            }
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_pointer_up(
+        &self,
+        _sender: HitTestTreeRef,
+        context: &mut AppUpdateContext,
+        args: &PointerActionArgs,
+    ) -> EventContinueControl {
+        match self.drag_state.replace(DragState::None) {
+            DragState::None => (),
+            DragState::Grid {
+                base_x_pixels,
+                base_y_pixels,
+                drag_start_client_x_pixels,
+                drag_start_client_y_pixels,
+            } => {
+                let dx = args.client_x * context.ui_scale_factor - drag_start_client_x_pixels;
+                let dy = args.client_y * context.ui_scale_factor - drag_start_client_y_pixels;
+                let ox = base_x_pixels + dx;
+                let oy = base_y_pixels + dy;
+
+                self.grid_view.renderer.borrow_mut().set_offset(ox, oy);
+                self.current_selected_sprite_marker_view
+                    .set_view_offset(ox, oy);
+
+                return EventContinueControl::STOP_PROPAGATION
+                    | EventContinueControl::RELEASE_CAPTURE_ELEMENT;
+            }
+            DragState::Sprite {
+                index,
+                base_x_pixels,
+                base_y_pixels,
+                base_width_pixels,
+                base_height_pixels,
+                drag_start_client_x_pixels,
+                drag_start_client_y_pixels,
+            } => {
+                let (dx, dy) = (
+                    (args.client_x * context.ui_scale_factor) - drag_start_client_x_pixels,
+                    (args.client_y * context.ui_scale_factor) - drag_start_client_y_pixels,
+                );
+                let (sx, sy) = (
+                    (base_x_pixels + dx).max(0.0) as u32,
+                    (base_y_pixels + dy).max(0.0) as u32,
+                );
+                context.state.borrow_mut().set_sprite_offset(index, sx, sy);
+
+                // 選択インデックスが変わるわけではないのでここで選択枠Viewを復帰させる
+                self.current_selected_sprite_marker_view.focus(
+                    sx as _,
+                    sy as _,
+                    base_width_pixels,
+                    base_height_pixels,
+                );
+
+                return EventContinueControl::STOP_PROPAGATION
+                    | EventContinueControl::RELEASE_CAPTURE_ELEMENT;
+            }
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_click(
+        &self,
+        _sender: HitTestTreeRef,
+        context: &mut AppUpdateContext,
+        args: &PointerActionArgs,
+    ) -> EventContinueControl {
+        let [cx, cy] = self.grid_view.renderer.borrow().offset();
+        let x = args.client_x * context.ui_scale_factor - cx;
+        let y = args.client_y * context.ui_scale_factor - cy;
+
+        let mut max_index = None;
+        for n in self
+            .sprites_qt
+            .borrow()
+            .iter_possible_element_indices(x as _, y as _)
+        {
+            let (l, t, r, b) = self.sprite_rects_cached.borrow()[n];
+            if l as f32 <= x && x <= r as f32 && t as f32 <= y && y <= b as f32 {
+                // 大きいインデックスのものが最前面にいるのでmaxをとる
+                max_index = Some(max_index.map_or(n, |x: usize| x.max(n)));
+            }
+        }
+
+        if let Some(mx) = max_index {
+            context
+                .event_queue
+                .push(AppEvent::SelectSprite { index: mx });
+        } else {
+            context.event_queue.push(AppEvent::DeselectSprite);
+        }
+
+        EventContinueControl::STOP_PROPAGATION
+    }
+}
+
+struct GridView<'d> {
+    ct_root: CompositeTreeRef,
+    ht_root: HitTestTreeRef,
+    custom_render_token: CustomRenderToken,
+    renderer: RefCell<Renderer<'d>>,
+}
+impl<'d> GridView<'d> {
+    fn new(
         init: &mut ViewInitContext<'_, '_, 'd>,
         rendered_pass: br::SubpassRef<impl br::RenderPass + ?Sized>,
         main_buffer_size: br::Extent2D,
         init_atlas_size: SizePixels,
     ) -> Self {
-        let renderer = EditingAtlasRenderer::new(
+        let renderer = Renderer::new(
             init.base_system,
             rendered_pass,
             main_buffer_size,
@@ -58,26 +539,23 @@ impl<'d> EditingAtlasGridView<'d> {
             custom_render_token: Some(custom_render_token),
             ..Default::default()
         });
+        let ht_root = init.base_system.create_hit_tree(HitTestTreeData {
+            width_adjustment_factor: 1.0,
+            height_adjustment_factor: 1.0,
+            ..Default::default()
+        });
 
         Self {
             ct_root,
+            ht_root,
             custom_render_token,
             renderer: RefCell::new(renderer),
         }
     }
 
-    pub fn mount(&self, base_system: &mut AppBaseSystem, ct_parent: CompositeTreeRef) {
-        base_system.set_composite_tree_parent(self.ct_root, ct_parent);
-    }
-
     #[inline(always)]
-    pub fn is_custom_render(&self, token: &CustomRenderToken) -> bool {
-        &self.custom_render_token == token
-    }
-
-    #[inline(always)]
-    pub fn renderer(&self) -> &RefCell<EditingAtlasRenderer<'d>> {
-        &self.renderer
+    fn mount(&self, base_system: &mut AppBaseSystem, parents: (CompositeTreeRef, HitTestTreeRef)) {
+        base_system.set_tree_parent((self.ct_root, self.ht_root), parents);
     }
 }
 
@@ -87,204 +565,7 @@ struct GridParams {
     pub size: [f32; 2],
 }
 
-struct LoadedSpriteSourceAtlas<'subsystem> {
-    resource: br::ImageViewObject<br::ImageObject<&'subsystem Subsystem>>,
-    memory: br::DeviceMemoryObject<&'subsystem Subsystem>,
-    region_manager: DynamicAtlasManager,
-}
-impl<'subsystem> LoadedSpriteSourceAtlas<'subsystem> {
-    const SIZE: u32 = 4096;
-
-    #[tracing::instrument(skip(base_system), fields(size = Self::SIZE))]
-    fn new(base_system: &AppBaseSystem<'subsystem>, format: br::Format) -> Self {
-        let mut resource = br::ImageObject::new(
-            base_system.subsystem,
-            &br::ImageCreateInfo::new(br::Extent2D::spread1(Self::SIZE), format).with_usage(
-                br::ImageUsageFlags::SAMPLED
-                    | br::ImageUsageFlags::TRANSFER_DEST
-                    | br::ImageUsageFlags::TRANSFER_SRC,
-            ),
-        )
-        .unwrap();
-        resource
-            .set_name(Some(c"Loaded Sprite Source Atlas"))
-            .unwrap();
-        let req = resource.requirements();
-        let memindex = base_system
-            .find_device_local_memory_index(req.memoryTypeBits)
-            .unwrap();
-        let memory = br::DeviceMemoryObject::new(
-            base_system.subsystem,
-            &br::MemoryAllocateInfo::new(req.size, memindex),
-        )
-        .unwrap();
-        resource.bind(&memory, 0).unwrap();
-        let resource = br::ImageViewBuilder::new(
-            resource,
-            br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
-        )
-        .create()
-        .unwrap();
-
-        let mut region_manager = DynamicAtlasManager::new();
-        region_manager.free(AtlasRect {
-            left: 0,
-            top: 0,
-            right: Self::SIZE,
-            bottom: Self::SIZE,
-        });
-
-        Self {
-            resource,
-            memory,
-            region_manager,
-        }
-    }
-
-    fn alloc(&mut self, width: u32, height: u32) -> Option<AtlasRect> {
-        if width > Self::SIZE || height > Self::SIZE {
-            // でかすぎ
-            return None;
-        }
-
-        self.region_manager.alloc(width, height)
-    }
-
-    fn free(&mut self, rect: AtlasRect) {
-        self.region_manager.free(rect);
-    }
-}
-
-#[repr(C)]
-struct SpriteInstance {
-    pos_st: [f32; 4],
-    uv_st: [f32; 4],
-}
-
-struct SpriteInstanceBuffers<'subsystem> {
-    subsystem: &'subsystem Subsystem,
-    buffer: br::BufferObject<&'subsystem Subsystem>,
-    memory: br::DeviceMemoryObject<&'subsystem Subsystem>,
-    stg_buffer: br::BufferObject<&'subsystem Subsystem>,
-    stg_memory: br::DeviceMemoryObject<&'subsystem Subsystem>,
-    stg_requires_flush: bool,
-    is_dirty: bool,
-    capacity: br::DeviceSize,
-}
-impl<'subsystem> SpriteInstanceBuffers<'subsystem> {
-    const BUCKET_SIZE: br::DeviceSize = 64;
-
-    #[tracing::instrument(skip(subsystem))]
-    fn new(subsystem: &'subsystem Subsystem) -> Self {
-        let capacity = Self::BUCKET_SIZE;
-        let byte_length = capacity as usize * core::mem::size_of::<SpriteInstance>();
-
-        let mut buffer = br::BufferObject::new(
-            subsystem,
-            &br::BufferCreateInfo::new(
-                byte_length,
-                br::BufferUsage::VERTEX_BUFFER | br::BufferUsage::TRANSFER_DEST,
-            ),
-        )
-        .unwrap();
-        let req = buffer.requirements();
-        let memindex = subsystem
-            .find_device_local_memory_index(req.memoryTypeBits)
-            .unwrap();
-        let memory = br::DeviceMemoryObject::new(
-            subsystem,
-            &br::MemoryAllocateInfo::new(req.size, memindex),
-        )
-        .unwrap();
-        buffer.bind(&memory, 0).unwrap();
-
-        let mut stg_buffer = br::BufferObject::new(
-            subsystem,
-            &br::BufferCreateInfo::new(byte_length, br::BufferUsage::TRANSFER_SRC),
-        )
-        .unwrap();
-        let req = stg_buffer.requirements();
-        let memindex = subsystem
-            .find_host_visible_memory_index(req.memoryTypeBits)
-            .unwrap();
-        let stg_memory = br::DeviceMemoryObject::new(
-            subsystem,
-            &br::MemoryAllocateInfo::new(req.size, memindex),
-        )
-        .unwrap();
-        stg_buffer.bind(&stg_memory, 0).unwrap();
-        let stg_requires_flush = !subsystem.is_coherent_memory_type(memindex);
-
-        Self {
-            subsystem,
-            buffer,
-            memory,
-            stg_buffer,
-            stg_memory,
-            stg_requires_flush,
-            is_dirty: false,
-            capacity,
-        }
-    }
-
-    /// return: true if resized
-    #[tracing::instrument(skip(self), fields(required_capacity))]
-    fn require_capacity(&mut self, element_count: br::DeviceSize) -> bool {
-        let required_capacity = (element_count + Self::BUCKET_SIZE - 1) & !(Self::BUCKET_SIZE - 1);
-        tracing::Span::current().record("required_capacity", required_capacity);
-
-        if self.capacity >= required_capacity {
-            // enough
-            return false;
-        }
-
-        // realloc
-        self.capacity = required_capacity;
-        let byte_length = self.capacity as usize * core::mem::size_of::<SpriteInstance>();
-
-        self.buffer = br::BufferObject::new(
-            self.subsystem,
-            &br::BufferCreateInfo::new(
-                byte_length,
-                br::BufferUsage::VERTEX_BUFFER | br::BufferUsage::TRANSFER_DEST,
-            ),
-        )
-        .unwrap();
-        let req = self.buffer.requirements();
-        let memindex = self
-            .subsystem
-            .find_device_local_memory_index(req.memoryTypeBits)
-            .unwrap();
-        self.memory = br::DeviceMemoryObject::new(
-            self.subsystem,
-            &br::MemoryAllocateInfo::new(req.size, memindex),
-        )
-        .unwrap();
-        self.buffer.bind(&self.memory, 0).unwrap();
-
-        self.stg_buffer = br::BufferObject::new(
-            self.subsystem,
-            &br::BufferCreateInfo::new(byte_length, br::BufferUsage::TRANSFER_SRC),
-        )
-        .unwrap();
-        let req = self.stg_buffer.requirements();
-        let memindex = self
-            .subsystem
-            .find_host_visible_memory_index(req.memoryTypeBits)
-            .unwrap();
-        self.stg_memory = br::DeviceMemoryObject::new(
-            self.subsystem,
-            &br::MemoryAllocateInfo::new(req.size, memindex),
-        )
-        .unwrap();
-        self.stg_buffer.bind(&self.stg_memory, 0).unwrap();
-        self.stg_requires_flush = !self.subsystem.is_coherent_memory_type(memindex);
-
-        true
-    }
-}
-
-pub struct EditingAtlasRenderer<'d> {
+struct Renderer<'d> {
     _sprite_sampler: br::SamplerObject<&'d Subsystem>,
     pub param_buffer: br::BufferObject<&'d Subsystem>,
     _param_buffer_memory: br::DeviceMemoryObject<&'d Subsystem>,
@@ -310,7 +591,7 @@ pub struct EditingAtlasRenderer<'d> {
     sprite_count: Cell<usize>,
     sprite_image_copies: Arc<RwLock<HashMap<usize, Vec<br::vk::VkBufferImageCopy>>>>,
 }
-impl<'d> EditingAtlasRenderer<'d> {
+impl<'d> Renderer<'d> {
     const SPRITES_RENDER_PIPELINE_VI_STATE: &'static br::PipelineVertexInputStateCreateInfo<
         'static,
     > = &br::PipelineVertexInputStateCreateInfo::new(
@@ -610,7 +891,7 @@ impl<'d> EditingAtlasRenderer<'d> {
         }
     }
 
-    pub fn update_sprite_offset(&self, index: usize, left_pixels: f32, top_pixels: f32) {
+    fn update_sprite_offset(&self, index: usize, left_pixels: f32, top_pixels: f32) {
         let mut buffers_mref = self.sprite_instance_buffers.borrow_mut();
 
         let h = buffers_mref.stg_memory.native_ptr();
@@ -646,11 +927,11 @@ impl<'d> EditingAtlasRenderer<'d> {
     }
 
     #[tracing::instrument(skip(self, sprites, bg_worker_access, staging_scratch_buffers))]
-    pub fn update_sprites(
+    fn update_sprites(
         &self,
         sprites: &[SpriteInfo],
         bg_worker_access: &BackgroundWorkerEnqueueAccess<'d>,
-        staging_scratch_buffers: &std::sync::Weak<RwLock<FlippableStagingScratchBufferGroup<'d>>>,
+        staging_scratch_buffers: &std::sync::Arc<RwLock<FlippableStagingScratchBufferGroup<'d>>>,
     ) {
         let mut buffers_mref = self.sprite_instance_buffers.borrow_mut();
         let mut rects_mref = self.sprite_atlas_rect_by_path.borrow_mut();
@@ -683,7 +964,8 @@ impl<'d> EditingAtlasRenderer<'d> {
                             x.source_path.clone(),
                             Box::new({
                                 let sprite_image_copies = Arc::downgrade(&self.sprite_image_copies);
-                                let staging_scratch_buffers = staging_scratch_buffers.clone();
+                                let staging_scratch_buffers =
+                                    std::sync::Arc::downgrade(staging_scratch_buffers);
                                 let &SpriteInfo { width, height, .. } = x;
 
                                 move |path, di| {
@@ -784,28 +1066,28 @@ impl<'d> EditingAtlasRenderer<'d> {
         self.sprite_count.set(sprites.len());
     }
 
-    pub const fn offset(&self) -> [f32; 2] {
+    const fn offset(&self) -> [f32; 2] {
         self.current_params_data.offset
     }
 
-    pub fn set_offset(&mut self, x: f32, y: f32) {
+    fn set_offset(&mut self, x: f32, y: f32) {
         self.current_params_data.offset = [x, y];
         self.param_is_dirty = true;
     }
 
-    pub fn set_atlas_size(&mut self, size: SizePixels) {
+    fn set_atlas_size(&mut self, size: SizePixels) {
         self.atlas_size = size;
         self.bg_vertex_buffer_is_dirty = true;
     }
 
-    pub fn is_dirty(&self) -> bool {
+    fn is_dirty(&self) -> bool {
         self.param_is_dirty
             || self.bg_vertex_buffer_is_dirty
             || self.sprite_instance_buffers.borrow().is_dirty
             || !self.sprite_image_copies.read().is_empty()
     }
 
-    pub fn process_dirty_data<'c>(
+    fn process_dirty_data<'c>(
         &mut self,
         subsystem: &Subsystem,
         staging_scratch_buffer: &StagingScratchBuffer<'d>,
@@ -934,7 +1216,7 @@ impl<'d> EditingAtlasRenderer<'d> {
             })
     }
 
-    pub fn recreate(
+    fn recreate(
         &mut self,
         app_system: &AppBaseSystem<'d>,
         rendered_pass: br::SubpassRef<impl br::RenderPass + ?Sized>,
@@ -1010,7 +1292,7 @@ impl<'d> EditingAtlasRenderer<'d> {
         self.sprite_instance_render_pipeline = sprite_instance_render_pipeline;
     }
 
-    pub fn render_commands<'cb>(
+    fn render_commands<'cb>(
         &self,
         sc_size: br::Extent2D,
         rec: br::CmdRecord<'cb>,
@@ -1069,5 +1351,406 @@ impl<'d> EditingAtlasRenderer<'d> {
                 )
                 .draw(4, inst_count as _, 0, 0)
             })
+    }
+}
+
+struct LoadedSpriteSourceAtlas<'subsystem> {
+    resource: br::ImageViewObject<br::ImageObject<&'subsystem Subsystem>>,
+    memory: br::DeviceMemoryObject<&'subsystem Subsystem>,
+    region_manager: DynamicAtlasManager,
+}
+impl<'subsystem> LoadedSpriteSourceAtlas<'subsystem> {
+    const SIZE: u32 = 4096;
+
+    #[tracing::instrument(skip(base_system), fields(size = Self::SIZE))]
+    fn new(base_system: &AppBaseSystem<'subsystem>, format: br::Format) -> Self {
+        let mut resource = br::ImageObject::new(
+            base_system.subsystem,
+            &br::ImageCreateInfo::new(br::Extent2D::spread1(Self::SIZE), format).with_usage(
+                br::ImageUsageFlags::SAMPLED
+                    | br::ImageUsageFlags::TRANSFER_DEST
+                    | br::ImageUsageFlags::TRANSFER_SRC,
+            ),
+        )
+        .unwrap();
+        resource
+            .set_name(Some(c"Loaded Sprite Source Atlas"))
+            .unwrap();
+        let req = resource.requirements();
+        let memindex = base_system
+            .find_device_local_memory_index(req.memoryTypeBits)
+            .unwrap();
+        let memory = br::DeviceMemoryObject::new(
+            base_system.subsystem,
+            &br::MemoryAllocateInfo::new(req.size, memindex),
+        )
+        .unwrap();
+        resource.bind(&memory, 0).unwrap();
+        let resource = br::ImageViewBuilder::new(
+            resource,
+            br::ImageSubresourceRange::new(br::AspectMask::COLOR, 0..1, 0..1),
+        )
+        .create()
+        .unwrap();
+
+        let mut region_manager = DynamicAtlasManager::new();
+        region_manager.free(AtlasRect {
+            left: 0,
+            top: 0,
+            right: Self::SIZE,
+            bottom: Self::SIZE,
+        });
+
+        Self {
+            resource,
+            memory,
+            region_manager,
+        }
+    }
+
+    fn alloc(&mut self, width: u32, height: u32) -> Option<AtlasRect> {
+        if width > Self::SIZE || height > Self::SIZE {
+            // でかすぎ
+            return None;
+        }
+
+        self.region_manager.alloc(width, height)
+    }
+
+    fn free(&mut self, rect: AtlasRect) {
+        self.region_manager.free(rect);
+    }
+}
+
+#[repr(C)]
+struct SpriteInstance {
+    pos_st: [f32; 4],
+    uv_st: [f32; 4],
+}
+
+struct SpriteInstanceBuffers<'subsystem> {
+    subsystem: &'subsystem Subsystem,
+    buffer: br::BufferObject<&'subsystem Subsystem>,
+    memory: br::DeviceMemoryObject<&'subsystem Subsystem>,
+    stg_buffer: br::BufferObject<&'subsystem Subsystem>,
+    stg_memory: br::DeviceMemoryObject<&'subsystem Subsystem>,
+    stg_requires_flush: bool,
+    is_dirty: bool,
+    capacity: br::DeviceSize,
+}
+impl<'subsystem> SpriteInstanceBuffers<'subsystem> {
+    const BUCKET_SIZE: br::DeviceSize = 64;
+
+    #[tracing::instrument(skip(subsystem))]
+    fn new(subsystem: &'subsystem Subsystem) -> Self {
+        let capacity = Self::BUCKET_SIZE;
+        let byte_length = capacity as usize * core::mem::size_of::<SpriteInstance>();
+
+        let mut buffer = br::BufferObject::new(
+            subsystem,
+            &br::BufferCreateInfo::new(
+                byte_length,
+                br::BufferUsage::VERTEX_BUFFER | br::BufferUsage::TRANSFER_DEST,
+            ),
+        )
+        .unwrap();
+        let req = buffer.requirements();
+        let memindex = subsystem
+            .find_device_local_memory_index(req.memoryTypeBits)
+            .unwrap();
+        let memory = br::DeviceMemoryObject::new(
+            subsystem,
+            &br::MemoryAllocateInfo::new(req.size, memindex),
+        )
+        .unwrap();
+        buffer.bind(&memory, 0).unwrap();
+
+        let mut stg_buffer = br::BufferObject::new(
+            subsystem,
+            &br::BufferCreateInfo::new(byte_length, br::BufferUsage::TRANSFER_SRC),
+        )
+        .unwrap();
+        let req = stg_buffer.requirements();
+        let memindex = subsystem
+            .find_host_visible_memory_index(req.memoryTypeBits)
+            .unwrap();
+        let stg_memory = br::DeviceMemoryObject::new(
+            subsystem,
+            &br::MemoryAllocateInfo::new(req.size, memindex),
+        )
+        .unwrap();
+        stg_buffer.bind(&stg_memory, 0).unwrap();
+        let stg_requires_flush = !subsystem.is_coherent_memory_type(memindex);
+
+        Self {
+            subsystem,
+            buffer,
+            memory,
+            stg_buffer,
+            stg_memory,
+            stg_requires_flush,
+            is_dirty: false,
+            capacity,
+        }
+    }
+
+    /// return: true if resized
+    #[tracing::instrument(skip(self), fields(required_capacity))]
+    fn require_capacity(&mut self, element_count: br::DeviceSize) -> bool {
+        let required_capacity = (element_count + Self::BUCKET_SIZE - 1) & !(Self::BUCKET_SIZE - 1);
+        tracing::Span::current().record("required_capacity", required_capacity);
+
+        if self.capacity >= required_capacity {
+            // enough
+            return false;
+        }
+
+        // realloc
+        self.capacity = required_capacity;
+        let byte_length = self.capacity as usize * core::mem::size_of::<SpriteInstance>();
+
+        self.buffer = br::BufferObject::new(
+            self.subsystem,
+            &br::BufferCreateInfo::new(
+                byte_length,
+                br::BufferUsage::VERTEX_BUFFER | br::BufferUsage::TRANSFER_DEST,
+            ),
+        )
+        .unwrap();
+        let req = self.buffer.requirements();
+        let memindex = self
+            .subsystem
+            .find_device_local_memory_index(req.memoryTypeBits)
+            .unwrap();
+        self.memory = br::DeviceMemoryObject::new(
+            self.subsystem,
+            &br::MemoryAllocateInfo::new(req.size, memindex),
+        )
+        .unwrap();
+        self.buffer.bind(&self.memory, 0).unwrap();
+
+        self.stg_buffer = br::BufferObject::new(
+            self.subsystem,
+            &br::BufferCreateInfo::new(byte_length, br::BufferUsage::TRANSFER_SRC),
+        )
+        .unwrap();
+        let req = self.stg_buffer.requirements();
+        let memindex = self
+            .subsystem
+            .find_host_visible_memory_index(req.memoryTypeBits)
+            .unwrap();
+        self.stg_memory = br::DeviceMemoryObject::new(
+            self.subsystem,
+            &br::MemoryAllocateInfo::new(req.size, memindex),
+        )
+        .unwrap();
+        self.stg_buffer.bind(&self.stg_memory, 0).unwrap();
+        self.stg_requires_flush = !self.subsystem.is_coherent_memory_type(memindex);
+
+        true
+    }
+}
+
+enum CurrentSelectedSpriteTrigger {
+    Focus {
+        global_x_pixels: f32,
+        global_y_pixels: f32,
+        width_pixels: f32,
+        height_pixels: f32,
+    },
+    Hide,
+}
+struct CurrentSelectedSpriteMarkerView {
+    ct_root: CompositeTreeRef,
+    global_x_param: CompositeTreeFloatParameterRef,
+    global_y_param: CompositeTreeFloatParameterRef,
+    view_offset_x_param: CompositeTreeFloatParameterRef,
+    view_offset_y_param: CompositeTreeFloatParameterRef,
+    focus_trigger: Cell<Option<CurrentSelectedSpriteTrigger>>,
+    view_offset_x: Cell<f32>,
+    view_offset_y: Cell<f32>,
+}
+impl CurrentSelectedSpriteMarkerView {
+    const CORNER_RADIUS: SafeF32 = unsafe { SafeF32::new_unchecked(4.0) };
+    const THICKNESS: SafeF32 = unsafe { SafeF32::new_unchecked(2.0) };
+    const COLOR: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
+
+    fn new(init: &mut ViewInitContext) -> Self {
+        let border_image_atlas_rect = init
+            .base_system
+            .rounded_rect_mask(
+                unsafe { SafeF32::new_unchecked(init.ui_scale_factor) },
+                Self::CORNER_RADIUS,
+                Self::THICKNESS,
+            )
+            .unwrap();
+
+        let global_x_param = init
+            .base_system
+            .composite_tree
+            .parameter_store_mut()
+            .alloc_float(FloatParameter::Value(0.0));
+        let global_y_param = init
+            .base_system
+            .composite_tree
+            .parameter_store_mut()
+            .alloc_float(FloatParameter::Value(0.0));
+        let view_offset_x_param = init
+            .base_system
+            .composite_tree
+            .parameter_store_mut()
+            .alloc_float(FloatParameter::Value(0.0));
+        let view_offset_y_param = init
+            .base_system
+            .composite_tree
+            .parameter_store_mut()
+            .alloc_float(FloatParameter::Value(0.0));
+
+        let ct_root = init.base_system.register_composite_rect(CompositeRect {
+            offset: [
+                AnimatableFloat::Expression(Box::new(move |store| {
+                    store.float_value(global_x_param) + store.float_value(view_offset_x_param)
+                })),
+                AnimatableFloat::Expression(Box::new(move |store| {
+                    store.float_value(global_y_param) + store.float_value(view_offset_y_param)
+                })),
+            ],
+            has_bitmap: true,
+            slice_borders: [Self::CORNER_RADIUS.value() * init.ui_scale_factor; 4],
+            texatlas_rect: border_image_atlas_rect,
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value(Self::COLOR)),
+            opacity: AnimatableFloat::Value(0.0),
+            ..Default::default()
+        });
+
+        Self {
+            ct_root,
+            global_x_param,
+            global_y_param,
+            view_offset_x_param,
+            view_offset_y_param,
+            focus_trigger: Cell::new(None),
+            view_offset_x: Cell::new(0.0),
+            view_offset_y: Cell::new(0.0),
+        }
+    }
+
+    fn mount(&self, ct_parent: CompositeTreeRef, ct: &mut CompositeTree) {
+        ct.add_child(ct_parent, self.ct_root);
+    }
+
+    fn rescale(&self, base_system: &mut AppBaseSystem, ui_scale_factor: f32) {
+        base_system
+            .free_mask_atlas_rect(base_system.composite_tree.get(self.ct_root).texatlas_rect);
+        base_system
+            .composite_tree
+            .get_mut(self.ct_root)
+            .texatlas_rect = base_system
+            .rounded_rect_mask(
+                unsafe { SafeF32::new_unchecked(ui_scale_factor) },
+                Self::CORNER_RADIUS,
+                Self::THICKNESS,
+            )
+            .unwrap();
+
+        base_system
+            .composite_tree
+            .get_mut(self.ct_root)
+            .slice_borders = [Self::CORNER_RADIUS.value() * ui_scale_factor; 4];
+        base_system.composite_tree.mark_dirty(self.ct_root);
+    }
+
+    fn update(&self, ct: &mut CompositeTree, current_sec: f32) {
+        match self.focus_trigger.replace(None) {
+            None => (),
+            Some(CurrentSelectedSpriteTrigger::Focus {
+                global_x_pixels,
+                global_y_pixels,
+                width_pixels,
+                height_pixels,
+            }) => {
+                ct.parameter_store_mut()
+                    .set_float(self.global_x_param, FloatParameter::Value(global_x_pixels));
+                ct.parameter_store_mut()
+                    .set_float(self.global_y_param, FloatParameter::Value(global_y_pixels));
+                ct.get_mut(self.ct_root).size = [
+                    AnimatableFloat::Value(width_pixels),
+                    AnimatableFloat::Value(height_pixels),
+                ];
+
+                ct.get_mut(self.ct_root).scale_x = AnimatableFloat::Animated {
+                    from_value: 1.3,
+                    to_value: 1.0,
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.15,
+                    curve: AnimationCurve::CubicBezier {
+                        p1: (0.0, 0.0),
+                        p2: (0.0, 1.0),
+                    },
+                    event_on_complete: None,
+                };
+                ct.get_mut(self.ct_root).scale_y = AnimatableFloat::Animated {
+                    from_value: 1.3,
+                    to_value: 1.0,
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.15,
+                    curve: AnimationCurve::CubicBezier {
+                        p1: (0.0, 0.0),
+                        p2: (0.0, 1.0),
+                    },
+                    event_on_complete: None,
+                };
+
+                ct.get_mut(self.ct_root).opacity = AnimatableFloat::Animated {
+                    from_value: 0.0,
+                    to_value: 1.0,
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.15,
+                    curve: AnimationCurve::Linear,
+                    event_on_complete: None,
+                };
+            }
+            Some(CurrentSelectedSpriteTrigger::Hide) => {
+                ct.get_mut(self.ct_root).opacity = AnimatableFloat::Animated {
+                    from_value: 1.0,
+                    to_value: 0.0,
+                    start_sec: current_sec,
+                    end_sec: current_sec + 0.15,
+                    curve: AnimationCurve::Linear,
+                    event_on_complete: None,
+                };
+            }
+        }
+
+        ct.parameter_store_mut().set_float(
+            self.view_offset_x_param,
+            FloatParameter::Value(self.view_offset_x.get()),
+        );
+        ct.parameter_store_mut().set_float(
+            self.view_offset_y_param,
+            FloatParameter::Value(self.view_offset_y.get()),
+        );
+
+        ct.mark_dirty(self.ct_root);
+    }
+
+    fn focus(&self, x_pixels: f32, y_pixels: f32, width_pixels: f32, height_pixels: f32) {
+        self.focus_trigger
+            .set(Some(CurrentSelectedSpriteTrigger::Focus {
+                global_x_pixels: x_pixels,
+                global_y_pixels: y_pixels,
+                width_pixels,
+                height_pixels,
+            }));
+    }
+
+    fn hide(&self) {
+        self.focus_trigger
+            .set(Some(CurrentSelectedSpriteTrigger::Hide));
+    }
+
+    fn set_view_offset(&self, offset_x_pixels: f32, offset_y_pixels: f32) {
+        self.view_offset_x.set(offset_x_pixels);
+        self.view_offset_y.set(offset_y_pixels);
     }
 }

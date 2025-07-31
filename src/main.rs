@@ -44,12 +44,8 @@ use std::{
     sync::Arc,
 };
 
-use crate::{
-    base_system::{FontType, inject_cmd_end_render_pass2, inject_cmd_pipeline_barrier_2},
-    composite::FloatParameter,
-    quadtree::QuadTree,
-};
-use app_state::{AppState, SpriteInfo};
+use crate::base_system::{FontType, inject_cmd_end_render_pass2, inject_cmd_pipeline_barrier_2};
+use app_state::AppState;
 use base_system::{
     AppBaseSystem, WindowCornerCutoutRenderer,
     prof::ProfilingContext,
@@ -64,13 +60,9 @@ use bg_worker::{BackgroundWorker, BackgroundWorkerViewFeedback};
 use composite::{
     AnimatableColor, AnimatableFloat, AnimationCurve, CompositeMode, CompositeRect,
     CompositeRenderer, CompositeRenderingData, CompositeStreamingData, CompositeTree,
-    CompositeTreeFloatParameterRef, CompositeTreeRef, RenderPassAfterOperation,
-    RenderPassRequirements,
+    CompositeTreeRef, RenderPassAfterOperation, RenderPassRequirements,
 };
-use coordinate::SizePixels;
-use feature::editing_atlas_renderer::EditingAtlasGridView;
-use hittest::{HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef};
-use input::EventContinueControl;
+use hittest::{HitTestTreeData, HitTestTreeManager};
 use parking_lot::RwLock;
 use shell::AppShell;
 use subsystem::Subsystem;
@@ -259,210 +251,6 @@ const fn const_subpass_description_2_single_color_write_only<const ATTACHMENT_IN
     )
 }
 
-enum CurrentSelectedSpriteTrigger {
-    Focus {
-        global_x_pixels: f32,
-        global_y_pixels: f32,
-        width_pixels: f32,
-        height_pixels: f32,
-    },
-    Hide,
-}
-pub struct CurrentSelectedSpriteMarkerView {
-    ct_root: CompositeTreeRef,
-    global_x_param: CompositeTreeFloatParameterRef,
-    global_y_param: CompositeTreeFloatParameterRef,
-    view_offset_x_param: CompositeTreeFloatParameterRef,
-    view_offset_y_param: CompositeTreeFloatParameterRef,
-    focus_trigger: Cell<Option<CurrentSelectedSpriteTrigger>>,
-    view_offset_x: Cell<f32>,
-    view_offset_y: Cell<f32>,
-}
-impl CurrentSelectedSpriteMarkerView {
-    const CORNER_RADIUS: SafeF32 = unsafe { SafeF32::new_unchecked(4.0) };
-    const THICKNESS: SafeF32 = unsafe { SafeF32::new_unchecked(2.0) };
-    const COLOR: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
-
-    pub fn new(init: &mut ViewInitContext) -> Self {
-        let border_image_atlas_rect = init
-            .base_system
-            .rounded_rect_mask(
-                unsafe { SafeF32::new_unchecked(init.ui_scale_factor) },
-                Self::CORNER_RADIUS,
-                Self::THICKNESS,
-            )
-            .unwrap();
-
-        let global_x_param = init
-            .base_system
-            .composite_tree
-            .parameter_store_mut()
-            .alloc_float(FloatParameter::Value(0.0));
-        let global_y_param = init
-            .base_system
-            .composite_tree
-            .parameter_store_mut()
-            .alloc_float(FloatParameter::Value(0.0));
-        let view_offset_x_param = init
-            .base_system
-            .composite_tree
-            .parameter_store_mut()
-            .alloc_float(FloatParameter::Value(0.0));
-        let view_offset_y_param = init
-            .base_system
-            .composite_tree
-            .parameter_store_mut()
-            .alloc_float(FloatParameter::Value(0.0));
-
-        let ct_root = init.base_system.register_composite_rect(CompositeRect {
-            offset: [
-                AnimatableFloat::Expression(Box::new(move |store| {
-                    store.float_value(global_x_param) + store.float_value(view_offset_x_param)
-                })),
-                AnimatableFloat::Expression(Box::new(move |store| {
-                    store.float_value(global_y_param) + store.float_value(view_offset_y_param)
-                })),
-            ],
-            has_bitmap: true,
-            slice_borders: [Self::CORNER_RADIUS.value() * init.ui_scale_factor; 4],
-            texatlas_rect: border_image_atlas_rect,
-            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value(Self::COLOR)),
-            opacity: AnimatableFloat::Value(0.0),
-            ..Default::default()
-        });
-
-        Self {
-            ct_root,
-            global_x_param,
-            global_y_param,
-            view_offset_x_param,
-            view_offset_y_param,
-            focus_trigger: Cell::new(None),
-            view_offset_x: Cell::new(0.0),
-            view_offset_y: Cell::new(0.0),
-        }
-    }
-
-    pub fn mount(&self, ct_parent: CompositeTreeRef, ct: &mut CompositeTree) {
-        ct.add_child(ct_parent, self.ct_root);
-    }
-
-    pub fn rescale(&self, base_system: &mut AppBaseSystem, ui_scale_factor: f32) {
-        base_system
-            .free_mask_atlas_rect(base_system.composite_tree.get(self.ct_root).texatlas_rect);
-        base_system
-            .composite_tree
-            .get_mut(self.ct_root)
-            .texatlas_rect = base_system
-            .rounded_rect_mask(
-                unsafe { SafeF32::new_unchecked(ui_scale_factor) },
-                Self::CORNER_RADIUS,
-                Self::THICKNESS,
-            )
-            .unwrap();
-
-        base_system
-            .composite_tree
-            .get_mut(self.ct_root)
-            .slice_borders = [Self::CORNER_RADIUS.value() * ui_scale_factor; 4];
-        base_system.composite_tree.mark_dirty(self.ct_root);
-    }
-
-    pub fn update(&self, ct: &mut CompositeTree, current_sec: f32) {
-        match self.focus_trigger.replace(None) {
-            None => (),
-            Some(CurrentSelectedSpriteTrigger::Focus {
-                global_x_pixels,
-                global_y_pixels,
-                width_pixels,
-                height_pixels,
-            }) => {
-                ct.parameter_store_mut()
-                    .set_float(self.global_x_param, FloatParameter::Value(global_x_pixels));
-                ct.parameter_store_mut()
-                    .set_float(self.global_y_param, FloatParameter::Value(global_y_pixels));
-                ct.get_mut(self.ct_root).size = [
-                    AnimatableFloat::Value(width_pixels),
-                    AnimatableFloat::Value(height_pixels),
-                ];
-
-                ct.get_mut(self.ct_root).scale_x = AnimatableFloat::Animated {
-                    from_value: 1.3,
-                    to_value: 1.0,
-                    start_sec: current_sec,
-                    end_sec: current_sec + 0.15,
-                    curve: AnimationCurve::CubicBezier {
-                        p1: (0.0, 0.0),
-                        p2: (0.0, 1.0),
-                    },
-                    event_on_complete: None,
-                };
-                ct.get_mut(self.ct_root).scale_y = AnimatableFloat::Animated {
-                    from_value: 1.3,
-                    to_value: 1.0,
-                    start_sec: current_sec,
-                    end_sec: current_sec + 0.15,
-                    curve: AnimationCurve::CubicBezier {
-                        p1: (0.0, 0.0),
-                        p2: (0.0, 1.0),
-                    },
-                    event_on_complete: None,
-                };
-
-                ct.get_mut(self.ct_root).opacity = AnimatableFloat::Animated {
-                    from_value: 0.0,
-                    to_value: 1.0,
-                    start_sec: current_sec,
-                    end_sec: current_sec + 0.15,
-                    curve: AnimationCurve::Linear,
-                    event_on_complete: None,
-                };
-            }
-            Some(CurrentSelectedSpriteTrigger::Hide) => {
-                ct.get_mut(self.ct_root).opacity = AnimatableFloat::Animated {
-                    from_value: 1.0,
-                    to_value: 0.0,
-                    start_sec: current_sec,
-                    end_sec: current_sec + 0.15,
-                    curve: AnimationCurve::Linear,
-                    event_on_complete: None,
-                };
-            }
-        }
-
-        ct.parameter_store_mut().set_float(
-            self.view_offset_x_param,
-            FloatParameter::Value(self.view_offset_x.get()),
-        );
-        ct.parameter_store_mut().set_float(
-            self.view_offset_y_param,
-            FloatParameter::Value(self.view_offset_y.get()),
-        );
-
-        ct.mark_dirty(self.ct_root);
-    }
-
-    pub fn focus(&self, x_pixels: f32, y_pixels: f32, width_pixels: f32, height_pixels: f32) {
-        self.focus_trigger
-            .set(Some(CurrentSelectedSpriteTrigger::Focus {
-                global_x_pixels: x_pixels,
-                global_y_pixels: y_pixels,
-                width_pixels,
-                height_pixels,
-            }));
-    }
-
-    pub fn hide(&self) {
-        self.focus_trigger
-            .set(Some(CurrentSelectedSpriteTrigger::Hide));
-    }
-
-    pub fn set_view_offset(&self, offset_x_pixels: f32, offset_y_pixels: f32) {
-        self.view_offset_x.set(offset_x_pixels);
-        self.view_offset_y.set(offset_y_pixels);
-    }
-}
-
 pub struct DragAndDropOverlayView {
     ct_root: CompositeTreeRef,
     ct_text: CompositeTreeRef,
@@ -604,327 +392,6 @@ impl DragAndDropOverlayView {
                 event_on_complete: None,
             },
         );
-    }
-}
-
-enum DragState {
-    None,
-    Grid {
-        base_x_pixels: f32,
-        base_y_pixels: f32,
-        drag_start_client_x_pixels: f32,
-        drag_start_client_y_pixels: f32,
-    },
-    Sprite {
-        index: usize,
-        base_x_pixels: f32,
-        base_y_pixels: f32,
-        base_width_pixels: f32,
-        base_height_pixels: f32,
-        drag_start_client_x_pixels: f32,
-        drag_start_client_y_pixels: f32,
-    },
-}
-
-struct HitTestRootTreeActionHandler<'subsystem> {
-    sprites_qt: RefCell<QuadTree>,
-    sprite_rects_cached: RefCell<Vec<(u32, u32, u32, u32)>>,
-    current_selected_sprite_marker_view: std::rc::Weak<CurrentSelectedSpriteMarkerView>,
-    editing_atlas_grid_view: std::rc::Weak<EditingAtlasGridView<'subsystem>>,
-    ht_titlebar: Option<HitTestTreeRef>,
-    drag_state: RefCell<DragState>,
-}
-impl<'subsystem> HitTestRootTreeActionHandler<'subsystem> {
-    pub fn new(
-        editing_atlas_grid_view: &Rc<EditingAtlasGridView<'subsystem>>,
-        current_selected_sprite_marker_view: &Rc<CurrentSelectedSpriteMarkerView>,
-        ht_titlebar: Option<HitTestTreeRef>,
-    ) -> Self {
-        Self {
-            editing_atlas_grid_view: Rc::downgrade(editing_atlas_grid_view),
-            current_selected_sprite_marker_view: Rc::downgrade(current_selected_sprite_marker_view),
-            ht_titlebar,
-            sprites_qt: RefCell::new(QuadTree::new()),
-            sprite_rects_cached: RefCell::new(Vec::new()),
-            drag_state: RefCell::new(DragState::None),
-        }
-    }
-
-    fn update_sprite_rects(&self, sprites: &[SpriteInfo]) {
-        let mut sprite_rects_locked = self.sprite_rects_cached.borrow_mut();
-        let mut sprites_qt_locked = self.sprites_qt.borrow_mut();
-
-        while sprite_rects_locked.len() > sprites.len() {
-            // 削除分
-            let n = sprite_rects_locked.len() - 1;
-            let old = sprite_rects_locked.pop().unwrap();
-            let (index, level) = QuadTree::rect_index_and_level(old.0, old.1, old.2, old.3);
-
-            sprites_qt_locked.element_index_for_region[level][index as usize].remove(&n);
-        }
-        for (n, (old, new)) in sprite_rects_locked
-            .iter_mut()
-            .zip(sprites.iter())
-            .enumerate()
-        {
-            // 移動分
-            if old.0 == new.left
-                && old.1 == new.top
-                && old.2 == new.right()
-                && old.3 == new.bottom()
-            {
-                // 座標変化なし
-                continue;
-            }
-
-            let (old_index, old_level) = QuadTree::rect_index_and_level(old.0, old.1, old.2, old.3);
-            let (new_index, new_level) =
-                QuadTree::rect_index_and_level(new.left, new.top, new.right(), new.bottom());
-            *old = (new.left, new.top, new.right(), new.bottom());
-
-            if old_level == new_level && old_index == new_index {
-                // 所属ブロックに変化なし
-                continue;
-            }
-
-            sprites_qt_locked.element_index_for_region[old_level][old_index as usize].remove(&n);
-            sprites_qt_locked.bind(new_level, new_index, n);
-        }
-        let new_base = sprite_rects_locked.len();
-        for (n, new) in sprites.iter().enumerate().skip(new_base) {
-            // 追加分
-            let (index, level) =
-                QuadTree::rect_index_and_level(new.left, new.top, new.right(), new.bottom());
-            sprites_qt_locked.bind(level, index, n);
-            sprite_rects_locked.push((new.left, new.top, new.right(), new.bottom()));
-        }
-    }
-}
-impl<'c> HitTestTreeActionHandler for HitTestRootTreeActionHandler<'c> {
-    fn role(&self, sender: HitTestTreeRef) -> Option<hittest::Role> {
-        if self.ht_titlebar.is_some_and(|x| sender == x) {
-            return Some(hittest::Role::TitleBar);
-        }
-
-        None
-    }
-
-    fn on_pointer_down(
-        &self,
-        _sender: HitTestTreeRef,
-        context: &mut AppUpdateContext,
-        args: &hittest::PointerActionArgs,
-    ) -> EventContinueControl {
-        let Some(ear) = self.editing_atlas_grid_view.upgrade() else {
-            // app teardown-ed
-            return EventContinueControl::empty();
-        };
-        let Some(marker_view) = self.current_selected_sprite_marker_view.upgrade() else {
-            // app teardown-ed
-            return EventContinueControl::empty();
-        };
-
-        let [current_offset_x, current_offset_y] = ear.renderer().borrow().offset();
-        let pointing_x = args.client_x * context.ui_scale_factor - current_offset_x;
-        let pointing_y = args.client_y * context.ui_scale_factor - current_offset_y;
-
-        let state_locked = context.state.borrow();
-        let sprite_drag_target_index =
-            state_locked
-                .selected_sprites_with_index()
-                .rev()
-                .find(|(_, x)| {
-                    x.left as f32 <= pointing_x
-                        && pointing_x <= x.right() as f32
-                        && x.top as f32 <= pointing_y
-                        && pointing_y <= x.bottom() as f32
-                });
-        if let Some((sprite_drag_target_index, target_sprite_ref)) = sprite_drag_target_index {
-            // 選択中のスプライトの上で操作が開始された
-            marker_view.hide();
-            *self.drag_state.borrow_mut() = DragState::Sprite {
-                index: sprite_drag_target_index,
-                base_x_pixels: target_sprite_ref.left as f32,
-                base_y_pixels: target_sprite_ref.top as f32,
-                base_width_pixels: target_sprite_ref.width as f32,
-                base_height_pixels: target_sprite_ref.height as f32,
-                drag_start_client_x_pixels: args.client_x * context.ui_scale_factor,
-                drag_start_client_y_pixels: args.client_y * context.ui_scale_factor,
-            };
-        } else {
-            *self.drag_state.borrow_mut() = DragState::Grid {
-                base_x_pixels: current_offset_x,
-                base_y_pixels: current_offset_y,
-                drag_start_client_x_pixels: args.client_x * context.ui_scale_factor,
-                drag_start_client_y_pixels: args.client_y * context.ui_scale_factor,
-            };
-        }
-
-        EventContinueControl::CAPTURE_ELEMENT
-    }
-
-    fn on_pointer_move(
-        &self,
-        _sender: HitTestTreeRef,
-        context: &mut AppUpdateContext,
-        args: &hittest::PointerActionArgs,
-    ) -> EventContinueControl {
-        let Some(ear) = self.editing_atlas_grid_view.upgrade() else {
-            // app teardown-ed
-            return EventContinueControl::empty();
-        };
-
-        match &*self.drag_state.borrow() {
-            DragState::None => (),
-            DragState::Grid {
-                base_x_pixels,
-                base_y_pixels,
-                drag_start_client_x_pixels,
-                drag_start_client_y_pixels,
-            } => {
-                let dx = args.client_x * context.ui_scale_factor - drag_start_client_x_pixels;
-                let dy = args.client_y * context.ui_scale_factor - drag_start_client_y_pixels;
-                let ox = base_x_pixels + dx;
-                let oy = base_y_pixels + dy;
-
-                ear.renderer().borrow_mut().set_offset(ox, oy);
-
-                if let Some(marker_view) = self.current_selected_sprite_marker_view.upgrade() {
-                    marker_view.set_view_offset(ox, oy);
-                }
-
-                return EventContinueControl::STOP_PROPAGATION;
-            }
-            &DragState::Sprite {
-                index,
-                base_x_pixels,
-                base_y_pixels,
-                drag_start_client_x_pixels,
-                drag_start_client_y_pixels,
-                ..
-            } => {
-                let (dx, dy) = (
-                    (args.client_x * context.ui_scale_factor) - drag_start_client_x_pixels,
-                    (args.client_y * context.ui_scale_factor) - drag_start_client_y_pixels,
-                );
-                let (sx, sy) = (
-                    (base_x_pixels + dx).max(0.0) as u32,
-                    (base_y_pixels + dy).max(0.0) as u32,
-                );
-                ear.renderer()
-                    .borrow_mut()
-                    .update_sprite_offset(index, sx as _, sy as _);
-
-                return EventContinueControl::STOP_PROPAGATION;
-            }
-        }
-
-        EventContinueControl::empty()
-    }
-
-    fn on_pointer_up(
-        &self,
-        _sender: HitTestTreeRef,
-        context: &mut AppUpdateContext,
-        args: &hittest::PointerActionArgs,
-    ) -> EventContinueControl {
-        let Some(ear) = self.editing_atlas_grid_view.upgrade() else {
-            // app teardown-ed
-            return EventContinueControl::empty();
-        };
-        let Some(marker_view) = self.current_selected_sprite_marker_view.upgrade() else {
-            // app teardown-ed
-            return EventContinueControl::empty();
-        };
-
-        match self.drag_state.replace(DragState::None) {
-            DragState::None => (),
-            DragState::Grid {
-                base_x_pixels,
-                base_y_pixels,
-                drag_start_client_x_pixels,
-                drag_start_client_y_pixels,
-            } => {
-                let dx = args.client_x * context.ui_scale_factor - drag_start_client_x_pixels;
-                let dy = args.client_y * context.ui_scale_factor - drag_start_client_y_pixels;
-                let ox = base_x_pixels + dx;
-                let oy = base_y_pixels + dy;
-
-                ear.renderer().borrow_mut().set_offset(ox, oy);
-
-                if let Some(marker_view) = self.current_selected_sprite_marker_view.upgrade() {
-                    marker_view.set_view_offset(ox, oy);
-                }
-
-                return EventContinueControl::STOP_PROPAGATION
-                    | EventContinueControl::RELEASE_CAPTURE_ELEMENT;
-            }
-            DragState::Sprite {
-                index,
-                base_x_pixels,
-                base_y_pixels,
-                base_width_pixels,
-                base_height_pixels,
-                drag_start_client_x_pixels,
-                drag_start_client_y_pixels,
-            } => {
-                let (dx, dy) = (
-                    (args.client_x * context.ui_scale_factor) - drag_start_client_x_pixels,
-                    (args.client_y * context.ui_scale_factor) - drag_start_client_y_pixels,
-                );
-                let (sx, sy) = (
-                    (base_x_pixels + dx).max(0.0) as u32,
-                    (base_y_pixels + dy).max(0.0) as u32,
-                );
-                context.state.borrow_mut().set_sprite_offset(index, sx, sy);
-
-                // 選択インデックスが変わるわけではないのでここで選択枠Viewを復帰させる
-                marker_view.focus(sx as _, sy as _, base_width_pixels, base_height_pixels);
-
-                return EventContinueControl::STOP_PROPAGATION
-                    | EventContinueControl::RELEASE_CAPTURE_ELEMENT;
-            }
-        }
-
-        EventContinueControl::empty()
-    }
-
-    fn on_click(
-        &self,
-        _sender: HitTestTreeRef,
-        context: &mut AppUpdateContext,
-        args: &hittest::PointerActionArgs,
-    ) -> EventContinueControl {
-        let Some(ear) = self.editing_atlas_grid_view.upgrade() else {
-            // app teardown-ed
-            return EventContinueControl::empty();
-        };
-
-        let x = args.client_x * context.ui_scale_factor - ear.renderer().borrow().offset()[0];
-        let y = args.client_y * context.ui_scale_factor - ear.renderer().borrow().offset()[1];
-
-        let mut max_index = None;
-        for n in self
-            .sprites_qt
-            .borrow()
-            .iter_possible_element_indices(x as _, y as _)
-        {
-            let (l, t, r, b) = self.sprite_rects_cached.borrow()[n];
-            if l as f32 <= x && x <= r as f32 && t as f32 <= y && y <= b as f32 {
-                // 大きいインデックスのものが最前面にいるのでmaxをとる
-                max_index = Some(max_index.map_or(n, |x: usize| x.max(n)));
-            }
-        }
-
-        if let Some(mx) = max_index {
-            context
-                .event_queue
-                .push(AppEvent::SelectSprite { index: mx });
-        } else {
-            context.event_queue.push(AppEvent::DeselectSprite);
-        }
-
-        EventContinueControl::STOP_PROPAGATION
     }
 }
 
@@ -1415,34 +882,15 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         app_state: app_state.get_mut(),
     };
 
-    let editing_atlas_grid_view = Rc::new(EditingAtlasGridView::new(
-        &mut init_context.for_view,
+    let editing_atlas_plane = Rc::new(feature::editing_atlas_renderer::Presenter::new(
+        &mut init_context,
         composite_renderer.subpass_final(),
         sc.size,
-        SizePixels {
-            width: 32,
-            height: 32,
-        },
     ));
     let mut editing_atlas_current_bound_pipeline = RenderPassRequirements {
         after_operation: RenderPassAfterOperation::None,
         continued: false,
     };
-    init_context.app_state.register_atlas_size_view_feedback({
-        let editing_atlas_grid_view = Rc::downgrade(&editing_atlas_grid_view);
-
-        move |size| {
-            let Some(editing_atlas_grid_view) = editing_atlas_grid_view.upgrade() else {
-                // app teardown-ed
-                return;
-            };
-
-            editing_atlas_grid_view
-                .renderer()
-                .borrow_mut()
-                .set_atlas_size(*size);
-        }
-    });
 
     let app_header = feature::app_header::Presenter::new(
         &mut init_context,
@@ -1452,16 +900,12 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         feature::sprite_list_pane::Presenter::new(&mut init_context, app_header.height());
     let app_menu = feature::app_menu::Presenter::new(&mut init_context, app_header.height());
 
-    let current_selected_sprite_marker_view = Rc::new(CurrentSelectedSpriteMarkerView::new(
-        &mut init_context.for_view,
-    ));
     let dnd_overlay = DragAndDropOverlayView::new(&mut init_context.for_view);
 
     drop(init_context);
     drop(staging_scratch_buffer_locked);
 
-    editing_atlas_grid_view.mount(app_system, CompositeTree::ROOT);
-    current_selected_sprite_marker_view.mount(CompositeTree::ROOT, &mut app_system.composite_tree);
+    editing_atlas_plane.mount(app_system, (CompositeTree::ROOT, HitTestTreeManager::ROOT));
     sprite_list_pane.mount(app_system, CompositeTree::ROOT, HitTestTreeManager::ROOT);
     app_menu.mount(app_system, CompositeTree::ROOT, HitTestTreeManager::ROOT);
     app_header.mount(app_system, CompositeTree::ROOT, HitTestTreeManager::ROOT);
@@ -1477,73 +921,8 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
 
     let mut popup_manager = PopupManager::new(popup_hit_layer, CompositeTree::ROOT);
 
-    let ht_root_fallback_action_handler = Rc::new(HitTestRootTreeActionHandler::new(
-        &editing_atlas_grid_view,
-        &current_selected_sprite_marker_view,
-        None,
-    ));
-    app_system
-        .hit_tree
-        .set_action_handler(HitTestTreeManager::ROOT, &ht_root_fallback_action_handler);
-
-    app_state.get_mut().register_sprites_view_feedback({
-        let ht_root_fallback_action_handler = Rc::downgrade(&ht_root_fallback_action_handler);
-        let editing_atlas_grid_view = Rc::downgrade(&editing_atlas_grid_view);
-        let bg_worker = bg_worker.enqueue_access().downgrade();
-        let mut last_selected_index = None;
-        let staging_scratch_buffers = Arc::downgrade(&staging_scratch_buffers);
-        let current_selected_sprite_marker_view =
-            Rc::downgrade(&current_selected_sprite_marker_view);
-
-        move |sprites| {
-            let Some(ht_root_fallback_action_handler) = ht_root_fallback_action_handler.upgrade()
-            else {
-                // app teardown-ed
-                return;
-            };
-            let Some(editing_atlas_grid_view) = editing_atlas_grid_view.upgrade() else {
-                // app teardown-ed
-                return;
-            };
-            let Some(bg_worker) = bg_worker.upgrade() else {
-                // app teardown-ed
-                return;
-            };
-            let Some(marker_view) = current_selected_sprite_marker_view.upgrade() else {
-                // app teardown-ed
-                return;
-            };
-
-            ht_root_fallback_action_handler.update_sprite_rects(sprites);
-            editing_atlas_grid_view.renderer().borrow().update_sprites(
-                sprites,
-                &bg_worker,
-                &staging_scratch_buffers,
-            );
-
-            // TODO: Model的には複数選択できる形にしてるけどViewはどうしようか......
-            let selected_index = sprites.iter().position(|x| x.selected);
-            if selected_index != last_selected_index {
-                last_selected_index = selected_index;
-                if let Some(x) = selected_index {
-                    marker_view.focus(
-                        sprites[x].left as _,
-                        sprites[x].top as _,
-                        sprites[x].width as _,
-                        sprites[x].height as _,
-                    );
-                } else {
-                    marker_view.hide();
-                }
-            }
-        }
-    });
-
     // initial state modification
-    editing_atlas_grid_view
-        .renderer()
-        .borrow_mut()
-        .set_offset(0.0, app_header.height() * app_shell.ui_scale_factor());
+    editing_atlas_plane.set_offset(0.0, app_header.height() * app_shell.ui_scale_factor());
 
     {
         let staging_scratch_buffer_locked =
@@ -1846,7 +1225,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                 &mut staging_scratch_buffer_locked,
                 active_ui_scale,
             );
-            current_selected_sprite_marker_view.rescale(app_system, active_ui_scale);
+            editing_atlas_plane.rescale(app_system, active_ui_scale);
             sprite_list_pane.rescale(app_system, &mut staging_scratch_buffer_locked, unsafe {
                 SafeF32::new_unchecked(active_ui_scale)
             });
@@ -1863,6 +1242,12 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         }
 
         task_worker.try_tick();
+
+        editing_atlas_plane.sync_with_app_state(
+            &app_state.borrow(),
+            &bg_worker.enqueue_access(),
+            &staging_scratch_buffers,
+        );
 
         while let Some(e) = app_update_context.event_queue.pop() {
             match e {
@@ -1923,7 +1308,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                             );
                         }
 
-                        editing_atlas_grid_view.renderer().borrow_mut().recreate(
+                        editing_atlas_plane.recreate_render_resources(
                             app_system,
                             composite_renderer
                                 .select_subpass(&editing_atlas_current_bound_pipeline),
@@ -1935,8 +1320,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         parking_lot::RwLockWriteGuard::map(staging_scratch_buffers.write(), |x| {
                             x.active_buffer_mut()
                         });
-                    current_selected_sprite_marker_view
-                        .update(&mut app_system.composite_tree, current_sec);
+                    editing_atlas_plane.update(app_system, current_sec);
                     app_header.update(app_system, &mut staging_scratch_buffer_locked, current_sec);
                     app_menu.update(app_system, current_sec);
                     sprite_list_pane.update(
@@ -2010,8 +1394,8 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
 
                     let composite_instance_buffer_dirty =
                         core::mem::replace(&mut composite_instance_buffer_dirty, false);
-                    let mut needs_update = composite_instance_buffer_dirty
-                        || editing_atlas_grid_view.renderer().borrow().is_dirty();
+                    let mut needs_update =
+                        composite_instance_buffer_dirty || editing_atlas_plane.needs_update();
 
                     if composite_renderer.update_backdrop_resources(app_system, &sc) {
                         needs_update = true;
@@ -2069,14 +1453,11 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                             )
                         })
                         .inject(|r| {
-                            editing_atlas_grid_view
-                                .renderer()
-                                .borrow_mut()
-                                .process_dirty_data(
-                                    app_system.subsystem,
-                                    &staging_scratch_buffers_locked.active_buffer(),
-                                    r,
-                                )
+                            editing_atlas_plane.process_dirty_data(
+                                app_system.subsystem,
+                                &staging_scratch_buffers_locked.active_buffer(),
+                                r,
+                            )
                         })
                         .end()
                         .unwrap();
@@ -2138,7 +1519,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         {
                             editing_atlas_current_bound_pipeline =
                                 last_composite_render_instructions.render_passes[0];
-                            editing_atlas_grid_view.renderer().borrow_mut().recreate(
+                            editing_atlas_plane.recreate_render_resources(
                                 app_system,
                                 composite_renderer
                                     .select_subpass(&editing_atlas_current_bound_pipeline),
@@ -2156,14 +1537,8 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                         &sc.backbuffer_image(n),
                                         n,
                                         |token, r| {
-                                            if editing_atlas_grid_view.is_custom_render(&token) {
-                                                editing_atlas_grid_view
-                                                    .renderer()
-                                                    .borrow()
-                                                    .render_commands(sc.size, r)
-                                            } else {
-                                                r
-                                            }
+                                            editing_atlas_plane
+                                                .handle_custom_render(&token, sc.size, r)
                                         },
                                     )
                                 })
@@ -3188,6 +2563,7 @@ impl SystemLink {
         let res = desktop_portal_proto::file_chooser::ResponseResults::read_all(&mut resp_iter);
         match res.uris[..] {
             [] => Ok(None),
+            // TODO: add ext at here, if needed
             [ref uri, ..] => Ok(Some(std::path::PathBuf::from(
                 desktop_portal_proto::file_chooser::uri_path_part(dbus_proto::cstr2str(uri)),
             ))),

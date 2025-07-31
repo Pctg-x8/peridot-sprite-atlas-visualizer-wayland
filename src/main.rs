@@ -1447,61 +1447,62 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
 
                         if last_updating {
                             last_update_command_fence.wait().unwrap();
+                            last_update_command_fence.reset().unwrap();
                         }
 
                         let mut staging_scratch_buffers_locked = app_system.lock_staging_buffers();
-                        last_update_command_fence.reset().unwrap();
                         unsafe {
                             update_cp.reset(br::CommandPoolResetFlags::EMPTY).unwrap();
                         }
-                        let rec =
-                            unsafe { update_cb.begin(&br::CommandBufferBeginInfo::new()).unwrap() };
-                        let rec = if composite_instance_buffer_dirty {
-                            app_system.composite_instance_manager.sync_buffer(rec)
-                        } else {
-                            rec
-                        };
-                        rec.inject(|r| {
-                            inject_cmd_pipeline_barrier_2(
-                                r,
-                                app_system.subsystem,
-                                &br::DependencyInfo::new(
-                                    &[br::MemoryBarrier2::new()
-                                        .from(
-                                            br::PipelineStageFlags2::COPY,
-                                            br::AccessFlags2::TRANSFER.write,
-                                        )
-                                        .to(
-                                            br::PipelineStageFlags2::VERTEX_SHADER,
-                                            br::AccessFlags2::SHADER.read,
-                                        )],
-                                    &[],
-                                    &[
-                                        // Note: 0番目はbackdropなしの番兵としてつかわれるので初期化しておく
-                                        br::ImageMemoryBarrier2::new(
-                                            composite_renderer.default_backdrop_buffer(),
-                                            br::ImageSubresourceRange::new(
-                                                br::AspectMask::COLOR,
-                                                0..1,
-                                                0..1,
+                        unsafe { update_cb.begin(&br::CommandBufferBeginInfo::new()).unwrap() }
+                            .inject(|r| {
+                                if composite_instance_buffer_dirty {
+                                    app_system.composite_instance_manager.sync_buffer(r)
+                                } else {
+                                    r
+                                }
+                            })
+                            .inject(|r| {
+                                inject_cmd_pipeline_barrier_2(
+                                    r,
+                                    app_system.subsystem,
+                                    &br::DependencyInfo::new(
+                                        &[br::MemoryBarrier2::new()
+                                            .from(
+                                                br::PipelineStageFlags2::COPY,
+                                                br::AccessFlags2::TRANSFER.write,
+                                            )
+                                            .to(
+                                                br::PipelineStageFlags2::VERTEX_SHADER,
+                                                br::AccessFlags2::SHADER.read,
+                                            )],
+                                        &[],
+                                        &[
+                                            // Note: 0番目はbackdropなしの番兵としてつかわれるので初期化しておく
+                                            br::ImageMemoryBarrier2::new(
+                                                composite_renderer.default_backdrop_buffer(),
+                                                br::ImageSubresourceRange::new(
+                                                    br::AspectMask::COLOR,
+                                                    0..1,
+                                                    0..1,
+                                                ),
+                                            )
+                                            .transit_to(
+                                                br::ImageLayout::ShaderReadOnlyOpt.from_undefined(),
                                             ),
-                                        )
-                                        .transit_to(
-                                            br::ImageLayout::ShaderReadOnlyOpt.from_undefined(),
-                                        ),
-                                    ],
-                                ),
-                            )
-                        })
-                        .inject(|r| {
-                            app.editing_atlas_plane.process_dirty_data(
-                                app_system.subsystem,
-                                &staging_scratch_buffers_locked.active_buffer(),
-                                r,
-                            )
-                        })
-                        .end()
-                        .unwrap();
+                                        ],
+                                    ),
+                                )
+                            })
+                            .inject(|r| {
+                                app.editing_atlas_plane.process_dirty_data(
+                                    app_system.subsystem,
+                                    &staging_scratch_buffers_locked.active_buffer(),
+                                    r,
+                                )
+                            })
+                            .end()
+                            .unwrap();
                         app_system
                             .subsystem
                             .submit_graphics_works(

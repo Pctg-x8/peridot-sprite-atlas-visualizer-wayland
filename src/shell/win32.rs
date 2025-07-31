@@ -8,7 +8,6 @@ use std::{
 
 use bedrock::{self as br, SurfaceCreateInfo};
 use windows::{
-    Storage::Pickers::{FileOpenPicker, FileSavePicker},
     Win32::{
         Foundation::{
             E_NOTIMPL, GetLastError, HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM,
@@ -39,10 +38,7 @@ use windows::{
             Controls::MARGINS,
             HiDpi::GetDpiForWindow,
             Input::KeyboardAndMouse::{ReleaseCapture, SetCapture},
-            Shell::{
-                CLSID_DragDropHelper, DragQueryFileW, HDROP, IDropTargetHelper,
-                IInitializeWithWindow,
-            },
+            Shell::{CLSID_DragDropHelper, DragQueryFileW, HDROP, IDropTargetHelper},
             WindowsAndMessaging::{
                 CREATESTRUCTW, CW_USEDEFAULT, CloseWindow, CreateWindowExW, DefWindowProcW,
                 DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetClientRect, GetSystemMetrics,
@@ -59,10 +55,10 @@ use windows::{
             },
         },
     },
-    core::{Interface, PCWSTR, h, w},
+    core::{PCWSTR, w},
 };
 use windows_collections::{IIterable_Impl, IVector, IVector_Impl};
-use windows_core::{HSTRING, implement};
+use windows_core::implement;
 
 use crate::{
     AppEvent, AppEventBus,

@@ -1613,7 +1613,7 @@ pub struct Presenter {
     view: Rc<FrameView>,
     needs_rebuild_list_cells: Rc<Cell<bool>>,
     sprite_list_contents: Rc<RefCell<Vec<(String, bool)>>>,
-    ui_scale_factor: f32,
+    ui_scale_factor: Cell<f32>,
     ht_action_handler: Rc<ActionHandler>,
 }
 impl Presenter {
@@ -1672,7 +1672,7 @@ impl Presenter {
             view,
             needs_rebuild_list_cells,
             sprite_list_contents,
-            ui_scale_factor: init.for_view.ui_scale_factor,
+            ui_scale_factor: Cell::new(init.for_view.ui_scale_factor),
             ht_action_handler,
         }
     }
@@ -1687,12 +1687,12 @@ impl Presenter {
     }
 
     pub fn rescale(
-        &mut self,
+        &self,
         base_system: &mut AppBaseSystem,
         staging_scratch_buffer: &mut StagingScratchBuffer,
         ui_scale_factor: SafeF32,
     ) {
-        self.ui_scale_factor = ui_scale_factor.value();
+        self.ui_scale_factor.set(ui_scale_factor.value());
 
         self.view
             .rescale(base_system, staging_scratch_buffer, ui_scale_factor);
@@ -1705,7 +1705,7 @@ impl Presenter {
     }
 
     pub fn update<'r, 'base_system, 'subsystem>(
-        &mut self,
+        &self,
         app_system: &'base_system mut AppBaseSystem<'subsystem>,
         current_sec: f32,
         staging_scratch_buffer: &'r mut StagingScratchBuffer<'subsystem>,
@@ -1726,7 +1726,7 @@ impl Presenter {
                         &mut ViewInitContext {
                             base_system: app_system,
                             staging_scratch_buffer,
-                            ui_scale_factor: self.ui_scale_factor,
+                            ui_scale_factor: self.ui_scale_factor.get(),
                         },
                         c,
                         32.0 + n as f32 * CellView::HEIGHT,

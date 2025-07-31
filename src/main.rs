@@ -829,6 +829,109 @@ fn main() {
     drop(task_worker);
 }
 
+pub struct Application<'subsystem> {
+    app_header: feature::app_header::Presenter,
+    app_menu: feature::app_menu::Presenter,
+    editing_atlas_plane: Rc<feature::editing_atlas_renderer::Presenter<'subsystem>>,
+    editing_atlas_current_bound_pipeline: RenderPassRequirements,
+    sprite_list_pane: feature::sprite_list_pane::Presenter,
+    dnd_overlay: DragAndDropOverlayView,
+}
+impl<'subsystem> Application<'subsystem> {
+    pub fn new(
+        init_context: &mut PresenterInitContext<'_, '_, '_, 'subsystem>,
+        composite_renderer: &CompositeRenderer<'subsystem>,
+        rt_size: br::Extent2D,
+        needs_window_command_buttons: bool,
+    ) -> Self {
+        let app_header =
+            feature::app_header::Presenter::new(init_context, needs_window_command_buttons);
+        let app_menu = feature::app_menu::Presenter::new(init_context, app_header.height());
+        let editing_atlas_plane = Rc::new(feature::editing_atlas_renderer::Presenter::new(
+            init_context,
+            composite_renderer.subpass_final(),
+            rt_size,
+        ));
+        let editing_atlas_current_bound_pipeline = RenderPassRequirements {
+            after_operation: RenderPassAfterOperation::None,
+            continued: false,
+        };
+        let sprite_list_pane =
+            feature::sprite_list_pane::Presenter::new(init_context, app_header.height());
+
+        let dnd_overlay = DragAndDropOverlayView::new(&mut init_context.for_view);
+
+        editing_atlas_plane.mount(
+            init_context.for_view.base_system,
+            (CompositeTree::ROOT, HitTestTreeManager::ROOT),
+        );
+        sprite_list_pane.mount(
+            init_context.for_view.base_system,
+            CompositeTree::ROOT,
+            HitTestTreeManager::ROOT,
+        );
+        app_menu.mount(
+            init_context.for_view.base_system,
+            CompositeTree::ROOT,
+            HitTestTreeManager::ROOT,
+        );
+        app_header.mount(
+            init_context.for_view.base_system,
+            CompositeTree::ROOT,
+            HitTestTreeManager::ROOT,
+        );
+        dnd_overlay.mount(init_context.for_view.base_system, CompositeTree::ROOT);
+
+        // initial state modification
+        editing_atlas_plane.set_offset(
+            0.0,
+            app_header.height() * init_context.for_view.ui_scale_factor,
+        );
+
+        Self {
+            app_header,
+            app_menu,
+            editing_atlas_plane,
+            editing_atlas_current_bound_pipeline,
+            sprite_list_pane,
+            dnd_overlay,
+        }
+    }
+
+    pub fn rescale(
+        &self,
+        base_sys: &mut AppBaseSystem<'subsystem>,
+        staging_scratch_buffer: &mut StagingScratchBuffer<'subsystem>,
+        ui_scale_factor: f32,
+    ) {
+        self.app_header
+            .rescale(base_sys, staging_scratch_buffer, ui_scale_factor);
+        self.app_menu
+            .rescale(base_sys, staging_scratch_buffer, ui_scale_factor);
+        self.editing_atlas_plane.rescale(base_sys, ui_scale_factor);
+        self.sprite_list_pane
+            .rescale(base_sys, staging_scratch_buffer, unsafe {
+                SafeF32::new_unchecked(ui_scale_factor)
+            });
+        self.dnd_overlay
+            .rescale(base_sys, staging_scratch_buffer, ui_scale_factor);
+    }
+
+    pub fn update<'base_sys>(
+        &self,
+        base_sys: &'base_sys mut AppBaseSystem<'subsystem>,
+        staging_scratch_buffer: &mut StagingScratchBuffer<'subsystem>,
+        current_sec: f32,
+    ) {
+        self.editing_atlas_plane.update(base_sys, current_sec);
+        self.app_header
+            .update(base_sys, staging_scratch_buffer, current_sec);
+        self.app_menu.update(base_sys, current_sec);
+        self.sprite_list_pane
+            .update(base_sys, current_sec, staging_scratch_buffer);
+    }
+}
+
 fn app_main<'sys, 'event_bus, 'subsystem>(
     app_system: &'sys mut AppBaseSystem<'subsystem>,
     app_shell: &'sys mut AppShell<'event_bus, 'subsystem>,
@@ -882,34 +985,20 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         app_state: app_state.get_mut(),
     };
 
-    let editing_atlas_plane = Rc::new(feature::editing_atlas_renderer::Presenter::new(
+    let mut app = Application::new(
         &mut init_context,
-        composite_renderer.subpass_final(),
+        &composite_renderer,
         sc.size,
-    ));
-    let mut editing_atlas_current_bound_pipeline = RenderPassRequirements {
-        after_operation: RenderPassAfterOperation::None,
-        continued: false,
-    };
-
-    let app_header = feature::app_header::Presenter::new(
-        &mut init_context,
         app_shell.needs_window_command_buttons(),
     );
-    let mut sprite_list_pane =
-        feature::sprite_list_pane::Presenter::new(&mut init_context, app_header.height());
-    let app_menu = feature::app_menu::Presenter::new(&mut init_context, app_header.height());
-
-    let dnd_overlay = DragAndDropOverlayView::new(&mut init_context.for_view);
 
     drop(init_context);
+    tracing::debug!(
+        byte_size = staging_scratch_buffer_locked.total_reserved_amount(),
+        "Reserved Staging Buffers during UI initialization",
+    );
+    app_system.hit_tree.dump(HitTestTreeManager::ROOT);
     drop(staging_scratch_buffer_locked);
-
-    editing_atlas_plane.mount(app_system, (CompositeTree::ROOT, HitTestTreeManager::ROOT));
-    sprite_list_pane.mount(app_system, CompositeTree::ROOT, HitTestTreeManager::ROOT);
-    app_menu.mount(app_system, CompositeTree::ROOT, HitTestTreeManager::ROOT);
-    app_header.mount(app_system, CompositeTree::ROOT, HitTestTreeManager::ROOT);
-    dnd_overlay.mount(app_system, CompositeTree::ROOT);
 
     // reordering hit for popups
     let popup_hit_layer = app_system.create_hit_tree(HitTestTreeData {
@@ -920,22 +1009,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
     app_system.set_hit_tree_parent(popup_hit_layer, HitTestTreeManager::ROOT);
 
     let mut popup_manager = PopupManager::new(popup_hit_layer, CompositeTree::ROOT);
-
-    // initial state modification
-    editing_atlas_plane.set_offset(0.0, app_header.height() * app_shell.ui_scale_factor());
-
-    {
-        let staging_scratch_buffer_locked =
-            parking_lot::RwLockWriteGuard::map(staging_scratch_buffers.write(), |x| {
-                x.active_buffer_mut()
-            });
-
-        tracing::debug!(
-            byte_size = staging_scratch_buffer_locked.total_reserved_amount(),
-            "Reserved Staging Buffers during UI initialization",
-        );
-        app_system.hit_tree.dump(HitTestTreeManager::ROOT);
-    }
 
     let mut main_cp = br::CommandPoolObject::new(
         app_system.subsystem,
@@ -1215,21 +1288,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     x.active_buffer_mut()
                 });
 
-            app_header.rescale(
-                app_system,
-                &mut staging_scratch_buffer_locked,
-                active_ui_scale,
-            );
-            app_menu.rescale(
-                app_system,
-                &mut staging_scratch_buffer_locked,
-                active_ui_scale,
-            );
-            editing_atlas_plane.rescale(app_system, active_ui_scale);
-            sprite_list_pane.rescale(app_system, &mut staging_scratch_buffer_locked, unsafe {
-                SafeF32::new_unchecked(active_ui_scale)
-            });
-            dnd_overlay.rescale(
+            app.rescale(
                 app_system,
                 &mut staging_scratch_buffer_locked,
                 active_ui_scale,
@@ -1243,7 +1302,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
 
         task_worker.try_tick();
 
-        editing_atlas_plane.sync_with_app_state(
+        app.editing_atlas_plane.sync_with_app_state(
             &app_state.borrow(),
             &bg_worker.enqueue_access(),
             &staging_scratch_buffers,
@@ -1308,10 +1367,10 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                             );
                         }
 
-                        editing_atlas_plane.recreate_render_resources(
+                        app.editing_atlas_plane.recreate_render_resources(
                             app_system,
                             composite_renderer
-                                .select_subpass(&editing_atlas_current_bound_pipeline),
+                                .select_subpass(&app.editing_atlas_current_bound_pipeline),
                             sc.size,
                         );
                     }
@@ -1320,14 +1379,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         parking_lot::RwLockWriteGuard::map(staging_scratch_buffers.write(), |x| {
                             x.active_buffer_mut()
                         });
-                    editing_atlas_plane.update(app_system, current_sec);
-                    app_header.update(app_system, &mut staging_scratch_buffer_locked, current_sec);
-                    app_menu.update(app_system, current_sec);
-                    sprite_list_pane.update(
-                        app_system,
-                        current_sec,
-                        &mut staging_scratch_buffer_locked,
-                    );
+                    app.update(app_system, &mut staging_scratch_buffer_locked, current_sec);
                     popup_manager.update(app_system, current_sec);
                     drop(staging_scratch_buffer_locked);
 
@@ -1386,6 +1438,20 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                 composite_render_instructions.required_backdrop_buffer_count,
                             );
 
+                            if composite_render_instructions.render_passes[0]
+                                != app.editing_atlas_current_bound_pipeline
+                            {
+                                // editing atlas render pass changes
+                                app.editing_atlas_current_bound_pipeline =
+                                    composite_render_instructions.render_passes[0];
+                                app.editing_atlas_plane.recreate_render_resources(
+                                    app_system,
+                                    composite_renderer
+                                        .select_subpass(&app.editing_atlas_current_bound_pipeline),
+                                    sc.size,
+                                );
+                            }
+
                             last_composite_render_instructions = composite_render_instructions;
                         }
 
@@ -1395,7 +1461,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     let composite_instance_buffer_dirty =
                         core::mem::replace(&mut composite_instance_buffer_dirty, false);
                     let mut needs_update =
-                        composite_instance_buffer_dirty || editing_atlas_plane.needs_update();
+                        composite_instance_buffer_dirty || app.editing_atlas_plane.needs_update();
 
                     if composite_renderer.update_backdrop_resources(app_system, &sc) {
                         needs_update = true;
@@ -1453,7 +1519,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                             )
                         })
                         .inject(|r| {
-                            editing_atlas_plane.process_dirty_data(
+                            app.editing_atlas_plane.process_dirty_data(
                                 app_system.subsystem,
                                 &staging_scratch_buffers_locked.active_buffer(),
                                 r,
@@ -1514,19 +1580,6 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                         ProfileMarkerCategory::Begin,
                     );
                     if main_cb_invalid {
-                        if last_composite_render_instructions.render_passes[0]
-                            != editing_atlas_current_bound_pipeline
-                        {
-                            editing_atlas_current_bound_pipeline =
-                                last_composite_render_instructions.render_passes[0];
-                            editing_atlas_plane.recreate_render_resources(
-                                app_system,
-                                composite_renderer
-                                    .select_subpass(&editing_atlas_current_bound_pipeline),
-                                sc.size,
-                            );
-                        }
-
                         for (n, cb) in main_cbs.iter_mut().enumerate() {
                             unsafe { cb.begin(&br::CommandBufferBeginInfo::new()).unwrap() }
                                 .inject(|r| {
@@ -1537,7 +1590,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                                         &sc.backbuffer_image(n),
                                         n,
                                         |token, r| {
-                                            editing_atlas_plane
+                                            app.editing_atlas_plane
                                                 .handle_custom_render(&token, sc.size, r)
                                         },
                                     )
@@ -1801,13 +1854,13 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     app_state.borrow_mut().add_sprites_from_file_paths(paths);
                 }
                 AppEvent::UIShowDragAndDropOverlay => {
-                    dnd_overlay.show(app_system, t.elapsed().as_secs_f32());
+                    app.dnd_overlay.show(app_system, t.elapsed().as_secs_f32());
                 }
                 AppEvent::UIHideDragAndDropOverlay => {
-                    dnd_overlay.hide(app_system, t.elapsed().as_secs_f32());
+                    app.dnd_overlay.hide(app_system, t.elapsed().as_secs_f32());
                 }
                 AppEvent::MainWindowTiledStateChanged { is_tiled } => {
-                    app_header.on_shell_tiling_changed(app_system, is_tiled);
+                    app.app_header.on_shell_tiling_changed(app_system, is_tiled);
                 }
             }
             app_update_context.event_queue.notify_clear().unwrap();

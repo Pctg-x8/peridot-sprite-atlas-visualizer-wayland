@@ -95,6 +95,7 @@ pub enum AppEvent {
     AppMenuRequestAddSprite,
     AppMenuRequestOpen,
     AppMenuRequestSave,
+    AppMenuRequestAutoArrange,
     BeginBackgroundWork {
         thread_number: usize,
         message: String,
@@ -205,6 +206,14 @@ const VI_STATE_FLOAT2_ONLY: &'static br::PipelineVertexInputStateCreateInfo<'sta
 pub struct FillcolorRConstants {
     #[constant_id = 0]
     pub r: f32,
+}
+
+#[derive(br::SpecializationConstants)]
+pub struct RectConstants {
+    #[constant_id = 0]
+    pub render_size: f32,
+    #[constant_id = 1]
+    pub thickness: f32,
 }
 
 #[derive(br::SpecializationConstants)]
@@ -1743,6 +1752,24 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                     task_worker
                         .spawn(app_menu_on_save(syslink, app_shell, app_state, events))
                         .detach();
+                }
+                AppEvent::AppMenuRequestAutoArrange => {
+                    popup_manager.spawn::<feature::auto_arrange_settings::Presenter>(
+                        &mut PresenterInitContext {
+                            for_view: ViewInitContext {
+                                base_system: app_system,
+                                ui_scale_factor: active_ui_scale,
+                            },
+                            app_state: &mut *app_state.borrow_mut(),
+                        },
+                        t.elapsed().as_secs_f32(),
+                        (),
+                    );
+                    unsafe { &mut *app_shell.pointer_input_manager().get() }.recompute_enter_leave(
+                        &mut app_system.hit_tree,
+                        &mut app_update_context,
+                        HitTestTreeManager::ROOT,
+                    );
                 }
                 AppEvent::BeginBackgroundWork {
                     thread_number,

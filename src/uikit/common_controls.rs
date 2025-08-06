@@ -50,8 +50,7 @@ impl CommonButtonView {
 
         let preferred_width =
             Self::PADDING_H * 2.0 + text_atlas_rect.width() as f32 / init.ui_scale_factor;
-        let preferred_height =
-            Self::PADDING_V * 2.0 + text_atlas_rect.height() as f32 / init.ui_scale_factor;
+        let preferred_height = Self::PADDING_V * 2.0 + 12.0;
 
         let ct_root = init.base_system.register_composite_rect(CompositeRect {
             base_scale_factor: init.ui_scale_factor,
@@ -130,6 +129,36 @@ impl CommonButtonView {
         ht: &'h mut HitTestTreeManager<'ah>,
     ) -> &'h mut HitTestTreeData<'ah> {
         ht.get_data_mut(self.ht_root)
+    }
+
+    #[inline]
+    pub fn set_position(&self, base_sys: &mut AppBaseSystem, x: f32, y: f32) {
+        let ct = self
+            .ct_root
+            .entity_mut_dirtified(&mut base_sys.composite_tree);
+        ct.offset = [AnimatableFloat::Value(x), AnimatableFloat::Value(y)];
+        base_sys.hit_tree.get_data_mut(self.ht_root).left = x;
+        base_sys.hit_tree.get_data_mut(self.ht_root).top = y;
+    }
+
+    #[inline]
+    pub fn set_relative_offset_adjustments(
+        &self,
+        base_sys: &mut AppBaseSystem,
+        rel_x: f32,
+        rel_y: f32,
+    ) {
+        self.ct_root
+            .entity_mut_dirtified(&mut base_sys.composite_tree)
+            .relative_offset_adjustment = [rel_x, rel_y];
+        base_sys
+            .hit_tree
+            .get_data_mut(self.ht_root)
+            .left_adjustment_factor = rel_x;
+        base_sys
+            .hit_tree
+            .get_data_mut(self.ht_root)
+            .top_adjustment_factor = rel_y;
     }
 
     #[inline]

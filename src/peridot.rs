@@ -19,6 +19,7 @@ pub struct Sprite {
     pub border_top: u32,
     pub border_right: u32,
     pub border_bottom: u32,
+    pub rotated: bool,
 }
 
 pub struct SpriteAtlasAsset {
@@ -43,13 +44,15 @@ impl SpriteAtlasAsset {
             border_top,
             border_right,
             border_bottom,
+            rotated,
         } in self.sprites.iter()
         {
             // Note: 比較的変わりにくいもの -> 変わりやすいもの の順でならべている（行ごとの差分を見やすくするため）
             writeln!(
                 sink,
-                "{id}={width},{height},{border_left},{border_top},{border_right},{border_bottom},{left},{top},{source_path},{name}",
+                "{id}={width},{height},{rotated},{border_left},{border_top},{border_right},{border_bottom},{left},{top},{source_path},{name}",
                 id = id.as_simple(),
+                rotated = if rotated { 1 } else { 0 },
                 source_path = source_path.display()
             )?;
         }
@@ -101,6 +104,12 @@ impl SpriteAtlasAsset {
                     .ok_or(SpriteAtlasAssetReadError::MissingParam("height"))?
                     .parse()
                     .map_err(|e| SpriteAtlasAssetReadError::InvalidParamFormat("height", e))?,
+                rotated: params
+                    .next()
+                    .ok_or(SpriteAtlasAssetReadError::MissingParam("rotated"))?
+                    .parse::<u8>()
+                    .map_err(|e| SpriteAtlasAssetReadError::InvalidParamFormat("rotated", e))?
+                    == 1,
                 border_left: params
                     .next()
                     .ok_or(SpriteAtlasAssetReadError::MissingParam("border_left"))?

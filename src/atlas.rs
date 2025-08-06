@@ -34,7 +34,7 @@ impl AtlasRect {
         self.extent().into_rect(self.lt_offset())
     }
 
-    pub fn vsplit(&mut self, width: u32) -> Self {
+    fn vsplit(&mut self, width: u32) -> Self {
         assert!(width <= self.width());
 
         let r = Self {
@@ -47,7 +47,7 @@ impl AtlasRect {
         r
     }
 
-    pub fn hsplit(&mut self, height: u32) -> Self {
+    fn hsplit(&mut self, height: u32) -> Self {
         assert!(height <= self.height());
 
         let r = Self {

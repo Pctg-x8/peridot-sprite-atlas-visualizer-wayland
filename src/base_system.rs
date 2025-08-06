@@ -9,8 +9,8 @@ use std::{
 
 use crate::{
     BLEND_STATE_SINGLE_NONE, FillcolorRConstants, IA_STATE_TRIFAN, IA_STATE_TRILIST,
-    MS_STATE_EMPTY, RASTER_STATE_DEFAULT_FILL_NOCULL, RoundedRectConstants, VI_STATE_EMPTY,
-    VI_STATE_FLOAT2_ONLY,
+    MS_STATE_EMPTY, RASTER_STATE_DEFAULT_FILL_NOCULL, RectConstants, RoundedRectConstants,
+    VI_STATE_EMPTY, VI_STATE_FLOAT2_ONLY,
     atlas::AtlasRect,
     base_system::{scratch_buffer::FlippableStagingScratchBufferGroup, svg::SinglePathSVG},
     composite::{
@@ -70,6 +70,7 @@ pub struct AppBaseSystem<'subsystem> {
     fs_cache: Cache,
     pipeline_cache: br::vk::VkPipelineCache,
     rounded_fill_rect_cache: HashMap<(SafeF32, SafeF32), AtlasRect>,
+    rect_cache: HashMap<(SafeF32, SafeF32), AtlasRect>,
     rounded_rect_cache: HashMap<(SafeF32, SafeF32, SafeF32), AtlasRect>,
     text_cache: HashMap<FontType, HashMap<String, AtlasRect>>,
     render_to_mask_atlas_pass_cache:
@@ -389,6 +390,7 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
             pipeline_cache: pipeline_cache.unmanage().0,
             rounded_fill_rect_cache: HashMap::new(),
             rounded_rect_cache: HashMap::new(),
+            rect_cache: HashMap::new(),
             text_cache: HashMap::new(),
             render_to_mask_atlas_pass_cache: RefCell::new(HashMap::new()),
             loaded_shader_modules: RwLock::new(HashMap::new()),
@@ -419,6 +421,7 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
         }
 
         // evict all text caches
+        // TODO: atlasの領域開放してない
         self.text_cache.clear();
     }
 
@@ -618,6 +621,84 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
             .entry(font_type)
             .or_insert_with(HashMap::new)
             .insert(text.into(), atlas_rect);
+        Ok(atlas_rect)
+    }
+
+    #[tracing::instrument(name = "AppBaseSystem::rect_mask", skip(self), err(Display))]
+    pub fn rect_mask(
+        &mut self,
+        render_scale: SafeF32,
+        thickness: SafeF32,
+    ) -> br::Result<AtlasRect> {
+        if let Some(&r) = self.rect_cache.get(&(render_scale, thickness)) {
+            // found in cache
+            return Ok(r);
+        }
+
+        tracing::info!("creating fresh");
+        let size_px = ((thickness.value() * render_scale.value()).ceil() * 2.0 + 1.0) as u32;
+        let atlas_rect = self.alloc_mask_atlas_rect(size_px, size_px);
+
+        let render_pass = self.render_to_mask_atlas_pass(RenderPassOptions::FULL_PIXEL_RENDER)?;
+        let framebuffer = br::FramebufferObject::new(
+            self.subsystem,
+            &br::FramebufferCreateInfo::new(
+                &render_pass,
+                &[self
+                    .atlas
+                    .resource_view_transparent_ref()
+                    .as_transparent_ref()],
+                self.atlas.size(),
+                self.atlas.size(),
+            ),
+        )?;
+
+        let [pipeline] =
+            self.create_graphics_pipelines_array(&[br::GraphicsPipelineCreateInfo::new(
+                self.require_empty_pipeline_layout(),
+                render_pass.subpass(0),
+                &[
+                    self.require_shader("resources/filltri.vert")
+                        .on_stage(br::ShaderStage::Vertex, c"main"),
+                    self.require_shader("resources/rect_border.frag")
+                        .on_stage(br::ShaderStage::Fragment, c"main")
+                        .with_specialization_info(&br::SpecializationInfo::new(&RectConstants {
+                            render_size: size_px as _,
+                            thickness: thickness.value() * render_scale.value(),
+                        })),
+                ],
+                VI_STATE_EMPTY,
+                IA_STATE_TRILIST,
+                &br::PipelineViewportStateCreateInfo::new(
+                    &[atlas_rect.vk_rect().make_viewport(0.0..1.0)],
+                    &[atlas_rect.vk_rect()],
+                ),
+                RASTER_STATE_DEFAULT_FILL_NOCULL,
+                BLEND_STATE_SINGLE_NONE,
+            )
+            .set_multisample_state(MS_STATE_EMPTY)])?;
+
+        self.sync_execute_graphics_commands(|rec| {
+            rec.inject(|r| {
+                inject_cmd_begin_render_pass2(
+                    r,
+                    self.subsystem,
+                    &br::RenderPassBeginInfo::new(
+                        &render_pass,
+                        &framebuffer,
+                        atlas_rect.vk_rect(),
+                        &[br::ClearValue::color_f32([0.0; 4])],
+                    ),
+                    &br::SubpassBeginInfo::new(br::SubpassContents::Inline),
+                )
+            })
+            .bind_pipeline(br::PipelineBindPoint::Graphics, &pipeline)
+            .draw(3, 1, 0, 0)
+            .inject(|r| inject_cmd_end_render_pass2(r, self.subsystem, &br::SubpassEndInfo::new()))
+        })?;
+
+        self.rect_cache
+            .insert((render_scale, thickness), atlas_rect);
         Ok(atlas_rect)
     }
 
@@ -1815,6 +1896,67 @@ pub enum BufferCreationError {
     Vulkan(#[from] br::vk::VkResult),
     #[error("no suitable memory")]
     NoSuitableMemory,
+}
+
+pub struct DeviceLocalBuffer<'subsystem> {
+    buffer: br::BufferObject<&'subsystem Subsystem>,
+    _memory: br::DeviceMemoryObject<&'subsystem Subsystem>,
+}
+impl<'subsystem> br::VkHandle for DeviceLocalBuffer<'subsystem> {
+    type Handle = br::vk::VkBuffer;
+
+    #[inline(always)]
+    fn native_ptr(&self) -> Self::Handle {
+        self.buffer.native_ptr()
+    }
+}
+impl<'subsystem> br::VkHandleMut for DeviceLocalBuffer<'subsystem> {
+    #[inline(always)]
+    fn native_ptr_mut(&mut self) -> Self::Handle {
+        self.buffer.native_ptr_mut()
+    }
+}
+impl<'subsystem> br::DeviceChildHandle for DeviceLocalBuffer<'subsystem> {
+    #[inline(always)]
+    fn device_handle(&self) -> bedrock::vk::VkDevice {
+        self.buffer.device_handle()
+    }
+}
+impl<'subsystem> br::DeviceChild for DeviceLocalBuffer<'subsystem> {
+    type ConcreteDevice = &'subsystem Subsystem;
+
+    #[inline(always)]
+    fn device(&self) -> &Self::ConcreteDevice {
+        self.buffer.device()
+    }
+}
+impl<'subsystem> br::Buffer for DeviceLocalBuffer<'subsystem> {}
+impl<'subsystem> DeviceLocalBuffer<'subsystem> {
+    #[tracing::instrument(name = "DeviceLocalBuffer::new", skip(base_system), err(Display))]
+    pub fn new(
+        base_system: &AppBaseSystem<'subsystem>,
+        size: usize,
+        usage: br::BufferUsage,
+    ) -> Result<Self, BufferCreationError> {
+        let mut b = br::BufferObject::new(
+            base_system.subsystem,
+            &br::BufferCreateInfo::new(size, usage),
+        )?;
+        let req = b.requirements();
+        let Some(memindex) = base_system.find_device_local_memory_index(req.memoryTypeBits) else {
+            return Err(BufferCreationError::NoSuitableMemory);
+        };
+        let mem = br::DeviceMemoryObject::new(
+            base_system.subsystem,
+            &br::MemoryAllocateInfo::new(req.size, memindex),
+        )?;
+        b.bind(&mem, 0)?;
+
+        Ok(Self {
+            buffer: b,
+            _memory: mem,
+        })
+    }
 }
 
 pub struct MemoryBoundBuffer<'subsystem> {

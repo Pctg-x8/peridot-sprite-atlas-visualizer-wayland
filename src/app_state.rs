@@ -21,6 +21,7 @@ pub struct SpriteInfo {
     pub right_slice: u32,
     pub top_slice: u32,
     pub bottom_slice: u32,
+    pub rotated: bool,
     pub selected: bool,
 }
 impl SpriteInfo {
@@ -37,6 +38,7 @@ impl SpriteInfo {
             right_slice: 0,
             top_slice: 0,
             bottom_slice: 0,
+            rotated: false,
             selected: false,
         }
     }
@@ -256,6 +258,262 @@ impl<'subsystem> AppState<'subsystem> {
         self.visible_menu
     }
 
+    pub fn arrange(&mut self, allow_rotation: bool) {
+        let (mut total_area, mut min_side_require) = (0, 0);
+        for x in self.sprites.iter() {
+            total_area += (x.width * x.height) as u64;
+            min_side_require = min_side_require.max(x.width).max(x.height);
+        }
+        let suitable_tex_size1 = (total_area as f64).sqrt().ceil() as u32;
+        let suitable_tex_width = suitable_tex_size1.max(min_side_require).next_power_of_two();
+        let suitable_tex_height = suitable_tex_width;
+        println!("suitable atlas size: {suitable_tex_width}px x {suitable_tex_height}px");
+
+        #[derive(Clone)]
+        struct VariableLengthBits {
+            values: Vec<u64>,
+        }
+        impl VariableLengthBits {
+            pub fn new(init_val: u64) -> Self {
+                Self {
+                    values: vec![init_val],
+                }
+            }
+
+            pub fn is_all_one(&self) -> bool {
+                self.values.iter().all(|x| x.count_zeros() == 0)
+            }
+
+            #[inline(always)]
+            const fn index_bitmask(at: usize) -> (usize, u64) {
+                (at >> 6, 1u64 << (at & 63))
+            }
+
+            pub fn is_one(&self, at: usize) -> bool {
+                let (at_index, bitmask) = Self::index_bitmask(at);
+
+                match self.values.get(at_index) {
+                    None => false,
+                    Some(x) => (x & bitmask) == bitmask,
+                }
+            }
+
+            pub fn set(&mut self, at: usize) {
+                let (at_index, bitmask) = Self::index_bitmask(at);
+
+                self.values.resize(at_index + 1, 0);
+                self.values[at_index] |= bitmask;
+            }
+
+            pub fn insert_copy_right_bit(&mut self, at: usize) {
+                let at_index = at >> 6;
+                let bitpos = at & 63;
+                let updating_bitmask = !0u64 << bitpos;
+
+                let last_index = self.values.len() - 1;
+                if at_index < last_index {
+                    // shift later bits
+                    // last value
+                    let carry = (self.values[last_index] & 0x8000_0000_0000_0000) != 0;
+                    self.values[last_index] <<= 1;
+                    if carry {
+                        self.values.push(0x01);
+                    }
+
+                    // shift from back
+                    for n in (at_index + 1..self.values.len() - 1).rev() {
+                        let carry = (self.values[n] & 0x8000_0000_0000_0000) != 0;
+                        self.values[n] <<= 1;
+                        if carry {
+                            self.values[n + 1] |= 0x01;
+                        }
+                    }
+                }
+
+                let carry = (self.values[at_index] & 0x8000_0000_0000_0000) != 0;
+                self.values[at_index] = (self.values[at_index] & !updating_bitmask)
+                    | ((self.values[at_index] << 1) & updating_bitmask);
+                if carry {
+                    if at_index == last_index {
+                        self.values.push(0x01);
+                    } else {
+                        self.values[at_index + 1] |= 0x01;
+                    }
+                }
+            }
+        }
+        // packing rectangles using dynamically splitted grids: https://www.david-colson.com/2020/03/10/exploring-rect-packing.html
+        struct DynamicGrid {
+            resident_bitmap: Vec<VariableLengthBits>,
+            col_pixels: Vec<u32>,
+            row_pixels: Vec<u32>,
+        }
+        impl DynamicGrid {
+            pub fn new(init_width: u32, init_height: u32) -> Self {
+                Self {
+                    resident_bitmap: vec![VariableLengthBits::new(0)],
+                    col_pixels: vec![init_width],
+                    row_pixels: vec![init_height],
+                }
+            }
+
+            #[tracing::instrument(level = tracing::Level::DEBUG, name = "DynamicGrid::try_alloc", skip(self), ret)]
+            pub fn try_alloc(&mut self, width: u32, height: u32) -> Option<(u32, u32)> {
+                // find suitable grids
+                let (found, found_grid_index) = 'find_enough_area: {
+                    let mut top = 0;
+                    for (nr, (&r, rb)) in self
+                        .row_pixels
+                        .iter()
+                        .zip(self.resident_bitmap.iter())
+                        .enumerate()
+                    {
+                        if rb.is_all_one() {
+                            // fully resident row
+                            top += r;
+                            continue;
+                        }
+
+                        let mut left = 0;
+                        for (nc, &c) in self.col_pixels.iter().enumerate() {
+                            if rb.is_one(nc) {
+                                // resident col
+                                left += c;
+                                continue;
+                            }
+
+                            let cont_width = c + self
+                                .col_pixels
+                                .iter()
+                                .enumerate()
+                                .skip(nc + 1)
+                                .take_while(|&(n, _)| !rb.is_one(n))
+                                .map(|(_, &c)| c)
+                                .sum::<u32>();
+                            if cont_width < width {
+                                // no suitable width
+                                left += c;
+                                continue;
+                            }
+
+                            let mut cont_height = r;
+                            for (&r, rb) in self
+                                .row_pixels
+                                .iter()
+                                .zip(self.resident_bitmap.iter())
+                                .skip(nr + 1)
+                            {
+                                if cont_height >= height {
+                                    // enough height
+                                    break;
+                                }
+
+                                let cont_width1 = self
+                                    .col_pixels
+                                    .iter()
+                                    .enumerate()
+                                    .skip(nc)
+                                    .take_while(|&(n, _)| !rb.is_one(n))
+                                    .map(|(_, &c)| c)
+                                    .sum::<u32>();
+                                if cont_width1 < cont_width {
+                                    // no enough width in next rows
+                                    break;
+                                }
+
+                                cont_height += r;
+                            }
+
+                            if cont_height < height {
+                                // no suitable height found
+                                left += c;
+                                continue;
+                            }
+                            assert!(cont_width >= width && cont_height >= height); // found enough region
+
+                            break 'find_enough_area ((left, top), (nr, nc));
+                        }
+
+                        // not found in row
+                        top += r;
+                    }
+
+                    // all iteration finished(not found)
+                    return None;
+                };
+
+                // mark resident / split grid
+                let mut height_rest = height;
+                let mut filling_nr = found_grid_index.0;
+                while height_rest > 0 {
+                    let mut r = self.row_pixels[filling_nr];
+                    if height_rest < r {
+                        // split row
+                        let org_nr = filling_nr;
+                        let bottom = self.row_pixels[org_nr] - height_rest;
+                        self.row_pixels[org_nr] = height_rest;
+                        self.row_pixels.insert(org_nr + 1, bottom);
+                        // copy resident state
+                        self.resident_bitmap
+                            .insert(org_nr + 1, self.resident_bitmap[org_nr].clone());
+                        r = height_rest;
+                    }
+
+                    // fill row
+                    let mut width_rest = width;
+                    let mut filling_nc = found_grid_index.1;
+                    while width_rest > 0 {
+                        let mut c = self.col_pixels[filling_nc];
+                        if width_rest < c {
+                            // split col
+                            let org_nc = filling_nc;
+                            let right = self.col_pixels[org_nc] - width_rest;
+                            self.col_pixels[org_nc] = width_rest;
+                            self.col_pixels.insert(org_nc + 1, right);
+                            // copy resident state
+                            self.resident_bitmap[filling_nr].insert_copy_right_bit(org_nc);
+                            c = width_rest;
+                        }
+
+                        self.resident_bitmap[filling_nr].set(filling_nc);
+
+                        width_rest -= c;
+                        filling_nc += 1;
+                    }
+
+                    height_rest -= r;
+                    filling_nr += 1;
+                }
+
+                Some(found)
+            }
+        }
+
+        let mut dynamic_grid = DynamicGrid::new(suitable_tex_width, suitable_tex_height);
+        for x in self.sprites.iter_mut() {
+            // TODO: allow_rotation consideration
+            let Some((left, top)) = dynamic_grid.try_alloc(x.width, x.height) else {
+                unreachable!("no suitable region(incorrect suitable tex size computation)");
+            };
+
+            x.left = left;
+            x.top = top;
+            x.rotated = false;
+        }
+
+        // TODO: この時点でサイズ切り詰められそうなら切り詰める
+        self.atlas_size.width = suitable_tex_width;
+        self.atlas_size.height = suitable_tex_height;
+
+        for fb in self.atlas_size_view_feedbacks.iter_mut() {
+            fb(&self.atlas_size);
+        }
+
+        for fb in self.sprites_view_feedbacks.iter_mut() {
+            fb(&self.sprites);
+        }
+    }
+
     #[tracing::instrument(name = "AppState::save", skip(self), fields(path = %path.as_ref().display()), err(Display))]
     pub fn save(&mut self, path: impl AsRef<Path>) -> std::io::Result<()> {
         let mut asset = peridot::SpriteAtlasAsset {
@@ -276,6 +534,7 @@ impl<'subsystem> AppState<'subsystem> {
                     border_top: x.top_slice,
                     border_right: x.right_slice,
                     border_bottom: x.bottom_slice,
+                    rotated: x.rotated,
                 })
                 .collect(),
         };
@@ -316,6 +575,7 @@ impl<'subsystem> AppState<'subsystem> {
                 right_slice: x.border_right,
                 top_slice: x.border_top,
                 bottom_slice: x.border_bottom,
+                rotated: false,
                 selected: false,
             }));
         self.atlas_size.width = asset.width;

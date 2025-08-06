@@ -612,9 +612,9 @@ impl HitTestTreeActionHandler for ActionHandler {
                         context.event_queue.push(AppEvent::AppMenuRequestSave);
                     }
                     Command::AutoArrange => {
-                        context.event_queue.push(AppEvent::UIMessageDialogRequest {
-                            content: "[Not Implemented]AutoArrange".into(),
-                        });
+                        context
+                            .event_queue
+                            .push(AppEvent::AppMenuRequestAutoArrange);
                     }
                 }
 

@@ -20,6 +20,7 @@ use crate::{
     },
     helper_types::SafeF32,
     hittest::{HitTestTreeData, HitTestTreeManager, HitTestTreeRef},
+    input::KeyboardFocusManager,
     subsystem::Subsystem,
     text::TextLayout,
 };
@@ -66,6 +67,7 @@ pub struct AppBaseSystem<'subsystem> {
     pub composite_tree: CompositeTree,
     pub composite_instance_manager: UnboundedCompositeInstanceManager,
     pub hit_tree: HitTestTreeManager<'subsystem>,
+    pub keyboard_focus_manager: KeyboardFocusManager,
     pub fonts: FontSet,
     fs_cache: Cache,
     pipeline_cache: br::vk::VkPipelineCache,
@@ -383,6 +385,7 @@ impl<'subsystem> AppBaseSystem<'subsystem> {
             composite_tree: CompositeTree::new(),
             composite_instance_manager: composite_instance_buffer.unbound(),
             hit_tree: HitTestTreeManager::new(),
+            keyboard_focus_manager: KeyboardFocusManager::new(),
             fonts: FontSet {
                 ui_default: ft_face,
                 ui_extra_large: ft_face_extra_large,

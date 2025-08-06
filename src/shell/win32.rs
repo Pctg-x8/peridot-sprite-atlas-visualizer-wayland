@@ -44,8 +44,8 @@ use windows::{
                 DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetClientRect, GetSystemMetrics,
                 GetWindowLongPtrW, GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION,
                 HTCLIENT, HTCLOSE, HTLEFT, HTMAXBUTTON, HTMINBUTTON, HTRIGHT, HTTOP, HTTOPLEFT,
-                HTTOPRIGHT, IDC_ARROW, IDC_HAND, IDC_SIZEWE, IDI_APPLICATION, IsWindow, IsZoomed,
-                LoadCursorW, LoadIconW, MSG, NCCALCSIZE_PARAMS, PM_REMOVE, PeekMessageW,
+                HTTOPRIGHT, IDC_ARROW, IDC_HAND, IDC_IBEAM, IDC_SIZEWE, IDI_APPLICATION, IsWindow,
+                IsZoomed, LoadCursorW, LoadIconW, MSG, NCCALCSIZE_PARAMS, PM_REMOVE, PeekMessageW,
                 RegisterClassExW, SIZE_MAXIMIZED, SIZE_RESTORED, SM_CXSIZEFRAME, SM_CYSIZEFRAME,
                 SW_RESTORE, SW_SHOWMAXIMIZED, SW_SHOWNORMAL, SWP_FRAMECHANGED, SetCursor,
                 SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_ACTIVATE,
@@ -601,6 +601,7 @@ impl<'sys, 'base_sys, 'subsystem> AppShell<'sys, 'subsystem> {
                 // TODO: 必要ならキャッシュする
                 CursorShape::Default => Some(LoadCursorW(None, IDC_ARROW).unwrap()),
                 CursorShape::Pointer => Some(LoadCursorW(None, IDC_HAND).unwrap()),
+                CursorShape::IBeam => Some(LoadCursorW(None, IDC_IBEAM).unwrap()),
                 CursorShape::ResizeHorizontal => Some(LoadCursorW(None, IDC_SIZEWE).unwrap()),
             });
         }

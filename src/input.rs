@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use bitflags::bitflags;
 
 use crate::{
@@ -97,6 +99,7 @@ impl PointerInputManager {
         ht: &HitTestTreeManager,
         action_context: &mut AppUpdateContext,
         ht_target: HitTestTreeRef,
+        kfm: &mut KeyboardFocusManager,
     ) -> (bool, Option<HitTestTreeRef>) {
         let mut needs_recompute_pointer_enter = false;
         let mut new_captured = None;
@@ -109,6 +112,16 @@ impl PointerInputManager {
                 .map_or(EventContinueControl::empty(), |h| {
                     h.on_pointer_down(ht_ref, action_context, action_args)
                 });
+
+            match ht
+                .get_data(ht_ref)
+                .action_handler()
+                .and_then(|x| x.keyboard_focus(ht_ref))
+            {
+                Some(x) => kfm.set_focus(x),
+                None => kfm.clear_focus(),
+            }
+
             if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
                 needs_recompute_pointer_enter = true;
             }
@@ -372,6 +385,7 @@ impl PointerInputManager {
         ht: &mut HitTestTreeManager,
         action_context: &mut AppUpdateContext,
         ht_root: HitTestTreeRef,
+        kfm: &mut KeyboardFocusManager,
     ) {
         let Some((client_x, client_y)) = self.last_client_pointer_pos else {
             // no pointer on the surface
@@ -398,6 +412,15 @@ impl PointerInputManager {
                         )
                     },
                 );
+                match ht
+                    .get_data(ht_ref)
+                    .action_handler()
+                    .and_then(|x| x.keyboard_focus(ht_ref))
+                {
+                    Some(x) => kfm.set_focus(x),
+                    None => kfm.clear_focus(),
+                }
+
                 if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
                     self.handle_mouse_enter_leave(client_x, client_y, ht, action_context, ht_root);
                 }
@@ -419,6 +442,7 @@ impl PointerInputManager {
                     ht,
                     action_context,
                     ht_ref,
+                    kfm,
                 );
 
                 if let Some(h) = new_captured {
@@ -685,5 +709,53 @@ impl PointerInputManager {
 
         // fallback
         None
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FocusTargetToken(usize);
+
+pub struct KeyboardFocusManager {
+    last_token: usize,
+    unused_token: BTreeSet<usize>,
+    current_focus: Option<usize>,
+}
+impl KeyboardFocusManager {
+    pub fn new() -> Self {
+        Self {
+            last_token: 0,
+            unused_token: BTreeSet::new(),
+            current_focus: None,
+        }
+    }
+
+    pub fn acquire_token(&mut self) -> FocusTargetToken {
+        if let Some(x) = self.unused_token.pop_first() {
+            return FocusTargetToken(x);
+        }
+
+        let t = FocusTargetToken(self.last_token);
+        self.last_token += 1;
+        t
+    }
+
+    pub fn release_token(&mut self, tok: FocusTargetToken) {
+        if tok.0 == self.last_token - 1 {
+            self.last_token -= 1;
+        } else {
+            self.unused_token.insert(tok.0);
+        }
+    }
+
+    pub fn has_focus(&self, tok: &FocusTargetToken) -> bool {
+        self.current_focus.is_some_and(|x| x == tok.0)
+    }
+
+    pub fn set_focus(&mut self, tok: FocusTargetToken) {
+        self.current_focus = Some(tok.0);
+    }
+
+    pub fn clear_focus(&mut self) {
+        self.current_focus = None;
     }
 }

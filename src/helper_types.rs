@@ -16,6 +16,8 @@ impl std::hash::Hash for SafeF32 {
     }
 }
 impl SafeF32 {
+    pub const ZERO: Self = Self(0.0);
+
     pub const unsafe fn new_unchecked(v: f32) -> Self {
         Self(v)
     }

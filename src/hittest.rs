@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 
-use crate::{AppUpdateContext, input::EventContinueControl};
+use crate::{
+    AppUpdateContext,
+    input::{EventContinueControl, FocusTargetToken},
+};
 
 pub struct HitTestTreeData<'h> {
     pub left: f32,
@@ -290,6 +293,7 @@ impl<'h> HitTestTreeManager<'h> {
 pub enum CursorShape {
     Default,
     Pointer,
+    IBeam,
     ResizeHorizontal,
 }
 
@@ -328,6 +332,12 @@ pub trait HitTestTreeActionHandler {
     #[inline]
     fn cursor_shape(&self, sender: HitTestTreeRef, context: &mut AppUpdateContext) -> CursorShape {
         CursorShape::Default
+    }
+
+    #[allow(unused_variables)]
+    #[inline]
+    fn keyboard_focus(&self, sender: HitTestTreeRef) -> Option<FocusTargetToken> {
+        None
     }
 
     #[allow(unused_variables)]

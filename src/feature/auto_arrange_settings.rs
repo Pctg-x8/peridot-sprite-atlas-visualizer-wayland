@@ -3,22 +3,21 @@ use std::{cell::Cell, rc::Rc};
 use bedrock::{self as br, RenderPass, ShaderModule, VkHandle};
 
 use crate::{
-    AppEvent, BLEND_STATE_SINGLE_NONE, FillcolorRConstants, IA_STATE_TRILIST, MS_STATE_EMPTY,
+    AppEvent, BLEND_STATE_SINGLE_NONE, FillcolorRConstants, IA_STATE_TRILIST,
     RASTER_STATE_DEFAULT_FILL_NOCULL, VI_STATE_FLOAT2_ONLY, ViewInitContext,
     atlas::AtlasRect,
     base_system::{
-        AppBaseSystem, DeviceLocalBuffer, FontType, PixelFormat, RenderPassOptions, RenderTexture,
-        RenderTextureFlags, RenderTextureOptions, inject_cmd_begin_render_pass2,
-        inject_cmd_end_render_pass2, inject_cmd_pipeline_barrier_2,
+        AppBaseSystem, DeviceLocalBuffer, FontType, PixelFormat, RenderTexture, RenderTextureFlags,
+        RenderTextureOptions, inject_cmd_begin_render_pass2, inject_cmd_end_render_pass2,
+        inject_cmd_pipeline_barrier_2,
     },
     composite::{
-        AnimatableColor, AnimatableFloat, AnimationCurve, CompositeMode, CompositeRect,
+        AnimatableColor, AnimatableFloat, AnimationCurve, ClipConfig, CompositeMode, CompositeRect,
         CompositeTreeRef,
     },
     helper_types::SafeF32,
     hittest::{HitTestTreeActionHandler, HitTestTreeData, HitTestTreeRef},
-    input::EventContinueControl,
-    trigger_cell::TriggerCell,
+    input::{EventContinueControl, FocusTargetToken},
     uikit::common_controls::CommonButtonView,
 };
 
@@ -45,6 +44,8 @@ impl crate::uikit::PopupPresenterSpawnable for Presenter {
         let cancel_button_view = CommonButtonView::new(&mut init_context.for_view, "Cancel");
         let allow_rotated_checkbox_view =
             LabelledCheckboxView::new(&mut init_context.for_view, "Allow rotation");
+        let gap_input_field_view =
+            LabelledInputFieldView::new(&mut init_context.for_view, "Gap", 4.0 * 6.0, "px");
 
         title_label_view.mount(init_context.for_view.base_system, frame_view.ct_root());
         execute_button_view.mount(
@@ -61,6 +62,10 @@ impl crate::uikit::PopupPresenterSpawnable for Presenter {
             init_context.for_view.base_system,
             frame_view.ct_root(),
             frame_view.ht_root(),
+        );
+        gap_input_field_view.mount(
+            init_context.for_view.base_system,
+            (frame_view.ct_root(), frame_view.ht_root()),
         );
         frame_view.mount(
             init_context.for_view.base_system,
@@ -92,11 +97,17 @@ impl crate::uikit::PopupPresenterSpawnable for Presenter {
             1.0,
         );
         allow_rotated_checkbox_view.set_position(init_context.for_view.base_system, 16.0, 48.0);
+        gap_input_field_view.set_position(
+            init_context.for_view.base_system,
+            16.0,
+            48.0 + 20.0 + 4.0,
+        );
 
         let action_handler = Rc::new(ActionHandler {
             execute_button_view,
             cancel_button_view,
             allow_rotated_checkbox_view,
+            gap_input_field_view,
             id,
         });
         mask_view.bind_action_handler(
@@ -113,6 +124,9 @@ impl crate::uikit::PopupPresenterSpawnable for Presenter {
         );
         action_handler
             .allow_rotated_checkbox_view
+            .bind_action_handler(init_context.for_view.base_system, &action_handler);
+        action_handler
+            .gap_input_field_view
             .bind_action_handler(init_context.for_view.base_system, &action_handler);
 
         Self {
@@ -151,6 +165,7 @@ impl crate::uikit::PopupPresenter for Presenter {
         self.action_handler
             .allow_rotated_checkbox_view
             .update(base_sys, current_sec);
+        self.action_handler.gap_input_field_view.update(base_sys);
     }
 
     fn hide(&self, base_sys: &mut crate::base_system::AppBaseSystem, current_sec: f32) {
@@ -173,6 +188,7 @@ struct ActionHandler {
     execute_button_view: CommonButtonView,
     cancel_button_view: CommonButtonView,
     allow_rotated_checkbox_view: LabelledCheckboxView,
+    gap_input_field_view: LabelledInputFieldView,
     id: uuid::Uuid,
 }
 impl HitTestTreeActionHandler for ActionHandler {
@@ -187,8 +203,19 @@ impl HitTestTreeActionHandler for ActionHandler {
         if let Some(s) = self.cancel_button_view.try_handle_cursor_shape(sender) {
             return s;
         }
+        if let Some(s) = self.gap_input_field_view.try_handle_cursor_shape(sender) {
+            return s;
+        }
 
         crate::hittest::CursorShape::Default
+    }
+
+    fn keyboard_focus(&self, sender: HitTestTreeRef) -> Option<FocusTargetToken> {
+        if let Some(x) = self.gap_input_field_view.try_handle_keyboard_focus(sender) {
+            return Some(x);
+        }
+
+        None
     }
 
     fn on_pointer_enter(
@@ -341,6 +368,247 @@ impl TitleLabelView {
             .entity_mut_dirtified(&mut base_sys.composite_tree);
         ct.texatlas_rect = label_atlas_rect;
         ct.base_scale_factor = ui_scale_factor;
+    }
+}
+
+pub struct LabelledInputFieldView {
+    ct_root: CompositeTreeRef,
+    ct_cursor: CompositeTreeRef,
+    ht_root: HitTestTreeRef,
+    ht_field: HitTestTreeRef,
+    focus_token: FocusTargetToken,
+    focused_render: Cell<bool>,
+}
+impl LabelledInputFieldView {
+    const MARGIN_H_LABEL_FIELD: f32 = 4.0;
+    const MARGIN_H_FIELD_UNIT: f32 = 2.0;
+    const FIELD_UNDERLINE_THICKNESS: f32 = 1.0;
+
+    pub fn new(init: &mut ViewInitContext, label: &str, value_size: f32, unit: &str) -> Self {
+        let label_atlas_rect = init.base_system.text_mask(FontType::UI, label).unwrap();
+        let value_atlas_rect = init.base_system.text_mask(FontType::UI, "0").unwrap();
+        let unit_atlas_rect = init.base_system.text_mask(FontType::UI, unit).unwrap();
+
+        let preferred_width = label_atlas_rect.width() as f32 / init.ui_scale_factor
+            + Self::MARGIN_H_LABEL_FIELD
+            + value_size
+            + Self::MARGIN_H_FIELD_UNIT
+            + unit_atlas_rect.width() as f32 / init.ui_scale_factor;
+        let preferred_height = 16.0;
+        let ct_root = init.base_system.register_composite_rect(CompositeRect {
+            base_scale_factor: init.ui_scale_factor,
+            size: [
+                AnimatableFloat::Value(preferred_width),
+                AnimatableFloat::Value(preferred_height),
+            ],
+            ..Default::default()
+        });
+        let ct_label = init.base_system.register_composite_rect(CompositeRect {
+            base_scale_factor: init.ui_scale_factor,
+            size: [
+                AnimatableFloat::Value(label_atlas_rect.width() as f32 / init.ui_scale_factor),
+                AnimatableFloat::Value(label_atlas_rect.height() as f32 / init.ui_scale_factor),
+            ],
+            // TODO: baseline alignment
+            offset: [
+                AnimatableFloat::Value(0.0),
+                AnimatableFloat::Value(
+                    -0.5 * label_atlas_rect.height() as f32 / init.ui_scale_factor,
+                ),
+            ],
+            relative_offset_adjustment: [0.0, 0.5],
+            has_bitmap: true,
+            texatlas_rect: label_atlas_rect,
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
+            ..Default::default()
+        });
+        let ct_value = init.base_system.register_composite_rect(CompositeRect {
+            base_scale_factor: init.ui_scale_factor,
+            size: [
+                AnimatableFloat::Value(value_atlas_rect.width() as f32 / init.ui_scale_factor),
+                AnimatableFloat::Value(value_atlas_rect.height() as f32 / init.ui_scale_factor),
+            ],
+            offset: [
+                AnimatableFloat::Value(
+                    -0.5 * value_atlas_rect.width() as f32 / init.ui_scale_factor,
+                ),
+                AnimatableFloat::Value(
+                    -0.5 * value_atlas_rect.height() as f32 / init.ui_scale_factor,
+                ),
+            ],
+            relative_offset_adjustment: [0.5, 0.5],
+            has_bitmap: true,
+            texatlas_rect: value_atlas_rect,
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
+            ..Default::default()
+        });
+        let ct_unit = init.base_system.register_composite_rect(CompositeRect {
+            base_scale_factor: init.ui_scale_factor,
+            size: [
+                AnimatableFloat::Value(unit_atlas_rect.width() as f32 / init.ui_scale_factor),
+                AnimatableFloat::Value(unit_atlas_rect.height() as f32 / init.ui_scale_factor),
+            ],
+            // TODO: baseline alignment
+            offset: [
+                AnimatableFloat::Value(-(unit_atlas_rect.width() as f32) / init.ui_scale_factor),
+                AnimatableFloat::Value(
+                    -0.5 * unit_atlas_rect.height() as f32 / init.ui_scale_factor,
+                ),
+            ],
+            relative_offset_adjustment: [1.0, 0.5],
+            has_bitmap: true,
+            texatlas_rect: unit_atlas_rect,
+            composite_mode: CompositeMode::ColorTint(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
+            ..Default::default()
+        });
+        let ct_field = init.base_system.register_composite_rect(CompositeRect {
+            base_scale_factor: init.ui_scale_factor,
+            size: [
+                AnimatableFloat::Value(
+                    -(label_atlas_rect.width() as f32 / init.ui_scale_factor
+                        + Self::MARGIN_H_LABEL_FIELD
+                        + unit_atlas_rect.width() as f32 / init.ui_scale_factor
+                        + Self::MARGIN_H_FIELD_UNIT),
+                ),
+                AnimatableFloat::Value(0.0),
+            ],
+            relative_size_adjustment: [1.0, 1.0],
+            offset: [
+                AnimatableFloat::Value(
+                    label_atlas_rect.width() as f32 / init.ui_scale_factor
+                        + Self::MARGIN_H_LABEL_FIELD,
+                ),
+                AnimatableFloat::Value(0.0),
+            ],
+            clip_child: Some(ClipConfig {
+                left_softness: SafeF32::ZERO,
+                top_softness: SafeF32::ZERO,
+                right_softness: SafeF32::ZERO,
+                bottom_softness: SafeF32::ZERO,
+            }),
+            ..Default::default()
+        });
+        let ct_field_underline = init.base_system.register_composite_rect(CompositeRect {
+            base_scale_factor: init.ui_scale_factor,
+            size: [
+                AnimatableFloat::Value(0.0),
+                AnimatableFloat::Value(Self::FIELD_UNDERLINE_THICKNESS),
+            ],
+            relative_size_adjustment: [1.0, 0.0],
+            offset: [
+                AnimatableFloat::Value(0.0),
+                AnimatableFloat::Value(-Self::FIELD_UNDERLINE_THICKNESS),
+            ],
+            relative_offset_adjustment: [0.0, 1.0],
+            has_bitmap: true,
+            composite_mode: CompositeMode::FillColor(AnimatableColor::Value([
+                0.75, 0.75, 0.75, 1.0,
+            ])),
+            ..Default::default()
+        });
+        let ct_cursor = init.base_system.register_composite_rect(CompositeRect {
+            base_scale_factor: init.ui_scale_factor,
+            size: [AnimatableFloat::Value(1.0), AnimatableFloat::Value(12.0)],
+            offset: [AnimatableFloat::Value(0.0), AnimatableFloat::Value(-6.0)],
+            relative_offset_adjustment: [0.0, 0.5],
+            has_bitmap: true,
+            composite_mode: CompositeMode::FillColor(AnimatableColor::Value([0.9, 0.9, 0.9, 1.0])),
+            opacity: AnimatableFloat::Value(0.0),
+            ..Default::default()
+        });
+
+        init.base_system
+            .set_composite_tree_parent(ct_field_underline, ct_field);
+        init.base_system
+            .set_composite_tree_parent(ct_value, ct_field);
+        init.base_system
+            .set_composite_tree_parent(ct_cursor, ct_value);
+        init.base_system
+            .set_composite_tree_parent(ct_label, ct_root);
+        init.base_system
+            .set_composite_tree_parent(ct_field, ct_root);
+        init.base_system.set_composite_tree_parent(ct_unit, ct_root);
+
+        let ht_root = init.base_system.create_hit_tree(HitTestTreeData {
+            width: preferred_width,
+            height: preferred_height,
+            ..Default::default()
+        });
+        let ht_field = init.base_system.create_hit_tree(HitTestTreeData {
+            left: label_atlas_rect.width() as f32 / init.ui_scale_factor
+                + Self::MARGIN_H_LABEL_FIELD,
+            width: -(label_atlas_rect.width() as f32 / init.ui_scale_factor
+                + Self::MARGIN_H_LABEL_FIELD
+                + unit_atlas_rect.width() as f32 / init.ui_scale_factor
+                + Self::MARGIN_H_FIELD_UNIT),
+            width_adjustment_factor: 1.0,
+            height_adjustment_factor: 1.0,
+            ..Default::default()
+        });
+
+        init.base_system.set_hit_tree_parent(ht_field, ht_root);
+
+        let focus_token = init.base_system.keyboard_focus_manager.acquire_token();
+
+        Self {
+            ct_root,
+            ct_cursor,
+            ht_root,
+            ht_field,
+            focus_token,
+            focused_render: Cell::new(false),
+        }
+    }
+
+    pub fn mount(&self, base_sys: &mut AppBaseSystem, parents: (CompositeTreeRef, HitTestTreeRef)) {
+        base_sys.set_tree_parent((self.ct_root, self.ht_root), parents);
+    }
+
+    pub fn update(&self, base_sys: &mut AppBaseSystem) {
+        let focused = base_sys.keyboard_focus_manager.has_focus(&self.focus_token);
+        if focused != self.focused_render.get() {
+            self.focused_render.set(focused);
+
+            self.ct_cursor
+                .entity_mut_dirtified(&mut base_sys.composite_tree)
+                .opacity = AnimatableFloat::Value(if focused { 1.0 } else { 0.0 });
+        }
+    }
+
+    pub fn bind_action_handler<'subsystem>(
+        &self,
+        base_sys: &mut AppBaseSystem<'subsystem>,
+        handler: &Rc<impl HitTestTreeActionHandler + 'subsystem>,
+    ) {
+        base_sys.hit_tree.set_action_handler(self.ht_root, handler);
+        base_sys.hit_tree.set_action_handler(self.ht_field, handler);
+    }
+
+    pub fn set_position(&self, base_sys: &mut AppBaseSystem, x: f32, y: f32) {
+        self.ct_root
+            .entity_mut_dirtified(&mut base_sys.composite_tree)
+            .offset = [AnimatableFloat::Value(x), AnimatableFloat::Value(y)];
+        base_sys.hit_tree.get_data_mut(self.ht_root).left = x;
+        base_sys.hit_tree.get_data_mut(self.ht_root).top = y;
+    }
+
+    pub fn try_handle_cursor_shape(
+        &self,
+        sender: HitTestTreeRef,
+    ) -> Option<crate::hittest::CursorShape> {
+        if sender == self.ht_field {
+            return Some(crate::hittest::CursorShape::IBeam);
+        }
+
+        None
+    }
+
+    pub fn try_handle_keyboard_focus(&self, sender: HitTestTreeRef) -> Option<FocusTargetToken> {
+        if sender == self.ht_root || sender == self.ht_field {
+            return Some(self.focus_token);
+        }
+
+        None
     }
 }
 

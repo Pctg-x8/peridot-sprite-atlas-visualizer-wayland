@@ -1684,6 +1684,7 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
                             &mut app_system.hit_tree,
                             &mut app_update_context,
                             HitTestTreeManager::ROOT,
+                            &mut app_system.keyboard_focus_manager,
                         );
                     app_shell.set_cursor_shape(
                         unsafe { &mut *app_shell.pointer_input_manager().get() }

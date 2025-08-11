@@ -193,6 +193,16 @@ impl Object {
     }
 
     #[inline(always)]
+    pub unsafe fn send4v<A, B, C, D, Ret>(&self, sel: &Selector, a: A, b: B, c: C, d: D) -> Ret {
+        unsafe {
+            (core::mem::transmute::<
+                unsafe extern "C" fn(),
+                unsafe extern "C" fn(*const Object, *const Selector, A, B, C, D) -> Ret,
+            >(objc_msgSend))(self as *const _, sel as *const _, a, b, c, d)
+        }
+    }
+
+    #[inline(always)]
     pub unsafe fn send5o<A, B, C, D, E>(
         &self,
         sel: &Selector,

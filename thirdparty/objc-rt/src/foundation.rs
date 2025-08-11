@@ -5,7 +5,7 @@ use crate::{
     appkit::{NSInteger, NSUInteger},
 };
 
-#[repr(transparent)]
+#[repr(C)]
 pub struct NSString(Object);
 impl AsObject for NSString {
     #[inline(always)]
@@ -193,4 +193,18 @@ impl NSFileManager {
             Err(unsafe { Owned::from_ptr_unchecked(error.assume_init()) })
         }
     }
+}
+
+#[repr(transparent)]
+pub struct NSDate(Object);
+impl AsObject for NSDate {
+    #[inline(always)]
+    fn as_object(&self) -> &Object {
+        &self.0
+    }
+}
+impl NSObject for NSDate {}
+
+unsafe extern "C" {
+    pub static NSDefaultRunLoopMode: *const NSString;
 }

@@ -3,93 +3,15 @@ use std::cell::UnsafeCell;
 use bedrock::{self as br, SurfaceCreateInfo};
 use objc_rt::{
     self as objc, AsObject,
-    appkit::{NSBackingStoreType, NSUInteger, NSWindowStyleMask},
+    appkit::{NSApplication, NSBackingStoreType, NSEventMask, NSWindow, NSWindowStyleMask},
     corefoundation::{CGPoint, CGRect, CGSize},
-    foundation::NSString,
+    foundation::{NSDefaultRunLoopMode, NSString},
 };
 
 use crate::{
     AppEventBus, base_system::AppBaseSystem, hittest::CursorShape, input::PointerInputManager,
     subsystem::Subsystem,
 };
-
-#[repr(transparent)]
-struct NSApplication(objc::Object);
-impl NSApplication {
-    pub fn shared<'a>() -> &'a Self {
-        let cls = objc::Class::get(c"NSApplication").expect("no NSApplication");
-        unsafe { &*(cls.send0o(objc::Selector::get(c"sharedApplication")) as *mut Self) }
-    }
-
-    pub fn run(&self) {
-        unsafe {
-            self.0.send0(objc::Selector::get(c"run"));
-        }
-    }
-}
-
-#[repr(transparent)]
-pub struct NSWindow(objc::Object);
-impl objc::AsObject for NSWindow {
-    #[inline(always)]
-    fn as_object(&self) -> &objc::Object {
-        &self.0
-    }
-}
-impl objc::NSObject for NSWindow {}
-impl NSWindow {
-    pub fn new_with_content_rect_style_mask_backing_defer(
-        content_rect: CGRect,
-        style_mask: NSWindowStyleMask,
-        backing: NSBackingStoreType,
-        defer: bool,
-    ) -> objc::Owned<Self> {
-        let cls = objc::Class::get(c"NSWindow").expect("no NSWindow class");
-        let this = unsafe { cls.send0o(objc::Selector::get(c"alloc")) };
-        unsafe {
-            (*this).send4o(
-                objc::Selector::get(c"initWithContentRect:styleMask:backing:defer:"),
-                content_rect,
-                style_mask.bits(),
-                backing as NSUInteger,
-                if defer { 1 } else { 0 } as core::ffi::c_char,
-            )
-        };
-
-        unsafe { objc::Owned::from_ptr_unchecked(this as *mut Self) }
-    }
-
-    #[inline(always)]
-    pub fn make_key_and_order_front(&self, sender: *mut objc::Object) {
-        unsafe {
-            self.0
-                .send1(objc::Selector::get(c"makeKeyAndOrderFront:"), sender)
-        }
-    }
-
-    #[inline(always)]
-    pub fn center(&self) {
-        unsafe { self.0.send0(objc::Selector::get(c"center")) }
-    }
-
-    #[inline(always)]
-    pub fn set_title(&self, title: &NSString) {
-        unsafe {
-            self.0.send1(
-                objc::Selector::get(c"setTitle:"),
-                title.as_object() as *const _,
-            )
-        }
-    }
-
-    #[inline(always)]
-    pub fn set_content_view(&self, content_view: *mut objc::Object) {
-        unsafe {
-            self.0
-                .send1(objc::Selector::get(c"setContentView:"), content_view)
-        }
-    }
-}
 
 #[repr(transparent)]
 pub struct CAMetalLayer(objc::Object);
@@ -224,13 +146,18 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
 
         w.make_key_and_order_front(core::ptr::null_mut());
 
-        let pointer_input_manager = PointerInputManager::new();
+        let pointer_input_manager = PointerInputManager::new(640.0, 480.0);
 
         Self {
             layer,
             pointer_manager: UnsafeCell::new(pointer_input_manager),
             _marker: core::marker::PhantomData,
         }
+    }
+
+    pub const fn needs_window_command_buttons(&self) -> bool {
+        // macosは必ずシステム描画のものをつかう
+        false
     }
 
     pub unsafe fn create_vulkan_surface(
@@ -262,12 +189,20 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
         // do nothing for macos
     }
 
-    pub fn process_pending_events(&mut self) {
+    pub fn process_pending_events(&self) {
         // TODO: ここもあとで macosでwaylandと似たようなやり方できたっけな......
-        NSApplication::shared().run();
+        let app = NSApplication::shared();
+        while let Some(x) = app.next_event_matching_mask_until_date_in_mode_dequeue(
+            NSEventMask::ANY,
+            None,
+            unsafe { &*NSDefaultRunLoopMode },
+            true,
+        ) {
+            app.send_event(&x);
+        }
     }
 
-    pub fn request_next_frame(&mut self) {
+    pub fn request_next_frame(&self) {
         // TODO: これどうしよう
     }
 
@@ -301,9 +236,12 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
         tracing::warn!("TODO: toggle_maximize_restore");
     }
 
+    pub fn set_cursor_shape(&self, shape: CursorShape) {
+        tracing::warn!("TODO: set cursor shape");
+    }
+
     // このへんのwaylandべったりなやつなんとかしたい
     pub fn post_configure(&mut self, _serial: u32) {}
-    pub fn set_cursor_shape(&mut self, _enter_serial: u32, _shape: CursorShape) {}
 
     pub fn pointer_input_manager(&self) -> &UnsafeCell<PointerInputManager> {
         &self.pointer_manager

@@ -1,4 +1,4 @@
-#![cfg(unix)]
+#![cfg(target_os = "linux")]
 #![allow(non_camel_case_types)]
 
 use std::os::fd::AsRawFd;

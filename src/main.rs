@@ -1877,11 +1877,11 @@ async fn app_menu_on_save<'sys, 'subsystem>(
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub struct DesktopPortal {
     file_chooser: smol::lock::OnceCell<Option<DesktopPortalFileChooser>>,
 }
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 impl DesktopPortal {
     pub fn new() -> Self {
         Self {
@@ -1952,12 +1952,12 @@ impl DesktopPortal {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub struct DesktopPortalFileChooser {
     #[allow(dead_code)]
     version: u32,
 }
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 impl DesktopPortalFileChooser {
     /// https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.FileChooser.html#org-freedesktop-portal-filechooser-openfile
     pub async fn open_file(
@@ -2002,9 +2002,9 @@ impl DesktopPortalFileChooser {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub struct DesktopPortalRequestObject(desktop_portal_proto::ObjectPath);
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 impl DesktopPortalRequestObject {
     pub const fn new(object_path: desktop_portal_proto::ObjectPath) -> Self {
         Self(object_path)
@@ -2560,6 +2560,73 @@ impl SystemLink {
             [ref uri, ..] => Ok(Some(std::path::PathBuf::from(
                 desktop_portal_proto::file_chooser::uri_path_part(dbus_proto::cstr2str(uri)),
             ))),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub struct SystemLink {}
+#[cfg(target_os = "macos")]
+impl SystemLink {
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    #[tracing::instrument(
+        name = "SystemLink::select_sprite_files",
+        skip(self, for_shell),
+        ret(Debug)
+    )]
+    pub async fn select_sprite_files(
+        &self,
+        for_shell: &AppShell<'_, '_>,
+    ) -> Result<Vec<std::path::PathBuf>, SystemLinkError> {
+        // TODO: file chooser
+        Ok(Vec::new())
+    }
+
+    #[tracing::instrument(
+        name = "SystemLink::select_open_file",
+        skip(self, for_shell),
+        ret(Debug)
+    )]
+    pub async fn select_open_file(
+        &self,
+        for_shell: &AppShell<'_, '_>,
+    ) -> Result<Option<std::path::PathBuf>, SystemLinkError> {
+        // TODO: file chooser
+        Ok(None)
+    }
+
+    #[tracing::instrument(
+        name = "SystemLink::select_save_file",
+        skip(self, for_shell),
+        ret(Debug)
+    )]
+    pub async fn select_save_file(
+        &self,
+        for_shell: &AppShell<'_, '_>,
+    ) -> Result<Option<std::path::PathBuf>, SystemLinkError> {
+        // TODO: file chooser
+        Ok(None)
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, thiserror::Error)]
+pub enum SystemLinkError {
+    #[error("unrecoverable exception")]
+    UnrecoverableException(),
+}
+#[cfg(target_os = "macos")]
+impl SystemLinkError {
+    pub fn ui_feedback(self, events: &AppEventBus) {
+        match self {
+            Self::UnrecoverableException() => {
+                events.push(AppEvent::UIMessageDialogRequest {
+                    content: "Operation failed".into(),
+                });
+            }
         }
     }
 }

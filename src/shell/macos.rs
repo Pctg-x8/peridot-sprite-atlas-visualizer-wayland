@@ -2,14 +2,17 @@ use std::{cell::UnsafeCell, pin::Pin};
 
 use bedrock::{self as br, SurfaceCreateInfo};
 use objc_rt::{
-    self as objc, AsObject, NSObject, Owned,
+    self as objc, AsObject, NSObject,
     appkit::{
-        NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent, NSEventMask,
-        NSEventModifierFlags, NSEventType, NSMenu, NSWindow, NSWindowStyleMask,
+        NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent,
+        NSEventModifierFlags, NSEventType, NSMenu, NSWindow,
+        NSWindowDidChangeBackingPropertiesNotification, NSWindowStyleMask,
     },
     coreanimation::CADisplayLink,
-    corefoundation::{CGPoint, CGRect, CGSize},
-    foundation::{NSDate, NSDefaultRunLoopMode, NSRunLoop, NSString},
+    corefoundation::{CGFloat, CGPoint, CGRect, CGSize},
+    foundation::{
+        NSDate, NSDefaultRunLoopMode, NSNotification, NSNotificationCenter, NSRunLoop, NSString,
+    },
 };
 
 use crate::{
@@ -33,6 +36,13 @@ impl CAMetalLayer {
                 objc::Class::require(c"CAMetalLayer").send0o(objc::Selector::get(c"layer"))
                     as *mut Self,
             )
+        }
+    }
+
+    pub fn set_contents_scale(&self, scale: CGFloat) {
+        unsafe {
+            self.0
+                .send1(objc::Selector::get(c"setContentsScale:"), scale);
         }
     }
 }
@@ -107,8 +117,6 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
         ));
         w.center();
 
-        let layer = CAMetalLayer::new().expect("Failed to create CAMetalLayer");
-
         let custom_view_class = unsafe {
             objc::Class::allocate_pair(
                 Some(objc::Class::get(c"NSView").expect("no NSView class")),
@@ -140,13 +148,10 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                 unsafe {
                     objc::Super {
                         receiver: this,
-                        super_class: objc::Class::get(c"NSView").expect("no NSView class")
-                            as *mut _,
+                        super_class: objc::Class::require(c"NSView") as *mut _,
                     }
                     .send1o(objc::Selector::get(c"initWithFrame:"), frame.clone());
                 }
-
-                println!("init AppShellView with frame {frame:?}");
 
                 unsafe {
                     (*this).send1(objc::Selector::get(c"setLayer:"), layer);
@@ -169,8 +174,7 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                 unsafe {
                     objc::Super {
                         receiver: this,
-                        super_class: objc::Class::get(c"NSView").expect("no NSView class")
-                            as *mut _,
+                        super_class: objc::Class::require(c"NSView") as *mut _,
                     }
                     .send1(objc::Selector::get(c"setFrameSize:"), size);
                 }
@@ -180,8 +184,8 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                     &**(*this).get_ivar_by_name::<*const ShellWindowStateVars>(c"stateVars")
                 };
                 state_vars.events.push(AppEvent::ToplevelWindowNewSize {
-                    width_px: size.width as _,
-                    height_px: size.height as _,
+                    width_px: (size.width * 2.0) as _,
+                    height_px: (size.height * 2.0) as _,
                 });
             }
             extern "C" fn do_frame(
@@ -193,31 +197,37 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                 //     &**(*this).get_ivar_by_name::<*const ShellWindowStateVars>(c"stateVars")
                 // };
                 // state_vars.events.push(AppEvent::ToplevelWindowFrameTiming);
-                // let cached_ptr =
-                //     unsafe { *(*this).get_ivar_by_name::<*mut NSEvent>(c"doRenderEventCached") };
-                // if cached_ptr.is_null() {
-                let e = NSEvent::new_other(
-                    NSEventType::Periodic,
-                    CGPoint { x: 0.0, y: 0.0 },
-                    NSEventModifierFlags::empty(),
-                    unsafe { (*dp).timestamp() },
-                    0,
-                    None,
-                    0,
-                    1000,
-                    34645351683,
-                );
-                // unsafe {
-                //     (*this).set_ivar_by_name(c"doRenderEventCached", e.clone().leak());
-                // }
-                NSApplication::shared().post_event(&e, true);
-                e.leak();
-                // } else {
-                //     unsafe {
-                //         (*cached_ptr).retain();
-                //     }
-                //     NSApplication::shared().post_event(unsafe { &*cached_ptr }, true);
-                // }
+                let cached_ptr =
+                    unsafe { *(*this).get_ivar_by_name::<*mut NSEvent>(c"doRenderEventCached") };
+                if cached_ptr.is_null() {
+                    let e = NSEvent::new_other(
+                        NSEventType::Periodic,
+                        CGPoint { x: 0.0, y: 0.0 },
+                        NSEventModifierFlags::empty(),
+                        unsafe { (*dp).timestamp() },
+                        0,
+                        None,
+                        0,
+                        0,
+                        0,
+                    );
+                    unsafe {
+                        (*this).set_ivar_by_name(c"doRenderEventCached", e.clone().leak());
+                    }
+                    NSApplication::shared().post_event(&e, true);
+                } else {
+                    unsafe {
+                        (*cached_ptr).retain();
+                    }
+                    NSApplication::shared().post_event(unsafe { &*cached_ptr }, true);
+                }
+            }
+            extern "C" fn on_window_backing_properties_changed(
+                _this: *mut objc::Object,
+                _cmd: *const objc::Selector,
+                _notification: *mut NSNotification,
+            ) {
+                println!("TODO: backing properties changed");
             }
 
             custom_view_class.add_method(
@@ -257,9 +267,18 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                 >(do_frame),
                 c"v@:",
             );
+            custom_view_class.add_method(
+                objc::Selector::get(c"onWindowBackingPropertiesChanged"),
+                core::mem::transmute::<
+                    extern "C" fn(*mut objc::Object, *const objc::Selector, *mut NSNotification),
+                    objc::IMP,
+                >(on_window_backing_properties_changed),
+                c"v@:@",
+            );
             custom_view_class.register_pair();
         }
 
+        let layer = CAMetalLayer::new().expect("Failed to create CAMetalLayer");
         let content_view = unsafe { custom_view_class.send0o(objc::Selector::get(c"alloc")) };
         let content_view: *mut objc::Object = unsafe {
             (*content_view).send2v(
@@ -267,8 +286,8 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                 CGRect {
                     origin: CGPoint { x: 0.0, y: 0.0 },
                     size: CGSize {
-                        width: 640.0,
-                        height: 480.0,
+                        width: 640.0 / 2.0,
+                        height: 480.0 / 2.0,
                     },
                 },
                 layer.as_object(),
@@ -281,6 +300,13 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                 .set_ivar_by_name::<*mut NSEvent>(c"doRenderEventCached", core::ptr::null_mut());
         }
         w.set_content_view(content_view);
+
+        NSNotificationCenter::default().add_observer(
+            unsafe { &*content_view },
+            objc_rt::Selector::get(c"onWindowBackingPropertiesChanged"),
+            Some(unsafe { NSWindowDidChangeBackingPropertiesNotification }),
+            Some(&w),
+        );
 
         let support_thread_termination_flag =
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -309,6 +335,7 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
             .expect("Failed to spawn frame timing observation thread");
 
         w.make_key_and_order_front(core::ptr::null_mut());
+        layer.set_contents_scale(w.backing_scale_factor());
         nsapp.finish_launching();
 
         Self {

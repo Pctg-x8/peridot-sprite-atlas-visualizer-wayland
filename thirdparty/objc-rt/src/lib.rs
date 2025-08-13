@@ -328,6 +328,16 @@ impl Object {
     }
 
     #[inline(always)]
+    pub unsafe fn send4<A, B, C, D>(&self, sel: &Selector, a: A, b: B, c: C, d: D) {
+        unsafe {
+            (core::mem::transmute::<
+                unsafe extern "C" fn(),
+                unsafe extern "C" fn(*const Object, *const Selector, A, B, C, D),
+            >(objc_msgSend))(self as *const _, sel as *const _, a, b, c, d)
+        }
+    }
+
+    #[inline(always)]
     pub unsafe fn send4o<A, B, C, D>(&self, sel: &Selector, a: A, b: B, c: C, d: D) -> *mut Object {
         unsafe {
             (core::mem::transmute::<
@@ -381,6 +391,12 @@ impl Ivar {
 
 pub trait AsObject {
     fn as_object(&self) -> &Object;
+}
+impl AsObject for Object {
+    #[inline(always)]
+    fn as_object(&self) -> &Object {
+        self
+    }
 }
 
 pub trait NSObject: AsObject {
@@ -441,6 +457,12 @@ impl<T: NSObject + core::fmt::Debug> core::fmt::Debug for Owned<T> {
     #[inline(always)]
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         T::fmt(self, f)
+    }
+}
+impl<T: NSObject> AsObject for Owned<T> {
+    #[inline(always)]
+    fn as_object(&self) -> &Object {
+        unsafe { self.0.as_ref().as_object() }
     }
 }
 impl<T: NSObject> Owned<T> {

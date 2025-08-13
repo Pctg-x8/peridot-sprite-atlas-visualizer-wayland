@@ -264,3 +264,54 @@ impl NSDate {
         }
     }
 }
+
+#[repr(transparent)]
+pub struct NSNotification(Object);
+impl AsObject for NSNotification {
+    #[inline(always)]
+    fn as_object(&self) -> &Object {
+        &self.0
+    }
+}
+impl NSObject for NSNotification {}
+
+#[repr(transparent)]
+pub struct NSNotificationCenter(Object);
+impl AsObject for NSNotificationCenter {
+    #[inline(always)]
+    fn as_object(&self) -> &Object {
+        &self.0
+    }
+}
+impl NSObject for NSNotificationCenter {}
+impl NSNotificationCenter {
+    #[inline(always)]
+    pub fn default<'a>() -> &'a mut Self {
+        unsafe {
+            &mut *Class::require(c"NSNotificationCenter")
+                .send0r::<*mut Object>(Selector::get(c"defaultCenter"))
+                .cast::<Self>()
+        }
+    }
+
+    #[inline(always)]
+    pub fn add_observer<Observer: AsObject, Sender: AsObject>(
+        &self,
+        observer: &Observer,
+        selector: &Selector,
+        name: Option<NSNotificationName>,
+        object: Option<&Sender>,
+    ) {
+        unsafe {
+            self.0.send4(
+                Selector::get(c"addObserver:selector:name:object:"),
+                observer.as_object() as *const _,
+                selector as *const _,
+                name.map_or_else(core::ptr::null, |x| x as *const _),
+                object.map_or_else(core::ptr::null, |x| x.as_object() as *const _),
+            );
+        }
+    }
+}
+
+pub type NSNotificationName = *mut NSString;

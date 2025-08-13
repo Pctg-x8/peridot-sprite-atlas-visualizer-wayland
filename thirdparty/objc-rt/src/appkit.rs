@@ -4,8 +4,8 @@ use core::ffi::*;
 
 use crate::{
     AsObject, BOOL, Class, NSObject, Object, Owned, Selector,
-    corefoundation::{CGPoint, CGRect},
-    foundation::{NSDate, NSString},
+    corefoundation::{CGFloat, CGPoint, CGRect},
+    foundation::{NSDate, NSNotificationName, NSString},
 };
 
 #[cfg(target_pointer_width = "64")]
@@ -345,4 +345,13 @@ impl NSWindow {
                 .send1(Selector::get(c"setContentView:"), content_view)
         }
     }
+
+    #[inline(always)]
+    pub fn backing_scale_factor(&self) -> CGFloat {
+        unsafe { self.0.send0r(Selector::get(c"backingScaleFactor")) }
+    }
+}
+
+unsafe extern "C" {
+    pub static NSWindowDidChangeBackingPropertiesNotification: NSNotificationName;
 }

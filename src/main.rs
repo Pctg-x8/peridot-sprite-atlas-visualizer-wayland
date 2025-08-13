@@ -1254,8 +1254,26 @@ fn app_main<'sys, 'event_bus, 'subsystem>(
         }
         #[cfg(target_os = "macos")]
         {
-            // TODO: ここで止まってしまうのでメインループの仕組みごっそり変える必要がある
-            app_shell.process_pending_events();
+            let app = objc_rt::appkit::NSApplication::shared();
+            let mut frame_timing = false;
+            while let Some(x) = app.next_event_matching_mask_until_date_in_mode_dequeue(
+                objc_rt::appkit::NSEventMask::ANY,
+                None,
+                unsafe { &*objc_rt::foundation::NSDefaultRunLoopMode },
+                true,
+            ) {
+                if x.r#type() == objc_rt::appkit::NSEventType::Periodic {
+                    frame_timing = true;
+                    continue;
+                }
+
+                app.send_event(&x);
+                app.update_windows();
+            }
+
+            if frame_timing {
+                events.push(AppEvent::ToplevelWindowFrameTiming);
+            }
         }
 
         let current_ui_scale = app_shell.ui_scale_factor();

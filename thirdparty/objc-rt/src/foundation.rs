@@ -34,7 +34,7 @@ impl NSString {
 
     #[inline]
     pub fn utf8_string(&self) -> &core::ffi::CStr {
-        unsafe { core::ffi::CStr::from_ptr(self.0.send0v(Selector::get(c"UTF8String"))) }
+        unsafe { core::ffi::CStr::from_ptr(self.0.send0r(Selector::get(c"UTF8String"))) }
     }
 }
 
@@ -61,13 +61,15 @@ impl core::fmt::Debug for NSError {
 impl NSError {
     #[inline]
     pub fn code(&self) -> NSInteger {
-        unsafe { self.0.send0v(Selector::get(c"code")) }
+        unsafe { self.0.send0r(Selector::get(c"code")) }
     }
 
     #[inline]
     pub fn domain(&self) -> Owned<NSString> {
         unsafe {
-            Owned::from_ptr_unchecked(self.0.send0o(Selector::get(c"domain")) as *mut NSString)
+            Owned::from_ptr_unchecked(
+                self.0.send0r::<*mut Object>(Selector::get(c"domain")) as *mut NSString
+            )
         }
     }
 
@@ -75,7 +77,9 @@ impl NSError {
     pub fn localized_description(&self) -> Owned<NSString> {
         unsafe {
             Owned::from_ptr_unchecked(
-                self.0.send0o(Selector::get(c"localizedDescription")) as *mut NSString
+                self.0
+                    .send0r::<*mut Object>(Selector::get(c"localizedDescription"))
+                    as *mut NSString,
             )
         }
     }
@@ -95,7 +99,7 @@ impl NSURL {
         unsafe {
             Owned::from_ptr_unchecked(
                 self.0
-                    .send0v::<*mut NSString>(Selector::get(c"absoluteString")),
+                    .send0r::<*mut NSString>(Selector::get(c"absoluteString")),
             )
         }
     }
@@ -104,7 +108,7 @@ impl NSURL {
         unsafe {
             core::ffi::CStr::from_ptr(
                 self.0
-                    .send0v::<*const core::ffi::c_char>(Selector::get(c"fileSystemRepresentation")),
+                    .send0r::<*const core::ffi::c_char>(Selector::get(c"fileSystemRepresentation")),
             )
         }
     }
@@ -121,15 +125,52 @@ impl AsObject for NSRunLoop {
 impl NSObject for NSRunLoop {}
 impl NSRunLoop {
     #[inline]
-    pub fn main_run_loop() -> Owned<Self> {
+    pub fn main<'a>() -> &'a mut Self {
         unsafe {
-            Owned::from_ptr_unchecked(
-                Class::get(c"NSRunLoop")
-                    .expect("no NSRunLoop class")
-                    .send0o(Selector::get(c"mainRunLoop")) as *mut Self,
+            &mut *Class::require(c"NSRunLoop")
+                .send0o(Selector::get(c"mainRunLoop"))
+                .cast::<Self>()
+        }
+    }
+    #[inline]
+    pub fn current<'a>() -> &'a mut Self {
+        unsafe {
+            &mut *Class::require(c"NSRunLoop")
+                .send0o(Selector::get(c"currentRunLoop"))
+                .cast::<Self>()
+        }
+    }
+
+    #[inline(always)]
+    pub fn run(&mut self) {
+        unsafe { self.0.send0(Selector::get(c"run")) }
+    }
+
+    #[inline]
+    pub fn run_mode_before(&mut self, mode: NSRunLoopMode, before_date: &mut NSDate) -> bool {
+        unsafe {
+            self.0.send2v::<_, _, BOOL>(
+                Selector::get(c"runMode:beforeDate:"),
+                (*mode).as_object() as *const _,
+                before_date.as_object() as *const _,
+            ) != 0
+        }
+    }
+
+    #[inline]
+    pub fn run_until(&mut self, date: &mut NSDate) {
+        unsafe {
+            self.0.send1(
+                Selector::get(c"runUntilDate:"),
+                date.as_object() as *const _,
             )
         }
     }
+}
+
+pub type NSRunLoopMode = *mut NSString;
+unsafe extern "C" {
+    pub static NSDefaultRunLoopMode: NSRunLoopMode;
 }
 
 #[repr(u32)]
@@ -204,7 +245,22 @@ impl AsObject for NSDate {
     }
 }
 impl NSObject for NSDate {}
+impl NSDate {
+    #[inline]
+    pub fn distant_past<'a>() -> &'a mut Self {
+        unsafe {
+            &mut *Class::require(c"NSDate")
+                .send0o(Selector::get(c"distantPast"))
+                .cast::<Self>()
+        }
+    }
 
-unsafe extern "C" {
-    pub static NSDefaultRunLoopMode: *const NSString;
+    #[inline]
+    pub fn distant_future<'a>() -> &'a mut Self {
+        unsafe {
+            &mut *Class::require(c"NSDate")
+                .send0o(Selector::get(c"distantFuture"))
+                .cast::<Self>()
+        }
+    }
 }

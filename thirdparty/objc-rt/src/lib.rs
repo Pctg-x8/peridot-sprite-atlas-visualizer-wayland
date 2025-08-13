@@ -2,6 +2,7 @@ use core::ffi::*;
 use ffi_common::FFIOpaqueStruct;
 
 pub mod appkit;
+pub mod coreanimation;
 pub mod corefoundation;
 pub mod foundation;
 
@@ -26,6 +27,7 @@ pub struct Super {
 #[link(name = "objc")]
 unsafe extern "C" {
     pub unsafe fn objc_getClass(name: *const c_char) -> *mut Class;
+    pub unsafe fn objc_getRequiredClass(name: *const c_char) -> *mut Class;
     pub unsafe fn objc_msgSend();
     pub unsafe fn objc_msgSendSuper();
     pub unsafe fn objc_allocateClassPair(
@@ -37,6 +39,13 @@ unsafe extern "C" {
 
     pub unsafe fn sel_registerName(str: *const c_char) -> *mut Selector;
 
+    pub unsafe fn class_addIvar(
+        cls: *mut Class,
+        name: *const core::ffi::c_char,
+        size: usize,
+        alignment: u8,
+        types: *const core::ffi::c_char,
+    ) -> BOOL;
     pub unsafe fn class_addMethod(
         cls: *mut Class,
         name: *const Selector,
@@ -44,11 +53,37 @@ unsafe extern "C" {
         types: *const c_char,
     ) -> BOOL;
     pub unsafe fn class_getProperty(cls: *mut Class, name: *const c_char) -> *mut Property;
+
+    pub unsafe fn object_setInstanceVariable(
+        obj: *mut Object,
+        name: *const core::ffi::c_char,
+        value: *mut core::ffi::c_void,
+    ) -> *mut Ivar;
+    pub unsafe fn object_getInstanceVariable(
+        obj: *mut Object,
+        name: *const core::ffi::c_char,
+        outValue: *mut *mut core::ffi::c_void,
+    ) -> *mut Ivar;
+    pub unsafe fn object_getClass(obj: *mut Object) -> *mut Class;
+
+    pub unsafe fn class_getInstanceVariable(cls: *mut Class, name: *const c_char) -> *mut Ivar;
+
+    pub unsafe fn ivar_getOffset(v: *mut Ivar) -> isize;
 }
 
 impl Super {
     #[inline(always)]
-    pub fn send1o<A>(&self, sel: &Selector, a: A) -> *mut Object {
+    pub unsafe fn send1<A>(&self, sel: &Selector, a: A) {
+        unsafe {
+            (core::mem::transmute::<
+                unsafe extern "C" fn(),
+                unsafe extern "C" fn(*const Super, *const Selector, A),
+            >(objc_msgSendSuper))(self as *const _, sel as *const _, a)
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn send1o<A>(&self, sel: &Selector, a: A) -> *mut Object {
         unsafe {
             (core::mem::transmute::<
                 unsafe extern "C" fn(),
@@ -62,6 +97,11 @@ impl Class {
     #[inline(always)]
     pub fn get<'a>(name: &CStr) -> Option<&'a mut Self> {
         unsafe { objc_getClass(name.as_ptr()).as_mut() }
+    }
+
+    #[inline(always)]
+    pub fn require<'a>(name: &CStr) -> &'a mut Self {
+        unsafe { &mut *objc_getRequiredClass(name.as_ptr()) }
     }
 
     #[inline(always)]
@@ -86,8 +126,26 @@ impl Class {
     }
 
     #[inline(always)]
+    pub fn add_ivar(&mut self, name: &CStr, size: usize, alignment: u8, types: &CStr) -> bool {
+        unsafe {
+            class_addIvar(
+                self as *mut _,
+                name.as_ptr(),
+                size,
+                alignment,
+                types.as_ptr(),
+            ) != 0
+        }
+    }
+
+    #[inline(always)]
     pub fn add_method(&mut self, name: &Selector, imp: IMP, types: &CStr) -> bool {
         unsafe { class_addMethod(self as *mut _, name as *const _, imp, types.as_ptr()) != 0 }
+    }
+
+    #[inline(always)]
+    pub fn get_ivar(&mut self, name: &CStr) -> *mut Ivar {
+        unsafe { class_getInstanceVariable(self as *mut _, name.as_ptr()) }
     }
 
     #[inline(always)]
@@ -96,6 +154,16 @@ impl Class {
             (core::mem::transmute::<
                 unsafe extern "C" fn(),
                 unsafe extern "C" fn(*const Class, *const Selector),
+            >(objc_msgSend))(self as *const _, sel)
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn send0r<Ret>(&self, sel: &Selector) -> Ret {
+        unsafe {
+            (core::mem::transmute::<
+                unsafe extern "C" fn(),
+                unsafe extern "C" fn(*const Class, *const Selector) -> Ret,
             >(objc_msgSend))(self as *const _, sel)
         }
     }
@@ -119,9 +187,76 @@ impl Class {
             >(objc_msgSend))(self as *const _, sel, a)
         }
     }
+
+    #[inline(always)]
+    pub unsafe fn send2v<A, B, Ret>(&self, sel: &Selector, a: A, b: B) -> Ret {
+        unsafe {
+            (core::mem::transmute::<
+                unsafe extern "C" fn(),
+                unsafe extern "C" fn(*const Class, *const Selector, A, B) -> Ret,
+            >(objc_msgSend))(self as *const _, sel, a, b)
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn send9r<A, B, C, D, E, F, G, H, I, Ret>(
+        &self,
+        sel: &Selector,
+        a: A,
+        b: B,
+        c: C,
+        d: D,
+        e: E,
+        f: F,
+        g: G,
+        h: H,
+        i: I,
+    ) -> Ret {
+        unsafe {
+            (core::mem::transmute::<
+                unsafe extern "C" fn(),
+                unsafe extern "C" fn(
+                    *const Class,
+                    *const Selector,
+                    A,
+                    B,
+                    C,
+                    D,
+                    E,
+                    F,
+                    G,
+                    H,
+                    I,
+                ) -> Ret,
+            >(objc_msgSend))(self as *const _, sel, a, b, c, d, e, f, g, h, i)
+        }
+    }
 }
 
 impl Object {
+    #[inline(always)]
+    pub unsafe fn set_ivar_by_name<T>(&mut self, name: &CStr, value: T) {
+        let ivar = unsafe { (*self.get_class()).get_ivar(name) };
+        let offs = unsafe { (*ivar).offset() };
+
+        unsafe {
+            *(self as *mut Self).byte_offset(offs).cast::<T>() = value;
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn get_ivar_by_name<'x, T>(&'x mut self, name: &CStr) -> &'x T {
+        let ivar = unsafe { (*self.get_class()).get_ivar(name) };
+        let offs = unsafe { (*ivar).offset() };
+
+        unsafe { &*(self as *mut Self).byte_offset(offs).cast::<T>() }
+    }
+
+    #[inline(always)]
+    pub fn get_class(&mut self) -> *mut Class {
+        unsafe { object_getClass(self as *mut _) }
+    }
+
     #[inline(always)]
     pub unsafe fn send0(&self, sel: &Selector) {
         unsafe {
@@ -133,17 +268,7 @@ impl Object {
     }
 
     #[inline(always)]
-    pub unsafe fn send0o(&self, sel: &Selector) -> *mut Object {
-        unsafe {
-            (core::mem::transmute::<
-                unsafe extern "C" fn(),
-                unsafe extern "C" fn(*const Object, *const Selector) -> *mut Object,
-            >(objc_msgSend))(self as *const _, sel)
-        }
-    }
-
-    #[inline(always)]
-    pub unsafe fn send0v<Ret>(&self, sel: &Selector) -> Ret {
+    pub unsafe fn send0r<Ret>(&self, sel: &Selector) -> Ret {
         unsafe {
             (core::mem::transmute::<
                 unsafe extern "C" fn(),
@@ -163,22 +288,42 @@ impl Object {
     }
 
     #[inline(always)]
-    pub unsafe fn send1o<A>(&self, sel: &Selector, a: A) -> *mut Object {
+    pub unsafe fn send1r<A, Ret>(&self, sel: &Selector, a: A) -> Ret {
         unsafe {
             (core::mem::transmute::<
                 unsafe extern "C" fn(),
-                unsafe extern "C" fn(*const Object, *const Selector, A) -> *mut Object,
+                unsafe extern "C" fn(*const Object, *const Selector, A) -> Ret,
             >(objc_msgSend))(self as *const _, sel as *const _, a)
         }
     }
 
     #[inline(always)]
-    pub unsafe fn send2o<A, B>(&self, sel: &Selector, a: A, b: B) -> *mut Object {
+    pub unsafe fn send2<A, B>(&self, sel: &Selector, a: A, b: B) {
         unsafe {
             (core::mem::transmute::<
                 unsafe extern "C" fn(),
-                unsafe extern "C" fn(*const Object, *const Selector, A, B) -> *mut Object,
+                unsafe extern "C" fn(*const Object, *const Selector, A, B),
             >(objc_msgSend))(self as *const _, sel as *const _, a, b)
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn send2v<A, B, Ret>(&self, sel: &Selector, a: A, b: B) -> Ret {
+        unsafe {
+            (core::mem::transmute::<
+                unsafe extern "C" fn(),
+                unsafe extern "C" fn(*const Object, *const Selector, A, B) -> Ret,
+            >(objc_msgSend))(self as *const _, sel as *const _, a, b)
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn send3r<A, B, C, Ret>(&self, sel: &Selector, a: A, b: B, c: C) -> Ret {
+        unsafe {
+            (core::mem::transmute::<
+                unsafe extern "C" fn(),
+                unsafe extern "C" fn(*const Object, *const Selector, A, B, C) -> Ret,
+            >(objc_msgSend))(self as *const _, sel as *const _, a, b, c)
         }
     }
 
@@ -227,6 +372,13 @@ impl Selector {
     }
 }
 
+impl Ivar {
+    #[inline(always)]
+    pub fn offset(&mut self) -> isize {
+        unsafe { ivar_getOffset(self as *mut _) }
+    }
+}
+
 pub trait AsObject {
     fn as_object(&self) -> &Object;
 }
@@ -235,7 +387,8 @@ pub trait NSObject: AsObject {
     #[inline(always)]
     fn retain(&self) {
         unsafe {
-            self.as_object().send0o(Selector::get(c"retain"));
+            self.as_object()
+                .send0r::<*mut Object>(Selector::get(c"retain"));
         }
     }
 
@@ -249,6 +402,8 @@ pub trait NSObject: AsObject {
 
 #[repr(transparent)]
 pub struct Owned<T: NSObject>(core::ptr::NonNull<T>);
+unsafe impl<T: NSObject + Sync> Sync for Owned<T> {}
+unsafe impl<T: NSObject + Send> Send for Owned<T> {}
 impl<T: NSObject> Drop for Owned<T> {
     #[inline(always)]
     fn drop(&mut self) {
@@ -298,5 +453,11 @@ impl<T: NSObject> Owned<T> {
             Some(x) => Some(Self(x)),
             None => None,
         }
+    }
+
+    pub const fn leak(self) -> *mut T {
+        let ptr = self.0.as_ptr();
+        core::mem::forget(self);
+        ptr
     }
 }

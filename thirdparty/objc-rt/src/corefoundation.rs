@@ -23,3 +23,5 @@ pub struct CGRect {
     pub origin: CGPoint,
     pub size: CGSize,
 }
+
+pub type CFTimeInterval = c_double;

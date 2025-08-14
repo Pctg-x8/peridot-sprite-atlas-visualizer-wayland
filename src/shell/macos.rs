@@ -56,11 +56,11 @@ impl CAMetalLayer {
 
 struct ShellWindowStateVars<'event_bus> {
     events: &'event_bus AppEventBus,
+    pointer_manager: UnsafeCell<PointerInputManager>,
 }
 
 pub struct AppShell<'event_bus, 'subsystem> {
     layer: objc::Owned<CAMetalLayer>,
-    pointer_manager: UnsafeCell<PointerInputManager>,
     window_state_vars: Pin<Box<ShellWindowStateVars<'event_bus>>>,
     frame_timing_observation_thread: core::mem::ManuallyDrop<std::thread::JoinHandle<()>>,
     support_thread_termination_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -80,9 +80,10 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
         events: &'event_bus AppEventBus,
         _base_system: &mut AppBaseSystem<'subsystem>,
     ) -> Self {
-        let pointer_input_manager = PointerInputManager::new(640.0, 480.0);
-
-        let window_state_vars = Box::pin(ShellWindowStateVars { events });
+        let window_state_vars = Box::pin(ShellWindowStateVars {
+            events,
+            pointer_manager: UnsafeCell::new(PointerInputManager::new(640.0, 480.0)),
+        });
 
         let nsapp = NSApplication::shared();
         // Note: バンドルするとこれがデフォルトになるので不要になるらしい しばらくバンドルしないので指定しておく
@@ -156,7 +157,7 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                 unsafe {
                     objc::Super {
                         receiver: this,
-                        super_class: objc::Class::require(c"NSView") as *mut _,
+                        super_class: objc::Class::require(c"NSView"),
                     }
                     .send1o(objc::Selector::get(c"initWithFrame:"), frame.clone());
                 }
@@ -182,7 +183,7 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                 unsafe {
                     objc::Super {
                         receiver: this,
-                        super_class: objc::Class::require(c"NSView") as *mut _,
+                        super_class: objc::Class::require(c"NSView"),
                     }
                     .send1(objc::Selector::get(c"setFrameSize:"), size);
                 }
@@ -191,10 +192,15 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                 let state_vars = unsafe {
                     &**(*this).ivar_ref_by_name::<*const ShellWindowStateVars>(c"stateVars")
                 };
+                // TODO: *2.0はあとでちゃんとした値にする
                 state_vars.events.push(AppEvent::ToplevelWindowNewSize {
                     width_px: (size.width * 2.0) as _,
                     height_px: (size.height * 2.0) as _,
                 });
+                unsafe {
+                    (*state_vars.pointer_manager.get())
+                        .set_client_size((size.width * 2.0) as _, (size.height * 2.0) as _);
+                }
             }
             extern "C" fn update_tracking_areas(
                 this: *mut objc::Object,
@@ -203,7 +209,7 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                 unsafe {
                     objc::Super {
                         receiver: this,
-                        super_class: objc::Class::require(c"NSView") as *mut _,
+                        super_class: objc::Class::require(c"NSView"),
                     }
                     .send0(objc::Selector::get(c"updateTrackingAreas"));
                 }
@@ -233,14 +239,10 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                 _cmd: *const objc::Selector,
                 dp: *mut CADisplayLink,
             ) {
-                // let state_vars = unsafe {
-                //     &**(*this).get_ivar_by_name::<*const ShellWindowStateVars>(c"stateVars")
-                // };
-                // state_vars.events.push(AppEvent::ToplevelWindowFrameTiming);
-                let cached_ptr =
-                    unsafe { *(*this).ivar_ref_by_name::<*mut NSEvent>(c"doRenderEventCached") };
-                if cached_ptr.is_null() {
-                    let e = NSEvent::new_other(
+                let eptr =
+                    unsafe { (*this).ivar_ref_mut_by_name::<*mut NSEvent>(c"doRenderEventCached") };
+                if eptr.is_null() {
+                    *eptr = NSEvent::new_other(
                         NSEventType::Periodic,
                         CGPoint { x: 0.0, y: 0.0 },
                         NSEventModifierFlags::empty(),
@@ -250,17 +252,12 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                         0,
                         0,
                         0,
-                    );
-                    unsafe {
-                        *(*this).ivar_ref_mut_by_name(c"doRenderEventCached") = e.clone().leak();
-                    }
-                    NSApplication::shared().post_event(&e, true);
-                } else {
-                    unsafe {
-                        (*cached_ptr).retain();
-                    }
-                    NSApplication::shared().post_event(unsafe { &*cached_ptr }, true);
+                    )
+                    .leak();
                 }
+
+                NSApplication::shared()
+                    .post_event(unsafe { objc_rt::Owned::retain_ptr_unchecked(*eptr) }, true);
             }
             extern "C" fn on_window_backing_properties_changed(
                 _this: *mut objc::Object,
@@ -579,11 +576,12 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
 
         w.make_key_and_order_front(core::ptr::null_mut());
         layer.set_contents_scale(w.backing_scale_factor());
+
+        nsapp.activate();
         nsapp.finish_launching();
 
         Self {
             layer,
-            pointer_manager: UnsafeCell::new(pointer_input_manager),
             window_state_vars,
             frame_timing_observation_thread: core::mem::ManuallyDrop::new(
                 frame_timing_observation_thread,
@@ -682,7 +680,7 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
     pub fn post_configure(&mut self, _serial: u32) {}
 
     pub fn pointer_input_manager(&self) -> &UnsafeCell<PointerInputManager> {
-        &self.pointer_manager
+        &self.window_state_vars.pointer_manager
     }
 }
 

@@ -85,6 +85,13 @@ impl NSApplication {
     }
 
     #[inline(always)]
+    pub fn activate(&self) {
+        unsafe {
+            self.0.send0(Selector::get_cached(c"activate"));
+        }
+    }
+
+    #[inline(always)]
     pub fn set_main_menu(&self, menu: &NSMenu) {
         unsafe {
             self.0.send1(
@@ -138,7 +145,7 @@ impl NSApplication {
     }
 
     #[inline(always)]
-    pub fn post_event(&self, event: &NSEvent, at_start: bool) {
+    pub fn post_event(&self, event: Owned<NSEvent>, at_start: bool) {
         unsafe {
             self.0.send2(
                 Selector::get_cached(c"postEvent:atStart:"),
@@ -146,6 +153,9 @@ impl NSApplication {
                 if at_start { 1 } else { 0 } as BOOL,
             );
         }
+
+        // moved into objc
+        core::mem::forget(event);
     }
 
     #[inline(always)]
@@ -500,13 +510,12 @@ impl NSView for NSViewObject {}
 
 pub trait NSView: NSObject {
     #[inline(always)]
-    fn tracking_areas(&self) -> Owned<impl NSArray<Item = NSTrackingArea>> {
+    fn tracking_areas<'a>(&'a self) -> &'a impl NSArray<Item = NSTrackingArea> {
         unsafe {
-            Owned::from_ptr_unchecked(
-                self.as_object()
-                    .send0r::<*mut Object>(Selector::get_cached(c"trackingAreas"))
-                    .cast::<NSArrayObject<NSTrackingArea>>(),
-            )
+            &*self
+                .as_object()
+                .send0r::<*mut Object>(Selector::get_cached(c"trackingAreas"))
+                .cast::<NSArrayObject<NSTrackingArea>>()
         }
     }
 

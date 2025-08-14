@@ -4,6 +4,8 @@ use core::ffi::*;
 use ffi_common::FFIOpaqueStruct;
 use std::{cell::UnsafeCell, collections::HashMap};
 
+use crate::appkit::NSUInteger;
+
 pub mod appkit;
 pub mod coreanimation;
 pub mod corefoundation;
@@ -397,14 +399,22 @@ pub trait NSObject: AsObject {
     fn retain(&self) {
         unsafe {
             self.as_object()
-                .send0r::<*mut Object>(Selector::get(c"retain"));
+                .send0r::<*mut Object>(Selector::get_cached(c"retain"));
         }
     }
 
     #[inline(always)]
     fn release(&self) {
         unsafe {
-            self.as_object().send0(Selector::get(c"release"));
+            self.as_object().send0(Selector::get_cached(c"release"));
+        }
+    }
+
+    #[inline(always)]
+    fn retain_count(&self) -> NSUInteger {
+        unsafe {
+            self.as_object()
+                .send0r(Selector::get_cached(c"retainCount"))
         }
     }
 }
@@ -416,7 +426,7 @@ unsafe impl<T: NSObject + Send> Send for Owned<T> {}
 impl<T: NSObject> Drop for Owned<T> {
     #[inline(always)]
     fn drop(&mut self) {
-        tracing::debug!(target: "objc_rt::drop_checker", type_name = ?core::any::type_name::<T>(), "Dropping Objc object");
+        tracing::debug!(target: "objc_rt::drop_checker", type_name = ?core::any::type_name::<T>(), retain_count = unsafe { self.0.as_ref().retain_count() }, "Dropping Objc object");
         unsafe {
             self.0.as_ref().release();
         }
@@ -473,6 +483,15 @@ impl<T: NSObject> Owned<T> {
             Some(x) => Some(Self(x)),
             None => None,
         }
+    }
+
+    pub unsafe fn retain_ptr_unchecked(ptr: *mut T) -> Self {
+        let x = unsafe { core::ptr::NonNull::new_unchecked(ptr) };
+        unsafe {
+            x.as_ref().retain();
+        }
+
+        Self(x)
     }
 
     pub const fn leak(self) -> *mut T {

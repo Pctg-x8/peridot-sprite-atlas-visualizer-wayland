@@ -371,16 +371,6 @@ impl Ivar {
 pub trait AsObject {
     fn as_object(&self) -> &Object;
     fn as_object_mut(&mut self) -> &mut Object;
-
-    #[inline(always)]
-    unsafe fn ivar_ref_by_name<'x, T>(&'x self, name: &CStr) -> &'x T {
-        unsafe { self.as_object().ivar_ref_by_name(name) }
-    }
-
-    #[inline(always)]
-    unsafe fn ivar_ref_mut_by_name<'x, T>(&'x mut self, name: &CStr) -> &'x mut T {
-        unsafe { self.as_object_mut().ivar_ref_mut_by_name(name) }
-    }
 }
 impl AsObject for Object {
     #[inline(always)]
@@ -418,6 +408,7 @@ pub trait NSObject: AsObject {
         }
     }
 }
+impl<T: NSObject> NSObject for Owned<T> {}
 
 #[repr(transparent)]
 pub struct Owned<T: NSObject>(core::ptr::NonNull<T>);

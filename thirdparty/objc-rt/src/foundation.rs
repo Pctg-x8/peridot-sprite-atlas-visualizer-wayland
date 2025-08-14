@@ -342,12 +342,12 @@ impl NSNotificationCenter {
     }
 
     #[inline(always)]
-    pub fn add_observer<Observer: AsObject, Sender: AsObject>(
+    pub fn add_observer(
         &self,
-        observer: &Observer,
+        observer: &(impl AsObject + ?Sized),
         selector: &Selector,
         name: Option<NSNotificationName>,
-        object: Option<&Sender>,
+        object: Option<&(impl AsObject + ?Sized)>,
     ) {
         unsafe {
             self.0.send4(

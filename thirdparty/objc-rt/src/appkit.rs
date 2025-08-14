@@ -413,10 +413,12 @@ impl NSWindow {
     }
 
     #[inline(always)]
-    pub fn set_content_view(&self, content_view: *mut Object) {
+    pub fn set_content_view(&self, content_view: &(impl NSView + ?Sized)) {
         unsafe {
-            self.0
-                .send1(Selector::get_cached(c"setContentView:"), content_view)
+            self.0.send1(
+                Selector::get_cached(c"setContentView:"),
+                content_view.as_object() as *const _,
+            )
         }
     }
 
@@ -436,6 +438,7 @@ impl NSWindow {
     }
 }
 
+#[link(name = "AppKit", kind = "framework")]
 unsafe extern "C" {
     pub static NSWindowDidChangeBackingPropertiesNotification: NSNotificationName;
 }
@@ -556,7 +559,22 @@ pub trait NSView: NSObject {
             )
         }
     }
+
+    #[inline(always)]
+    fn layer(&self) -> Option<*mut Object> {
+        let p = unsafe {
+            self.as_object()
+                .send0r::<*mut Object>(Selector::get_cached(c"layer"))
+        };
+        if p.is_null() { None } else { Some(p) }
+    }
+
+    #[inline(always)]
+    unsafe fn layer_ensure_exists(&self) -> *mut Object {
+        unsafe { self.as_object().send0r(Selector::get_cached(c"layer")) }
+    }
 }
+impl<T: NSView> NSView for Owned<T> {}
 
 #[repr(transparent)]
 pub struct NSCursor(Object);

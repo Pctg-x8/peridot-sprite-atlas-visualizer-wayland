@@ -5,13 +5,14 @@ use objc_rt::{
     self as objc, AsObject, NSObject,
     appkit::{
         NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent,
-        NSEventModifierFlags, NSEventType, NSMenu, NSWindow,
-        NSWindowDidChangeBackingPropertiesNotification, NSWindowStyleMask,
+        NSEventModifierFlags, NSEventType, NSMenu, NSTrackingArea, NSTrackingAreaOptions, NSView,
+        NSViewObject, NSWindow, NSWindowDidChangeBackingPropertiesNotification, NSWindowStyleMask,
     },
     coreanimation::CADisplayLink,
     corefoundation::{CGFloat, CGPoint, CGRect, CGSize},
     foundation::{
-        NSDate, NSDefaultRunLoopMode, NSNotification, NSNotificationCenter, NSRunLoop, NSString,
+        NSArray, NSDate, NSDefaultRunLoopMode, NSNotification, NSNotificationCenter, NSRunLoop,
+        NSString,
     },
 };
 
@@ -116,6 +117,7 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
             c"Peridot SpriteAtlas Visualizer/Editor",
         ));
         w.center();
+        w.set_accepts_mouse_moved_events(true);
 
         let custom_view_class = unsafe {
             objc::Class::allocate_pair(
@@ -188,6 +190,38 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                     height_px: (size.height * 2.0) as _,
                 });
             }
+            extern "C" fn update_tracking_areas(
+                this: *mut objc::Object,
+                _sel: *const objc::Selector,
+            ) {
+                unsafe {
+                    objc::Super {
+                        receiver: this,
+                        super_class: objc::Class::require(c"NSView") as *mut _,
+                    }
+                    .send0(objc::Selector::get(c"updateTrackingAreas"));
+                }
+
+                let this = unsafe { &mut *this.cast::<NSViewObject>() };
+                let tracking_areas = this.tracking_areas();
+                for n in 0..tracking_areas.count() {
+                    this.remove_tracking_area(tracking_areas.object_at_index(n));
+                }
+
+                let current_bounds = this.bounds();
+                if current_bounds.size.width as i64 == 0 || current_bounds.size.height as i64 == 0 {
+                    // zero sized
+                    return;
+                }
+                this.add_tracking_area(NSTrackingArea::new(
+                    current_bounds,
+                    NSTrackingAreaOptions::MOUSE_ENTERED_AND_EXITED
+                        | NSTrackingAreaOptions::MOUSE_MOVED
+                        | NSTrackingAreaOptions::ACTIVE_ALWAYS,
+                    this,
+                    None,
+                ));
+            }
             extern "C" fn do_frame(
                 this: *mut objc::Object,
                 _cmd: *const objc::Selector,
@@ -229,6 +263,127 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
             ) {
                 println!("TODO: backing properties changed");
             }
+            extern "C" fn mouse_down(
+                this: *mut objc::Object,
+                _cmd: *const objc::Selector,
+                e: *mut NSEvent,
+            ) {
+                let this = unsafe { &mut *this.cast::<NSViewObject>() };
+                let p = unsafe { (*e).location_in_window() };
+                let mut pv = this.convert_point_from_view(p, None);
+
+                // flip y
+                pv.y = this.bounds().size.height - pv.y;
+
+                let stv = unsafe {
+                    &**this
+                        .as_object()
+                        .get_ivar_by_name::<*const ShellWindowStateVars>(c"stateVars")
+                };
+                stv.events.push(AppEvent::MainWindowPointerMove {
+                    surface_x: pv.x as _,
+                    surface_y: pv.y as _,
+                });
+                // TODO: おそらく差分検知が必要
+                if unsafe { (*e).r#type() } == NSEventType::LeftMouseDown {
+                    stv.events.push(AppEvent::MainWindowPointerLeftDown);
+                }
+            }
+            extern "C" fn mouse_up(
+                this: *mut objc::Object,
+                _cmd: *const objc::Selector,
+                e: *mut NSEvent,
+            ) {
+                let this = unsafe { &mut *this.cast::<NSViewObject>() };
+                let p = unsafe { (*e).location_in_window() };
+                let mut pv = this.convert_point_from_view(p, None);
+
+                // flip y
+                pv.y = this.bounds().size.height - pv.y;
+
+                let stv = unsafe {
+                    &**this
+                        .as_object()
+                        .get_ivar_by_name::<*const ShellWindowStateVars>(c"stateVars")
+                };
+                stv.events.push(AppEvent::MainWindowPointerMove {
+                    surface_x: pv.x as _,
+                    surface_y: pv.y as _,
+                });
+                if unsafe { (*e).r#type() } == NSEventType::LeftMouseUp {
+                    stv.events.push(AppEvent::MainWindowPointerLeftUp);
+                }
+            }
+            extern "C" fn mouse_moved(
+                this: *mut objc::Object,
+                _cmd: *const objc::Selector,
+                e: *mut NSEvent,
+            ) {
+                let this = unsafe { &mut *this.cast::<NSViewObject>() };
+                let p = unsafe { (*e).location_in_window() };
+                let mut pv = this.convert_point_from_view(p, None);
+
+                // flip y
+                pv.y = this.bounds().size.height - pv.y;
+
+                let stv = unsafe {
+                    &**this
+                        .as_object()
+                        .get_ivar_by_name::<*const ShellWindowStateVars>(c"stateVars")
+                };
+                stv.events.push(AppEvent::MainWindowPointerMove {
+                    surface_x: pv.x as _,
+                    surface_y: pv.y as _,
+                });
+            }
+            extern "C" fn mouse_entered(
+                this: *mut objc::Object,
+                _cmd: *const objc::Selector,
+                e: *mut NSEvent,
+            ) {
+                println!("mouse entered");
+
+                let this = unsafe { &mut *this.cast::<NSViewObject>() };
+                let p = unsafe { (*e).location_in_window() };
+                let mut pv = this.convert_point_from_view(p, None);
+
+                // flip y
+                pv.y = this.bounds().size.height - pv.y;
+
+                let stv = unsafe {
+                    &**this
+                        .as_object()
+                        .get_ivar_by_name::<*const ShellWindowStateVars>(c"stateVars")
+                };
+                stv.events.push(AppEvent::MainWindowPointerMove {
+                    surface_x: pv.x as _,
+                    surface_y: pv.y as _,
+                });
+            }
+            extern "C" fn mouse_exited(
+                this: *mut objc::Object,
+                _cmd: *const objc::Selector,
+                e: *mut NSEvent,
+            ) {
+                println!("mouse exited");
+
+                let this = unsafe { &mut *this.cast::<NSViewObject>() };
+                let p = unsafe { (*e).location_in_window() };
+                let mut pv = this.convert_point_from_view(p, None);
+
+                // flip y
+                pv.y = this.bounds().size.height - pv.y;
+
+                let stv = unsafe {
+                    &**this
+                        .as_object()
+                        .get_ivar_by_name::<*const ShellWindowStateVars>(c"stateVars")
+                };
+                stv.events.push(AppEvent::MainWindowPointerMove {
+                    surface_x: pv.x as _,
+                    surface_y: pv.y as _,
+                });
+            }
 
             custom_view_class.add_method(
                 objc::Selector::get(c"initWithFrame:layer:"),
@@ -260,6 +415,14 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                 c"v@:{CGSize=dd}",
             );
             custom_view_class.add_method(
+                objc::Selector::get(c"updateTrackingAreas"),
+                core::mem::transmute::<
+                    extern "C" fn(*mut objc::Object, *const objc::Selector),
+                    objc::IMP,
+                >(update_tracking_areas),
+                c"v@:",
+            );
+            custom_view_class.add_method(
                 objc::Selector::get(c"doFrame"),
                 core::mem::transmute::<
                     extern "C" fn(*mut objc::Object, *const objc::Selector, *mut CADisplayLink),
@@ -275,13 +438,61 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                 >(on_window_backing_properties_changed),
                 c"v@:@",
             );
+            custom_view_class.add_method(
+                objc::Selector::get(c"mouseDown:"),
+                core::mem::transmute::<
+                    extern "C" fn(*mut objc::Object, *const objc::Selector, *mut NSEvent),
+                    objc::IMP,
+                >(mouse_down),
+                c"v@:@",
+            );
+            custom_view_class.add_method(
+                objc::Selector::get(c"mouseUp:"),
+                core::mem::transmute::<
+                    extern "C" fn(*mut objc::Object, *const objc::Selector, *mut NSEvent),
+                    objc::IMP,
+                >(mouse_up),
+                c"v@:@",
+            );
+            custom_view_class.add_method(
+                objc::Selector::get(c"mouseMoved:"),
+                core::mem::transmute::<
+                    extern "C" fn(*mut objc::Object, *const objc::Selector, *mut NSEvent),
+                    objc::IMP,
+                >(mouse_moved),
+                c"v@:@",
+            );
+            custom_view_class.add_method(
+                objc::Selector::get(c"mouseEntered:"),
+                core::mem::transmute::<
+                    extern "C" fn(*mut objc::Object, *const objc::Selector, *mut NSEvent),
+                    objc::IMP,
+                >(mouse_entered),
+                c"v@:@",
+            );
+            custom_view_class.add_method(
+                objc::Selector::get(c"mouseExited:"),
+                core::mem::transmute::<
+                    extern "C" fn(*mut objc::Object, *const objc::Selector, *mut NSEvent),
+                    objc::IMP,
+                >(mouse_exited),
+                c"v@:@",
+            );
+            custom_view_class.add_method(
+                objc::Selector::get(c"cursorUpdate:"),
+                core::mem::transmute::<
+                    extern "C" fn(*mut objc::Object, *const objc::Selector, *mut NSEvent),
+                    objc::IMP,
+                >(mouse_exited),
+                c"v@:@",
+            );
             custom_view_class.register_pair();
         }
 
         let layer = CAMetalLayer::new().expect("Failed to create CAMetalLayer");
         let content_view = unsafe { custom_view_class.send0o(objc::Selector::get(c"alloc")) };
         let content_view: *mut objc::Object = unsafe {
-            (*content_view).send2v(
+            (*content_view).send2r(
                 objc::Selector::get(c"initWithFrame:layer:"),
                 CGRect {
                     origin: CGPoint { x: 0.0, y: 0.0 },

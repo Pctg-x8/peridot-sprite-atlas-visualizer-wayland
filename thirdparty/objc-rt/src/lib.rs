@@ -1,3 +1,5 @@
+#![allow(non_camel_case_types)]
+
 use core::ffi::*;
 use ffi_common::FFIOpaqueStruct;
 
@@ -71,7 +73,19 @@ unsafe extern "C" {
     pub unsafe fn ivar_getOffset(v: *mut Ivar) -> isize;
 }
 
+pub type objc_uncaught_exception_handler = extern "C" fn(exception: *mut Object);
+
 impl Super {
+    #[inline(always)]
+    pub unsafe fn send0(&self, sel: &Selector) {
+        unsafe {
+            (core::mem::transmute::<
+                unsafe extern "C" fn(),
+                unsafe extern "C" fn(*const Super, *const Selector),
+            >(objc_msgSendSuper))(self as *const _, sel as *const _)
+        }
+    }
+
     #[inline(always)]
     pub unsafe fn send1<A>(&self, sel: &Selector, a: A) {
         unsafe {
@@ -245,16 +259,17 @@ impl Object {
     }
 
     #[inline(always)]
-    pub unsafe fn get_ivar_by_name<'x, T>(&'x mut self, name: &CStr) -> &'x T {
+    pub unsafe fn get_ivar_by_name<'x, T>(&'x self, name: &CStr) -> &'x T {
         let ivar = unsafe { (*self.get_class()).get_ivar(name) };
         let offs = unsafe { (*ivar).offset() };
 
-        unsafe { &*(self as *mut Self).byte_offset(offs).cast::<T>() }
+        unsafe { &*(self as *const Self).byte_offset(offs).cast::<T>() }
     }
 
     #[inline(always)]
-    pub fn get_class(&mut self) -> *mut Class {
-        unsafe { object_getClass(self as *mut _) }
+    pub fn get_class(&self) -> *mut Class {
+        // TODO: 明示的にObjectが!Freezeであることをなんとか明示したい
+        unsafe { object_getClass(self as *const _ as *mut _) }
     }
 
     #[inline(always)]
@@ -308,7 +323,7 @@ impl Object {
     }
 
     #[inline(always)]
-    pub unsafe fn send2v<A, B, Ret>(&self, sel: &Selector, a: A, b: B) -> Ret {
+    pub unsafe fn send2r<A, B, Ret>(&self, sel: &Selector, a: A, b: B) -> Ret {
         unsafe {
             (core::mem::transmute::<
                 unsafe extern "C" fn(),
@@ -348,7 +363,7 @@ impl Object {
     }
 
     #[inline(always)]
-    pub unsafe fn send4v<A, B, C, D, Ret>(&self, sel: &Selector, a: A, b: B, c: C, d: D) -> Ret {
+    pub unsafe fn send4r<A, B, C, D, Ret>(&self, sel: &Selector, a: A, b: B, c: C, d: D) -> Ret {
         unsafe {
             (core::mem::transmute::<
                 unsafe extern "C" fn(),

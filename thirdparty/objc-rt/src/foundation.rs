@@ -149,7 +149,7 @@ impl NSRunLoop {
     #[inline]
     pub fn run_mode_before(&mut self, mode: NSRunLoopMode, before_date: &mut NSDate) -> bool {
         unsafe {
-            self.0.send2v::<_, _, BOOL>(
+            self.0.send2r::<_, _, BOOL>(
                 Selector::get(c"runMode:beforeDate:"),
                 (*mode).as_object() as *const _,
                 before_date.as_object() as *const _,
@@ -315,3 +315,40 @@ impl NSNotificationCenter {
 }
 
 pub type NSNotificationName = *mut NSString;
+
+#[repr(transparent)]
+pub struct NSArrayObject<T: NSObject>(Object, core::marker::PhantomData<T>);
+impl<T: NSObject> AsObject for NSArrayObject<T> {
+    #[inline(always)]
+    fn as_object(&self) -> &Object {
+        &self.0
+    }
+}
+impl<T: NSObject> NSObject for NSArrayObject<T> {}
+impl<T: NSObject> NSArray for NSArrayObject<T> {
+    type Item = T;
+}
+
+pub trait NSArray: NSObject {
+    type Item: NSObject;
+
+    #[inline(always)]
+    fn count(&self) -> NSUInteger {
+        unsafe { self.as_object().send0r(Selector::get(c"count")) }
+    }
+
+    #[inline(always)]
+    fn object_at_index<'a>(&'a self, index: NSUInteger) -> &'a Self::Item {
+        unsafe {
+            &*self
+                .as_object()
+                .send1r::<_, *mut Object>(Selector::get(c"objectAtIndex:"), index)
+                .cast::<Self::Item>()
+        }
+    }
+}
+
+pub type NSUncaughtExceptionHandler = extern "C" fn(exception: *mut Object);
+unsafe extern "C" {
+    pub fn NSSetUncaughtExceptionHandler(handler: NSUncaughtExceptionHandler);
+}

@@ -780,6 +780,15 @@ fn main() {
     std::panic::set_hook(Box::new(move |info| {
         tracing::error!(%info, "application panic");
     }));
+    #[cfg(target_os = "macos")]
+    unsafe {
+        extern "C" fn fault_exc_handler(exc: *mut objc_rt::Object) {
+            tracing::error!(target: "objc_fault_exc", ?exc, "Uncaught Objective-C exception!");
+            std::process::abort();
+        }
+
+        objc_rt::foundation::NSSetUncaughtExceptionHandler(fault_exc_handler);
+    }
 
     tracing::info!("Initializing BaseSystem...");
     let setup_timer = std::time::Instant::now();

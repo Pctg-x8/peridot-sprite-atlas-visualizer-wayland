@@ -5,7 +5,7 @@ use core::ffi::*;
 use crate::{
     AsObject, BOOL, Class, NSObject, Object, Owned, Selector,
     corefoundation::{CGFloat, CGPoint, CGRect},
-    foundation::{NSDate, NSNotificationName, NSString},
+    foundation::{NSArray, NSArrayObject, NSDate, NSNotificationName, NSString},
 };
 
 #[cfg(target_pointer_width = "64")]
@@ -31,6 +31,8 @@ pub enum NSBackingStoreType {
 #[cfg_attr(target_pointer_width = "64", repr(u64))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum NSEventType {
+    LeftMouseDown = 1,
+    LeftMouseUp = 2,
     ApplicationDefined = 15,
     Periodic = 16,
 }
@@ -98,7 +100,7 @@ impl NSApplication {
         dequeue: bool,
     ) -> Option<Owned<NSEvent>> {
         unsafe {
-            Owned::from_ptr(self.0.send4v(
+            Owned::from_ptr(self.0.send4r(
                 Selector::get(c"nextEventMatchingMask:untilDate:inMode:dequeue:"),
                 mask.bits(),
                 until.map_or_else(core::ptr::null, |x| x.as_object() as *const _),
@@ -284,6 +286,16 @@ impl NSEvent {
             Some(unsafe { &*p })
         }
     }
+
+    #[inline(always)]
+    pub fn location_in_window(&self) -> CGPoint {
+        unsafe { self.0.send0r(Selector::get(c"locationInWindow")) }
+    }
+
+    #[inline(always)]
+    pub fn button_number(&self) -> NSInteger {
+        unsafe { self.0.send0r(Selector::get(c"buttonNumber")) }
+    }
 }
 
 #[repr(transparent)]
@@ -350,8 +362,127 @@ impl NSWindow {
     pub fn backing_scale_factor(&self) -> CGFloat {
         unsafe { self.0.send0r(Selector::get(c"backingScaleFactor")) }
     }
+
+    #[inline(always)]
+    pub fn set_accepts_mouse_moved_events(&self, accepts: bool) {
+        unsafe {
+            self.0.send1(
+                Selector::get(c"setAcceptsMouseMovedEvents:"),
+                if accepts { 1 } else { 0 } as BOOL,
+            );
+        }
+    }
 }
 
 unsafe extern "C" {
     pub static NSWindowDidChangeBackingPropertiesNotification: NSNotificationName;
+}
+
+#[repr(transparent)]
+pub struct NSTrackingArea(Object);
+impl AsObject for NSTrackingArea {
+    #[inline(always)]
+    fn as_object(&self) -> &Object {
+        &self.0
+    }
+}
+impl NSObject for NSTrackingArea {}
+impl NSTrackingArea {
+    pub fn new<Owner: AsObject>(
+        rect: CGRect,
+        options: NSTrackingAreaOptions,
+        owner: &Owner,
+        userinfo: Option<*mut Object>,
+    ) -> Owned<Self> {
+        let x = unsafe {
+            Owned::from_ptr_unchecked(
+                Class::require(c"NSTrackingArea")
+                    .send0r::<*mut Object>(Selector::get(c"alloc"))
+                    .cast::<Self>(),
+            )
+        };
+        unsafe {
+            x.as_object().send4r::<_, _, _, _, *mut Object>(
+                Selector::get(c"initWithRect:options:owner:userInfo:"),
+                rect,
+                options.bits(),
+                owner.as_object() as *const _ as *mut Object,
+                userinfo.unwrap_or(core::ptr::null_mut()),
+            );
+        }
+
+        x
+    }
+}
+
+bitflags! {
+    #[derive(Debug, Clone, Copy)]
+    pub struct NSTrackingAreaOptions : NSUInteger {
+        const MOUSE_ENTERED_AND_EXITED = 0x01;
+        const MOUSE_MOVED = 0x02;
+        const ACTIVE_ALWAYS = 0x80;
+        const ENABLED_DURING_MOUSE_DRAG = 0x400;
+    }
+}
+
+#[repr(transparent)]
+pub struct NSViewObject(Object);
+impl AsObject for NSViewObject {
+    #[inline(always)]
+    fn as_object(&self) -> &Object {
+        &self.0
+    }
+}
+impl NSObject for NSViewObject {}
+impl NSView for NSViewObject {}
+
+pub trait NSView: NSObject {
+    #[inline(always)]
+    fn tracking_areas(&self) -> Owned<impl NSArray<Item = NSTrackingArea>> {
+        unsafe {
+            Owned::from_ptr_unchecked(
+                self.as_object()
+                    .send0r::<*mut Object>(Selector::get(c"trackingAreas"))
+                    .cast::<NSArrayObject<NSTrackingArea>>(),
+            )
+        }
+    }
+
+    #[inline(always)]
+    fn add_tracking_area(&self, area: Owned<NSTrackingArea>) {
+        unsafe {
+            self.as_object().send1(
+                Selector::get(c"addTrackingArea:"),
+                area.as_object() as *const _,
+            );
+        }
+        // object moved into objc
+        core::mem::forget(area);
+    }
+
+    #[inline(always)]
+    fn remove_tracking_area(&self, area: &NSTrackingArea) {
+        unsafe {
+            self.as_object().send1(
+                Selector::get(c"removeTrackingArea:"),
+                area.as_object() as *const _,
+            );
+        }
+    }
+
+    #[inline(always)]
+    fn bounds(&self) -> CGRect {
+        unsafe { self.as_object().send0r(Selector::get(c"bounds")) }
+    }
+
+    #[inline(always)]
+    fn convert_point_from_view(&self, point: CGPoint, from_view: Option<&NSViewObject>) -> CGPoint {
+        unsafe {
+            self.as_object().send2r(
+                Selector::get(c"convertPoint:fromView:"),
+                point,
+                from_view.map_or_else(core::ptr::null, |x| x.as_object() as *const _),
+            )
+        }
+    }
 }

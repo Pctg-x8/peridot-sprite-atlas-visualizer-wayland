@@ -290,10 +290,7 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                     surface_x: pv.x as _,
                     surface_y: pv.y as _,
                 });
-                // TODO: おそらく差分検知が必要
-                if unsafe { (*e).r#type() } == NSEventType::LeftMouseDown {
-                    stv.events.push(AppEvent::MainWindowPointerLeftDown);
-                }
+                stv.events.push(AppEvent::MainWindowPointerLeftDown);
             }
             extern "C" fn mouse_up(
                 this: *mut objc::Object,
@@ -316,11 +313,31 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                     surface_x: pv.x as _,
                     surface_y: pv.y as _,
                 });
-                if unsafe { (*e).r#type() } == NSEventType::LeftMouseUp {
-                    stv.events.push(AppEvent::MainWindowPointerLeftUp);
-                }
+                stv.events.push(AppEvent::MainWindowPointerLeftUp);
             }
             extern "C" fn mouse_moved(
+                this: *mut objc::Object,
+                _cmd: *const objc::Selector,
+                e: *mut NSEvent,
+            ) {
+                let this = unsafe { &mut *this.cast::<NSViewObject>() };
+                let p = unsafe { (*e).location_in_window() };
+                let mut pv = this.convert_point_from_view(p, None);
+
+                // flip y
+                pv.y = this.bounds().size.height - pv.y;
+
+                let stv = unsafe {
+                    &**this
+                        .as_object()
+                        .ivar_ref_by_name::<*const ShellWindowStateVars>(c"stateVars")
+                };
+                stv.events.push(AppEvent::MainWindowPointerMove {
+                    surface_x: pv.x as _,
+                    surface_y: pv.y as _,
+                });
+            }
+            extern "C" fn mouse_dragged(
                 this: *mut objc::Object,
                 _cmd: *const objc::Selector,
                 e: *mut NSEvent,
@@ -466,6 +483,14 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                     extern "C" fn(*mut objc::Object, *const objc::Selector, *mut NSEvent),
                     objc::IMP,
                 >(mouse_moved),
+                c"v@:@",
+            );
+            custom_view_class.add_method(
+                objc::Selector::get(c"mouseDragged:"),
+                core::mem::transmute::<
+                    extern "C" fn(*mut objc::Object, *const objc::Selector, *mut NSEvent),
+                    objc::IMP,
+                >(mouse_dragged),
                 c"v@:@",
             );
             custom_view_class.add_method(

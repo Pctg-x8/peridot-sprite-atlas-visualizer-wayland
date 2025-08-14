@@ -486,3 +486,66 @@ pub trait NSView: NSObject {
         }
     }
 }
+
+#[repr(transparent)]
+pub struct NSCursor(Object);
+impl AsObject for NSCursor {
+    #[inline(always)]
+    fn as_object(&self) -> &Object {
+        &self.0
+    }
+}
+impl NSObject for NSCursor {}
+impl NSCursor {
+    #[inline(always)]
+    pub fn current<'a>() -> &'a mut Self {
+        unsafe {
+            &mut *Class::require(c"NSCursor")
+                .send0r::<*mut Object>(Selector::get(c"currentCursor"))
+                .cast::<Self>()
+        }
+    }
+
+    #[inline(always)]
+    pub fn arrow<'a>() -> &'a mut Self {
+        unsafe {
+            &mut *Class::require(c"NSCursor")
+                .send0r::<*mut Object>(Selector::get(c"arrowCursor"))
+                .cast::<Self>()
+        }
+    }
+
+    #[inline(always)]
+    pub fn ibeam<'a>() -> &'a mut Self {
+        unsafe {
+            &mut *Class::require(c"NSCursor")
+                .send0r::<*mut Object>(Selector::get(c"IBeamCursor"))
+                .cast::<Self>()
+        }
+    }
+
+    #[inline(always)]
+    pub fn pointing_hand<'a>() -> &'a mut Self {
+        unsafe {
+            &mut *Class::require(c"NSCursor")
+                .send0r::<*mut Object>(Selector::get(c"pointingHandCursor"))
+                .cast::<Self>()
+        }
+    }
+
+    #[inline(always)]
+    pub fn resize_left_right<'a>() -> &'a mut Self {
+        unsafe {
+            &mut *Class::require(c"NSCursor")
+                .send0r::<*mut Object>(Selector::get(c"resizeLeftRightCursor"))
+                .cast::<Self>()
+        }
+    }
+
+    #[inline(always)]
+    pub fn set(&self) {
+        unsafe {
+            self.0.send0(Selector::get(c"set"));
+        }
+    }
+}

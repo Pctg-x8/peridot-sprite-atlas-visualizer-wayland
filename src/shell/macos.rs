@@ -4,7 +4,7 @@ use bedrock::{self as br, SurfaceCreateInfo};
 use objc_rt::{
     self as objc, AsObject, NSObject,
     appkit::{
-        NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent,
+        NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSCursor, NSEvent,
         NSEventModifierFlags, NSEventType, NSMenu, NSTrackingArea, NSTrackingAreaOptions, NSView,
         NSViewObject, NSWindow, NSWindowDidChangeBackingPropertiesNotification, NSWindowStyleMask,
     },
@@ -630,7 +630,20 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
     }
 
     pub fn set_cursor_shape(&self, shape: CursorShape) {
-        tracing::warn!("TODO: set cursor shape");
+        match shape {
+            CursorShape::Default => {
+                NSCursor::arrow().set();
+            }
+            CursorShape::Pointer => {
+                NSCursor::pointing_hand().set();
+            }
+            CursorShape::IBeam => {
+                NSCursor::ibeam().set();
+            }
+            CursorShape::ResizeHorizontal => {
+                NSCursor::resize_left_right().set();
+            }
+        }
     }
 
     // このへんのwaylandべったりなやつなんとかしたい

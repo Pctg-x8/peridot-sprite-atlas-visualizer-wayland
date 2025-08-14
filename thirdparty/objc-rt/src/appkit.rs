@@ -3,7 +3,9 @@ use bitflags::bitflags;
 use core::ffi::*;
 
 use crate::{
-    AsObject, BOOL, Class, NSObject, Object, Owned, Receiver, Selector,
+    _NSConcreteStackBlock, AsObject, BLOCK_HAS_COPY_DISPOSE, BOOL, BlockDescriptorBase,
+    BlockObjectBase, Class, ClosureBlockDescriptor, ClosureBlockObject, NSObject, Object, Owned,
+    Receiver, Selector, closure1_block_invoke,
     corefoundation::{CGFloat, CGPoint, CGRect},
     foundation::{NSArray, NSArrayObject, NSDate, NSNotificationName, NSString},
 };
@@ -640,6 +642,150 @@ impl NSCursor {
     pub fn set(&self) {
         unsafe {
             self.0.send0(Selector::get_cached(c"set"));
+        }
+    }
+}
+
+#[repr(transparent)]
+pub struct NSSavePanelObject(Object);
+impl AsObject for NSSavePanelObject {
+    #[inline(always)]
+    fn as_object(&self) -> &Object {
+        &self.0
+    }
+
+    #[inline(always)]
+    fn as_object_mut(&mut self) -> &mut Object {
+        &mut self.0
+    }
+}
+impl NSObject for NSSavePanelObject {}
+impl NSSavePanel for NSSavePanelObject {}
+
+pub trait NSSavePanel: NSObject {
+    #[inline(always)]
+    fn new() -> Owned<NSSavePanelObject> {
+        unsafe {
+            Owned::from_ptr_unchecked(
+                Class::require(c"NSOpenPanel")
+                    .send0r::<*mut Object>(Selector::get_cached(c"savePanel"))
+                    .cast::<NSSavePanelObject>(),
+            )
+        }
+    }
+
+    fn begin_sheet_modal_for_window<F: Fn(NSModalResponse)>(
+        &self,
+        w: &NSWindow,
+        completion_handler: F,
+    ) {
+        extern "C" fn copy_helper_impl<F>(
+            dst: *mut ClosureBlockObject<F>,
+            src: *const ClosureBlockObject<F>,
+        ) {
+            unsafe {
+                core::ptr::copy(&(*src).heading, &mut (*dst).heading, 1);
+                core::ptr::write(&mut (*dst).closure, (*src).closure.clone());
+            }
+        }
+        extern "C" fn dispose_helper_impl<F>(src: *mut ClosureBlockObject<F>) {
+            unsafe { core::ptr::drop_in_place(&mut (*src).closure) }
+        }
+
+        let block_lit: ClosureBlockObject<F> = ClosureBlockObject {
+            heading: BlockObjectBase {
+                isa: unsafe { &_NSConcreteStackBlock as _ },
+                flags: BLOCK_HAS_COPY_DISPOSE,
+                reserved: 0,
+                invoke: Some(unsafe {
+                    core::mem::transmute::<
+                        extern "C" fn(*mut ClosureBlockObject<F>, NSModalResponse),
+                        _,
+                    >(closure1_block_invoke)
+                }),
+                descriptor: &const {
+                    ClosureBlockDescriptor {
+                        heading: BlockDescriptorBase {
+                            reserved: 0,
+                            size: core::mem::size_of::<ClosureBlockObject<F>>() as _,
+                        },
+                        copy_helper: Some(copy_helper_impl::<F>),
+                        dispose_helper: Some(dispose_helper_impl::<F>),
+                    }
+                },
+            },
+            closure: std::rc::Rc::new(completion_handler),
+        };
+
+        unsafe {
+            self.as_object().send2(
+                Selector::get_cached(c"beginSheetModalForWindow:completionHandler:"),
+                w.as_object() as *const _,
+                block_lit,
+            )
+        }
+    }
+}
+
+pub type NSModalResponse = NSInteger;
+
+#[repr(transparent)]
+pub struct NSOpenPanelObject(Object);
+impl AsObject for NSOpenPanelObject {
+    #[inline(always)]
+    fn as_object(&self) -> &Object {
+        &self.0
+    }
+
+    #[inline(always)]
+    fn as_object_mut(&mut self) -> &mut Object {
+        &mut self.0
+    }
+}
+impl NSObject for NSOpenPanelObject {}
+impl NSSavePanel for NSOpenPanelObject {}
+impl NSOpenPanel for NSOpenPanelObject {}
+impl NSOpenPanelObject {
+    #[inline(always)]
+    pub fn new() -> Owned<Self> {
+        unsafe {
+            Owned::from_ptr_unchecked(
+                Class::require(c"NSOpenPanel")
+                    .send0r::<*mut Object>(Selector::get_cached(c"openPanel"))
+                    .cast::<Self>(),
+            )
+        }
+    }
+}
+
+pub trait NSOpenPanel: NSSavePanel {
+    #[inline(always)]
+    fn set_can_choose_files(&mut self, flag: bool) {
+        unsafe {
+            self.as_object_mut().send1(
+                Selector::get_cached(c"setCanChooseFiles:"),
+                if flag { 1 } else { 0 } as BOOL,
+            )
+        }
+    }
+
+    #[inline(always)]
+    fn set_can_choose_directories(&mut self, flag: bool) {
+        unsafe {
+            self.as_object_mut().send1(
+                Selector::get_cached(c"setCanChooseDirectories:"),
+                if flag { 1 } else { 0 } as BOOL,
+            )
+        }
+    }
+
+    #[inline(always)]
+    fn set_allows_multiple_selection(&mut self, flag: bool) {
+        unsafe {
+            self.as_object_mut().send1(
+                Selector::get_cached(c"setAllowsMultipleSelection:"),
+                if flag { 1 } else { 0 } as BOOL,
+            )
         }
     }
 }

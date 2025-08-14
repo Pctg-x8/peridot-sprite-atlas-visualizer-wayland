@@ -2609,6 +2609,16 @@ impl SystemLink {
         for_shell: &AppShell<'_, '_>,
     ) -> Result<Vec<std::path::PathBuf>, SystemLinkError> {
         // TODO: file chooser
+
+        use objc_rt::appkit::{NSOpenPanel, NSSavePanel};
+        let mut p = objc_rt::appkit::NSOpenPanelObject::new();
+        p.set_allows_multiple_selection(true);
+        p.set_can_choose_directories(true);
+        p.set_can_choose_files(true);
+        p.begin_sheet_modal_for_window(&for_shell.window, |r| {
+            println!("resp: {r}");
+        });
+
         Ok(Vec::new())
     }
 

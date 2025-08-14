@@ -491,3 +491,54 @@ impl<T: NSObject> Owned<T> {
         ptr
     }
 }
+
+// Apple Clang Block extension: https://clang.llvm.org/docs/Block-ABI-Apple.html
+
+unsafe extern "C" {
+    static _NSConcreteStackBlock: c_void;
+    static _NSConcreteGlobalBlock: c_void;
+}
+
+#[repr(C)]
+pub struct BlockObjectBase<SelfType, Descriptor> {
+    /// either &_NSConcreteStackBlock or &_NSConcreteGlobalBlock
+    pub isa: *const c_void,
+    pub flags: c_int,
+    pub reserved: c_int,
+    pub invoke: Option<extern "C" fn(this: *mut SelfType, ...)>,
+    pub descriptor: *const Descriptor,
+}
+
+#[repr(C)]
+pub struct BlockDescriptorBase {
+    pub reserved: c_long,
+    pub size: c_long,
+}
+
+pub const BLOCK_IS_NOESCAPE: c_int = 1 << 23;
+pub const BLOCK_HAS_COPY_DISPOSE: c_int = 1 << 25;
+pub const BLOCK_HAS_CTOR: c_int = 1 << 26;
+pub const BLOCK_IS_GLOBAL: c_int = 1 << 28;
+pub const BLOCK_HAS_STRET: c_int = 1 << 29;
+pub const BLOCK_HAS_SIGNATURE: c_int = 1 << 30;
+
+#[repr(C)]
+pub struct ClosureBlockObject<F> {
+    pub heading: BlockObjectBase<ClosureBlockObject<F>, ClosureBlockDescriptor<F>>,
+    pub closure: std::rc::Rc<F>,
+}
+
+#[repr(C)]
+pub struct ClosureBlockDescriptor<F> {
+    pub heading: BlockDescriptorBase,
+    pub copy_helper:
+        Option<extern "C" fn(dst: *mut ClosureBlockObject<F>, src: *const ClosureBlockObject<F>)>,
+    pub dispose_helper: Option<extern "C" fn(src: *mut ClosureBlockObject<F>)>,
+}
+
+pub(crate) extern "C" fn closure1_block_invoke<F, A>(ctx: *mut ClosureBlockObject<F>, a: A)
+where
+    F: Fn(A),
+{
+    unsafe { ((*ctx).closure)(a) };
+}

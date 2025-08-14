@@ -22,6 +22,7 @@ use crate::{
 };
 
 pub struct AppShell<'event_bus, 'subsystem> {
+    pub window: objc::Owned<NSWindow>,
     content_view: objc::Owned<MainNativeView<'event_bus>>,
     window_state_vars: Pin<Box<ShellWindowStateVars<'event_bus>>>,
     frame_timing_observation_thread: core::mem::ManuallyDrop<std::thread::JoinHandle<()>>,
@@ -131,6 +132,7 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
         nsapp.finish_launching();
 
         Self {
+            window: w,
             content_view,
             window_state_vars,
             frame_timing_observation_thread: core::mem::ManuallyDrop::new(

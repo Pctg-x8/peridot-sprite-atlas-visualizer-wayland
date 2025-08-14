@@ -1,5 +1,5 @@
 use crate::{
-    AsObject, Class, NSObject, Object, Owned, Selector,
+    AsObject, Class, NSObject, Object, Owned, Receiver, Selector,
     corefoundation::CFTimeInterval,
     foundation::{NSRunLoop, NSRunLoopMode},
 };
@@ -13,16 +13,25 @@ impl AsObject for CADisplayLink {
     fn as_object(&self) -> &Object {
         &self.0
     }
+
+    #[inline(always)]
+    fn as_object_mut(&mut self) -> &mut Object {
+        &mut self.0
+    }
 }
 impl NSObject for CADisplayLink {}
 impl CADisplayLink {
     pub fn new(target: *mut Object, selector: *mut Selector) -> Owned<Self> {
         unsafe {
-            Owned::from_ptr_unchecked(Class::require(c"CADisplayLink").send2v(
-                Selector::get(c"displayLinkWithTarget:selector:"),
-                target,
-                selector,
-            ))
+            Owned::from_ptr_unchecked(
+                Class::require(c"CADisplayLink")
+                    .send2r::<_, _, *mut Object>(
+                        Selector::get_cached(c"displayLinkWithTarget:selector:"),
+                        target,
+                        selector,
+                    )
+                    .cast::<Self>(),
+            )
         }
     }
 
@@ -30,7 +39,7 @@ impl CADisplayLink {
     pub fn add_to_run_loop(&self, run_loop: &mut NSRunLoop, mode: NSRunLoopMode) {
         unsafe {
             self.0.send2(
-                Selector::get(c"addToRunLoop:forMode:"),
+                Selector::get_cached(c"addToRunLoop:forMode:"),
                 run_loop.as_object() as *const _,
                 (*mode).as_object() as *const _,
             );
@@ -39,6 +48,6 @@ impl CADisplayLink {
 
     #[inline(always)]
     pub fn timestamp(&self) -> CFTimeInterval {
-        unsafe { self.0.send0r(Selector::get(c"timestamp")) }
+        unsafe { self.0.send0r(Selector::get_cached(c"timestamp")) }
     }
 }

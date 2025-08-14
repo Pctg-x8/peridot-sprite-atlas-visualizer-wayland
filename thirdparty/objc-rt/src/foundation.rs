@@ -1,7 +1,7 @@
 use bitflags::bitflags;
 
 use crate::{
-    AsObject, BOOL, Class, NSObject, Object, Owned, Selector,
+    AsObject, BOOL, Class, NSObject, Object, Owned, Receiver, Selector,
     appkit::{NSInteger, NSUInteger},
 };
 
@@ -11,6 +11,11 @@ impl AsObject for NSString {
     #[inline(always)]
     fn as_object(&self) -> &Object {
         &self.0
+    }
+
+    #[inline(always)]
+    fn as_object_mut(&mut self) -> &mut Object {
+        &mut self.0
     }
 }
 impl NSObject for NSString {}
@@ -24,17 +29,19 @@ impl NSString {
     pub fn from_utf8_string(x: &core::ffi::CStr) -> Owned<Self> {
         unsafe {
             Owned::from_ptr_unchecked(
-                Class::get(c"NSString")
-                    .expect("no NSString class")
-                    .send1o(Selector::get(c"stringWithUTF8String:"), x.as_ptr())
-                    as *mut Self,
+                Class::require(c"NSString")
+                    .send1r::<_, *mut Object>(
+                        Selector::get_cached(c"stringWithUTF8String:"),
+                        x.as_ptr(),
+                    )
+                    .cast::<Self>(),
             )
         }
     }
 
     #[inline]
     pub fn utf8_string(&self) -> &core::ffi::CStr {
-        unsafe { core::ffi::CStr::from_ptr(self.0.send0r(Selector::get(c"UTF8String"))) }
+        unsafe { core::ffi::CStr::from_ptr(self.0.send0r(Selector::get_cached(c"UTF8String"))) }
     }
 }
 
@@ -44,6 +51,11 @@ impl AsObject for NSError {
     #[inline(always)]
     fn as_object(&self) -> &Object {
         &self.0
+    }
+
+    #[inline(always)]
+    fn as_object_mut(&mut self) -> &mut Object {
+        &mut self.0
     }
 }
 impl NSObject for NSError {}
@@ -61,14 +73,16 @@ impl core::fmt::Debug for NSError {
 impl NSError {
     #[inline]
     pub fn code(&self) -> NSInteger {
-        unsafe { self.0.send0r(Selector::get(c"code")) }
+        unsafe { self.0.send0r(Selector::get_cached(c"code")) }
     }
 
     #[inline]
     pub fn domain(&self) -> Owned<NSString> {
         unsafe {
             Owned::from_ptr_unchecked(
-                self.0.send0r::<*mut Object>(Selector::get(c"domain")) as *mut NSString
+                self.0
+                    .send0r::<*mut Object>(Selector::get_cached(c"domain"))
+                    as *mut NSString,
             )
         }
     }
@@ -78,7 +92,7 @@ impl NSError {
         unsafe {
             Owned::from_ptr_unchecked(
                 self.0
-                    .send0r::<*mut Object>(Selector::get(c"localizedDescription"))
+                    .send0r::<*mut Object>(Selector::get_cached(c"localizedDescription"))
                     as *mut NSString,
             )
         }
@@ -92,6 +106,11 @@ impl AsObject for NSURL {
     fn as_object(&self) -> &Object {
         &self.0
     }
+
+    #[inline(always)]
+    fn as_object_mut(&mut self) -> &mut Object {
+        &mut self.0
+    }
 }
 impl NSObject for NSURL {}
 impl NSURL {
@@ -99,17 +118,16 @@ impl NSURL {
         unsafe {
             Owned::from_ptr_unchecked(
                 self.0
-                    .send0r::<*mut NSString>(Selector::get(c"absoluteString")),
+                    .send0r::<*mut NSString>(Selector::get_cached(c"absoluteString")),
             )
         }
     }
 
     pub fn file_system_representation(&self) -> &core::ffi::CStr {
         unsafe {
-            core::ffi::CStr::from_ptr(
-                self.0
-                    .send0r::<*const core::ffi::c_char>(Selector::get(c"fileSystemRepresentation")),
-            )
+            core::ffi::CStr::from_ptr(self.0.send0r::<*const core::ffi::c_char>(
+                Selector::get_cached(c"fileSystemRepresentation"),
+            ))
         }
     }
 }
@@ -121,6 +139,11 @@ impl AsObject for NSRunLoop {
     fn as_object(&self) -> &Object {
         &self.0
     }
+
+    #[inline(always)]
+    fn as_object_mut(&mut self) -> &mut Object {
+        &mut self.0
+    }
 }
 impl NSObject for NSRunLoop {}
 impl NSRunLoop {
@@ -128,7 +151,7 @@ impl NSRunLoop {
     pub fn main<'a>() -> &'a mut Self {
         unsafe {
             &mut *Class::require(c"NSRunLoop")
-                .send0o(Selector::get(c"mainRunLoop"))
+                .send0r::<*mut Object>(Selector::get_cached(c"mainRunLoop"))
                 .cast::<Self>()
         }
     }
@@ -136,21 +159,21 @@ impl NSRunLoop {
     pub fn current<'a>() -> &'a mut Self {
         unsafe {
             &mut *Class::require(c"NSRunLoop")
-                .send0o(Selector::get(c"currentRunLoop"))
+                .send0r::<*mut Object>(Selector::get_cached(c"currentRunLoop"))
                 .cast::<Self>()
         }
     }
 
     #[inline(always)]
     pub fn run(&mut self) {
-        unsafe { self.0.send0(Selector::get(c"run")) }
+        unsafe { self.0.send0(Selector::get_cached(c"run")) }
     }
 
     #[inline]
     pub fn run_mode_before(&mut self, mode: NSRunLoopMode, before_date: &mut NSDate) -> bool {
         unsafe {
             self.0.send2r::<_, _, BOOL>(
-                Selector::get(c"runMode:beforeDate:"),
+                Selector::get_cached(c"runMode:beforeDate:"),
                 (*mode).as_object() as *const _,
                 before_date.as_object() as *const _,
             ) != 0
@@ -161,7 +184,7 @@ impl NSRunLoop {
     pub fn run_until(&mut self, date: &mut NSDate) {
         unsafe {
             self.0.send1(
-                Selector::get(c"runUntilDate:"),
+                Selector::get_cached(c"runUntilDate:"),
                 date.as_object() as *const _,
             )
         }
@@ -196,15 +219,20 @@ impl AsObject for NSFileManager {
     fn as_object(&self) -> &Object {
         &self.0
     }
+
+    #[inline(always)]
+    fn as_object_mut(&mut self) -> &mut Object {
+        &mut self.0
+    }
 }
 impl NSObject for NSFileManager {}
 impl NSFileManager {
     pub fn default() -> Owned<Self> {
         unsafe {
             Owned::from_ptr_unchecked(
-                Class::get(c"NSFileManager")
-                    .expect("no NSFileManager class")
-                    .send0o(Selector::get(c"defaultManager")) as *mut Self,
+                Class::require(c"NSFileManager")
+                    .send0r::<*mut Object>(Selector::get_cached(c"defaultManager"))
+                    .cast::<Self>(),
             )
         }
     }
@@ -218,18 +246,22 @@ impl NSFileManager {
     ) -> Result<Owned<NSURL>, Owned<NSError>> {
         let mut error = core::mem::MaybeUninit::<*mut NSError>::uninit();
         let url = unsafe {
-            self.0.send5o(
-                Selector::get(c"URLForDirectory:inDomain:appropriateForURL:create:error:"),
-                directory as NSUInteger,
-                domain_mask.bits(),
-                appropriate_for_url.map_or_else(core::ptr::null, |x| x.as_object() as *const _),
-                if create { 1 } else { 0 } as BOOL,
-                error.as_mut_ptr(),
-            )
+            self.0
+                .send5r::<_, _, _, _, _, *mut Object>(
+                    Selector::get_cached(
+                        c"URLForDirectory:inDomain:appropriateForURL:create:error:",
+                    ),
+                    directory as NSUInteger,
+                    domain_mask.bits(),
+                    appropriate_for_url.map_or_else(core::ptr::null, |x| x.as_object() as *const _),
+                    if create { 1 } else { 0 } as BOOL,
+                    error.as_mut_ptr(),
+                )
+                .cast::<NSURL>()
         };
 
         if !url.is_null() {
-            Ok(unsafe { Owned::from_ptr_unchecked(url as *mut _) })
+            Ok(unsafe { Owned::from_ptr_unchecked(url) })
         } else {
             Err(unsafe { Owned::from_ptr_unchecked(error.assume_init()) })
         }
@@ -243,6 +275,11 @@ impl AsObject for NSDate {
     fn as_object(&self) -> &Object {
         &self.0
     }
+
+    #[inline(always)]
+    fn as_object_mut(&mut self) -> &mut Object {
+        &mut self.0
+    }
 }
 impl NSObject for NSDate {}
 impl NSDate {
@@ -250,7 +287,7 @@ impl NSDate {
     pub fn distant_past<'a>() -> &'a mut Self {
         unsafe {
             &mut *Class::require(c"NSDate")
-                .send0o(Selector::get(c"distantPast"))
+                .send0r::<*mut Object>(Selector::get_cached(c"distantPast"))
                 .cast::<Self>()
         }
     }
@@ -259,7 +296,7 @@ impl NSDate {
     pub fn distant_future<'a>() -> &'a mut Self {
         unsafe {
             &mut *Class::require(c"NSDate")
-                .send0o(Selector::get(c"distantFuture"))
+                .send0r::<*mut Object>(Selector::get_cached(c"distantFuture"))
                 .cast::<Self>()
         }
     }
@@ -272,6 +309,11 @@ impl AsObject for NSNotification {
     fn as_object(&self) -> &Object {
         &self.0
     }
+
+    #[inline(always)]
+    fn as_object_mut(&mut self) -> &mut Object {
+        &mut self.0
+    }
 }
 impl NSObject for NSNotification {}
 
@@ -282,6 +324,11 @@ impl AsObject for NSNotificationCenter {
     fn as_object(&self) -> &Object {
         &self.0
     }
+
+    #[inline(always)]
+    fn as_object_mut(&mut self) -> &mut Object {
+        &mut self.0
+    }
 }
 impl NSObject for NSNotificationCenter {}
 impl NSNotificationCenter {
@@ -289,7 +336,7 @@ impl NSNotificationCenter {
     pub fn default<'a>() -> &'a mut Self {
         unsafe {
             &mut *Class::require(c"NSNotificationCenter")
-                .send0r::<*mut Object>(Selector::get(c"defaultCenter"))
+                .send0r::<*mut Object>(Selector::get_cached(c"defaultCenter"))
                 .cast::<Self>()
         }
     }
@@ -304,7 +351,7 @@ impl NSNotificationCenter {
     ) {
         unsafe {
             self.0.send4(
-                Selector::get(c"addObserver:selector:name:object:"),
+                Selector::get_cached(c"addObserver:selector:name:object:"),
                 observer.as_object() as *const _,
                 selector as *const _,
                 name.map_or_else(core::ptr::null, |x| x as *const _),
@@ -323,6 +370,11 @@ impl<T: NSObject> AsObject for NSArrayObject<T> {
     fn as_object(&self) -> &Object {
         &self.0
     }
+
+    #[inline(always)]
+    fn as_object_mut(&mut self) -> &mut Object {
+        &mut self.0
+    }
 }
 impl<T: NSObject> NSObject for NSArrayObject<T> {}
 impl<T: NSObject> NSArray for NSArrayObject<T> {
@@ -334,7 +386,7 @@ pub trait NSArray: NSObject {
 
     #[inline(always)]
     fn count(&self) -> NSUInteger {
-        unsafe { self.as_object().send0r(Selector::get(c"count")) }
+        unsafe { self.as_object().send0r(Selector::get_cached(c"count")) }
     }
 
     #[inline(always)]
@@ -342,7 +394,7 @@ pub trait NSArray: NSObject {
         unsafe {
             &*self
                 .as_object()
-                .send1r::<_, *mut Object>(Selector::get(c"objectAtIndex:"), index)
+                .send1r::<_, *mut Object>(Selector::get_cached(c"objectAtIndex:"), index)
                 .cast::<Self::Item>()
         }
     }

@@ -3,7 +3,7 @@ use bitflags::bitflags;
 use core::ffi::*;
 
 use crate::{
-    AsObject, BOOL, Class, NSObject, Object, Owned, Selector,
+    AsObject, BOOL, Class, NSObject, Object, Owned, Receiver, Selector,
     corefoundation::{CGFloat, CGPoint, CGRect},
     foundation::{NSArray, NSArrayObject, NSDate, NSNotificationName, NSString},
 };
@@ -58,40 +58,57 @@ impl AsObject for NSApplication {
     fn as_object(&self) -> &Object {
         &self.0
     }
+
+    #[inline(always)]
+    fn as_object_mut(&mut self) -> &mut Object {
+        &mut self.0
+    }
 }
 impl NSApplication {
+    #[inline(always)]
     pub fn shared<'a>() -> &'a Self {
-        let cls = Class::get(c"NSApplication").expect("no NSApplication");
-        unsafe { &*(cls.send0o(Selector::get(c"sharedApplication")) as *mut Self) }
+        unsafe {
+            &*Class::require(c"NSApplication")
+                .send0r::<*mut Object>(Selector::get_cached(c"sharedApplication"))
+                .cast::<Self>()
+        }
     }
 
+    #[inline(always)]
     pub fn set_activation_policy(&self, policy: NSApplicationActivationPolicy) -> bool {
         unsafe {
-            self.0
-                .send1r::<_, BOOL>(Selector::get(c"setActivationPolicy:"), policy as NSUInteger)
-                != 0
+            self.0.send1r::<_, BOOL>(
+                Selector::get_cached(c"setActivationPolicy:"),
+                policy as NSUInteger,
+            ) != 0
         }
     }
 
+    #[inline(always)]
     pub fn set_main_menu(&self, menu: &NSMenu) {
         unsafe {
-            self.0
-                .send1(Selector::get(c"setMainMenu:"), menu.as_object() as *const _);
+            self.0.send1(
+                Selector::get_cached(c"setMainMenu:"),
+                menu.as_object() as *const _,
+            );
         }
     }
 
+    #[inline(always)]
     pub fn finish_launching(&self) {
         unsafe {
-            self.0.send0(Selector::get(c"finishLaunching"));
+            self.0.send0(Selector::get_cached(c"finishLaunching"));
         }
     }
 
+    #[inline(always)]
     pub fn run(&self) {
         unsafe {
-            self.0.send0(Selector::get(c"run"));
+            self.0.send0(Selector::get_cached(c"run"));
         }
     }
 
+    #[inline(always)]
     pub fn next_event_matching_mask_until_date_in_mode_dequeue(
         &self,
         mask: NSEventMask,
@@ -101,7 +118,7 @@ impl NSApplication {
     ) -> Option<Owned<NSEvent>> {
         unsafe {
             Owned::from_ptr(self.0.send4r(
-                Selector::get(c"nextEventMatchingMask:untilDate:inMode:dequeue:"),
+                Selector::get_cached(c"nextEventMatchingMask:untilDate:inMode:dequeue:"),
                 mask.bits(),
                 until.map_or_else(core::ptr::null, |x| x.as_object() as *const _),
                 mode,
@@ -110,10 +127,13 @@ impl NSApplication {
         }
     }
 
+    #[inline(always)]
     pub fn send_event(&self, event: &NSEvent) {
         unsafe {
-            self.0
-                .send1(Selector::get(c"sendEvent:"), event.as_object() as *const _);
+            self.0.send1(
+                Selector::get_cached(c"sendEvent:"),
+                event.as_object() as *const _,
+            );
         }
     }
 
@@ -121,7 +141,7 @@ impl NSApplication {
     pub fn post_event(&self, event: &NSEvent, at_start: bool) {
         unsafe {
             self.0.send2(
-                Selector::get(c"postEvent:atStart:"),
+                Selector::get_cached(c"postEvent:atStart:"),
                 event.as_object() as *const _,
                 if at_start { 1 } else { 0 } as BOOL,
             );
@@ -131,7 +151,7 @@ impl NSApplication {
     #[inline(always)]
     pub fn update_windows(&self) {
         unsafe {
-            self.0.send0(Selector::get(c"updateWindows"));
+            self.0.send0(Selector::get_cached(c"updateWindows"));
         }
     }
 }
@@ -150,6 +170,11 @@ impl AsObject for NSMenu {
     fn as_object(&self) -> &Object {
         &self.0
     }
+
+    #[inline(always)]
+    fn as_object_mut(&mut self) -> &mut Object {
+        &mut self.0
+    }
 }
 impl NSObject for NSMenu {}
 impl NSMenu {
@@ -157,13 +182,13 @@ impl NSMenu {
         let inst = unsafe {
             Owned::from_ptr_unchecked(
                 Class::require(c"NSMenu")
-                    .send0r::<*mut Object>(Selector::get(c"alloc"))
+                    .send0r::<*mut Object>(Selector::get_cached(c"alloc"))
                     .cast::<Self>(),
             )
         };
         unsafe {
             inst.as_object().send1r::<_, *mut Object>(
-                Selector::get(c"initWithTitle:"),
+                Selector::get_cached(c"initWithTitle:"),
                 title.as_object() as *const _,
             );
         }
@@ -171,6 +196,7 @@ impl NSMenu {
         inst
     }
 
+    #[inline(always)]
     pub fn add_new_item<'a>(
         &'a self,
         title: &NSString,
@@ -181,7 +207,7 @@ impl NSMenu {
             &*self
                 .0
                 .send3r::<_, _, _, *mut Object>(
-                    Selector::get(c"addItemWithTitle:action:keyEquivalent:"),
+                    Selector::get_cached(c"addItemWithTitle:action:keyEquivalent:"),
                     title.as_object() as *const _,
                     action.map_or_else(core::ptr::null, |x| x as *const _),
                     key_equivalent.as_object() as *const _,
@@ -190,10 +216,11 @@ impl NSMenu {
         }
     }
 
+    #[inline(always)]
     pub fn set_submenu(&self, submenu: &NSMenu, for_item: &NSMenuItem) {
         unsafe {
             self.0.send2(
-                Selector::get(c"setSubmenu:forItem:"),
+                Selector::get_cached(c"setSubmenu:forItem:"),
                 submenu.as_object() as *const _,
                 for_item.as_object() as *const _,
             );
@@ -208,6 +235,11 @@ impl AsObject for NSMenuItem {
     fn as_object(&self) -> &Object {
         &self.0
     }
+
+    #[inline(always)]
+    fn as_object_mut(&mut self) -> &mut Object {
+        &mut self.0
+    }
 }
 impl NSObject for NSMenuItem {}
 impl NSMenuItem {
@@ -216,7 +248,7 @@ impl NSMenuItem {
         unsafe {
             &mut *self
                 .0
-                .send0r::<*mut Object>(Selector::get(c"submenu"))
+                .send0r::<*mut Object>(Selector::get_cached(c"submenu"))
                 .cast::<NSMenu>()
         }
     }
@@ -228,6 +260,11 @@ impl AsObject for NSEvent {
     #[inline(always)]
     fn as_object(&self) -> &Object {
         &self.0
+    }
+
+    #[inline(always)]
+    fn as_object_mut(&mut self) -> &mut Object {
+        &mut self.0
     }
 }
 impl NSObject for NSEvent {}
@@ -247,7 +284,7 @@ impl NSEvent {
         unsafe {
             Owned::from_ptr_unchecked(
                 Class::require(c"NSEvent").send9r(
-                    Selector::get(c"otherEventWithType:location:modifierFlags:timestamp:windowNumber:context:subtype:data1:data2:"),
+                    Selector::get_cached(c"otherEventWithType:location:modifierFlags:timestamp:windowNumber:context:subtype:data1:data2:"),
                     r#type as NSUInteger,
                     location,
                     modifier_flags.bits(),
@@ -264,22 +301,25 @@ impl NSEvent {
 
     #[inline(always)]
     pub fn r#type(&self) -> NSEventType {
-        unsafe { self.0.send0r(Selector::get(c"type")) }
+        unsafe { self.0.send0r(Selector::get_cached(c"type")) }
     }
 
     #[inline(always)]
     pub fn data1(&self) -> NSInteger {
-        unsafe { self.0.send0r(Selector::get(c"data1")) }
+        unsafe { self.0.send0r(Selector::get_cached(c"data1")) }
     }
 
     #[inline(always)]
     pub fn data2(&self) -> NSInteger {
-        unsafe { self.0.send0r(Selector::get(c"data2")) }
+        unsafe { self.0.send0r(Selector::get_cached(c"data2")) }
     }
 
     #[inline(always)]
     pub fn window(&self) -> Option<&NSWindow> {
-        let p = unsafe { self.0.send0r::<*mut NSWindow>(Selector::get(c"window")) };
+        let p = unsafe {
+            self.0
+                .send0r::<*mut NSWindow>(Selector::get_cached(c"window"))
+        };
         if p.is_null() {
             None
         } else {
@@ -289,12 +329,12 @@ impl NSEvent {
 
     #[inline(always)]
     pub fn location_in_window(&self) -> CGPoint {
-        unsafe { self.0.send0r(Selector::get(c"locationInWindow")) }
+        unsafe { self.0.send0r(Selector::get_cached(c"locationInWindow")) }
     }
 
     #[inline(always)]
     pub fn button_number(&self) -> NSInteger {
-        unsafe { self.0.send0r(Selector::get(c"buttonNumber")) }
+        unsafe { self.0.send0r(Selector::get_cached(c"buttonNumber")) }
     }
 }
 
@@ -305,6 +345,11 @@ impl AsObject for NSWindow {
     fn as_object(&self) -> &Object {
         &self.0
     }
+
+    #[inline(always)]
+    fn as_object_mut(&mut self) -> &mut Object {
+        &mut self.0
+    }
 }
 impl NSObject for NSWindow {}
 impl NSWindow {
@@ -314,11 +359,16 @@ impl NSWindow {
         backing: NSBackingStoreType,
         defer: bool,
     ) -> Owned<Self> {
-        let cls = Class::get(c"NSWindow").expect("no NSWindow class");
-        let this = unsafe { cls.send0o(Selector::get(c"alloc")) };
+        let this = unsafe {
+            Owned::from_ptr_unchecked(
+                Class::require(c"NSWindow")
+                    .send0r::<*mut Object>(Selector::get_cached(c"alloc"))
+                    .cast::<Self>(),
+            )
+        };
         unsafe {
-            (*this).send4o(
-                Selector::get(c"initWithContentRect:styleMask:backing:defer:"),
+            this.as_object().send4r::<_, _, _, _, *mut Object>(
+                Selector::get_cached(c"initWithContentRect:styleMask:backing:defer:"),
                 content_rect,
                 style_mask.bits(),
                 backing as NSUInteger,
@@ -326,27 +376,29 @@ impl NSWindow {
             )
         };
 
-        unsafe { Owned::from_ptr_unchecked(this as *mut Self) }
+        this
     }
 
     #[inline(always)]
     pub fn make_key_and_order_front(&self, sender: *mut Object) {
         unsafe {
             self.0
-                .send1(Selector::get(c"makeKeyAndOrderFront:"), sender)
+                .send1(Selector::get_cached(c"makeKeyAndOrderFront:"), sender)
         }
     }
 
     #[inline(always)]
     pub fn center(&self) {
-        unsafe { self.0.send0(Selector::get(c"center")) }
+        unsafe { self.0.send0(Selector::get_cached(c"center")) }
     }
 
     #[inline(always)]
     pub fn set_title(&self, title: &NSString) {
         unsafe {
-            self.0
-                .send1(Selector::get(c"setTitle:"), title.as_object() as *const _)
+            self.0.send1(
+                Selector::get_cached(c"setTitle:"),
+                title.as_object() as *const _,
+            )
         }
     }
 
@@ -354,20 +406,20 @@ impl NSWindow {
     pub fn set_content_view(&self, content_view: *mut Object) {
         unsafe {
             self.0
-                .send1(Selector::get(c"setContentView:"), content_view)
+                .send1(Selector::get_cached(c"setContentView:"), content_view)
         }
     }
 
     #[inline(always)]
     pub fn backing_scale_factor(&self) -> CGFloat {
-        unsafe { self.0.send0r(Selector::get(c"backingScaleFactor")) }
+        unsafe { self.0.send0r(Selector::get_cached(c"backingScaleFactor")) }
     }
 
     #[inline(always)]
     pub fn set_accepts_mouse_moved_events(&self, accepts: bool) {
         unsafe {
             self.0.send1(
-                Selector::get(c"setAcceptsMouseMovedEvents:"),
+                Selector::get_cached(c"setAcceptsMouseMovedEvents:"),
                 if accepts { 1 } else { 0 } as BOOL,
             );
         }
@@ -385,6 +437,11 @@ impl AsObject for NSTrackingArea {
     fn as_object(&self) -> &Object {
         &self.0
     }
+
+    #[inline(always)]
+    fn as_object_mut(&mut self) -> &mut Object {
+        &mut self.0
+    }
 }
 impl NSObject for NSTrackingArea {}
 impl NSTrackingArea {
@@ -397,13 +454,13 @@ impl NSTrackingArea {
         let x = unsafe {
             Owned::from_ptr_unchecked(
                 Class::require(c"NSTrackingArea")
-                    .send0r::<*mut Object>(Selector::get(c"alloc"))
+                    .send0r::<*mut Object>(Selector::get_cached(c"alloc"))
                     .cast::<Self>(),
             )
         };
         unsafe {
             x.as_object().send4r::<_, _, _, _, *mut Object>(
-                Selector::get(c"initWithRect:options:owner:userInfo:"),
+                Selector::get_cached(c"initWithRect:options:owner:userInfo:"),
                 rect,
                 options.bits(),
                 owner.as_object() as *const _ as *mut Object,
@@ -432,6 +489,11 @@ impl AsObject for NSViewObject {
     fn as_object(&self) -> &Object {
         &self.0
     }
+
+    #[inline(always)]
+    fn as_object_mut(&mut self) -> &mut Object {
+        &mut self.0
+    }
 }
 impl NSObject for NSViewObject {}
 impl NSView for NSViewObject {}
@@ -442,7 +504,7 @@ pub trait NSView: NSObject {
         unsafe {
             Owned::from_ptr_unchecked(
                 self.as_object()
-                    .send0r::<*mut Object>(Selector::get(c"trackingAreas"))
+                    .send0r::<*mut Object>(Selector::get_cached(c"trackingAreas"))
                     .cast::<NSArrayObject<NSTrackingArea>>(),
             )
         }
@@ -452,7 +514,7 @@ pub trait NSView: NSObject {
     fn add_tracking_area(&self, area: Owned<NSTrackingArea>) {
         unsafe {
             self.as_object().send1(
-                Selector::get(c"addTrackingArea:"),
+                Selector::get_cached(c"addTrackingArea:"),
                 area.as_object() as *const _,
             );
         }
@@ -464,7 +526,7 @@ pub trait NSView: NSObject {
     fn remove_tracking_area(&self, area: &NSTrackingArea) {
         unsafe {
             self.as_object().send1(
-                Selector::get(c"removeTrackingArea:"),
+                Selector::get_cached(c"removeTrackingArea:"),
                 area.as_object() as *const _,
             );
         }
@@ -472,14 +534,14 @@ pub trait NSView: NSObject {
 
     #[inline(always)]
     fn bounds(&self) -> CGRect {
-        unsafe { self.as_object().send0r(Selector::get(c"bounds")) }
+        unsafe { self.as_object().send0r(Selector::get_cached(c"bounds")) }
     }
 
     #[inline(always)]
     fn convert_point_from_view(&self, point: CGPoint, from_view: Option<&NSViewObject>) -> CGPoint {
         unsafe {
             self.as_object().send2r(
-                Selector::get(c"convertPoint:fromView:"),
+                Selector::get_cached(c"convertPoint:fromView:"),
                 point,
                 from_view.map_or_else(core::ptr::null, |x| x.as_object() as *const _),
             )
@@ -494,6 +556,11 @@ impl AsObject for NSCursor {
     fn as_object(&self) -> &Object {
         &self.0
     }
+
+    #[inline(always)]
+    fn as_object_mut(&mut self) -> &mut Object {
+        &mut self.0
+    }
 }
 impl NSObject for NSCursor {}
 impl NSCursor {
@@ -501,7 +568,7 @@ impl NSCursor {
     pub fn current<'a>() -> &'a mut Self {
         unsafe {
             &mut *Class::require(c"NSCursor")
-                .send0r::<*mut Object>(Selector::get(c"currentCursor"))
+                .send0r::<*mut Object>(Selector::get_cached(c"currentCursor"))
                 .cast::<Self>()
         }
     }
@@ -510,7 +577,7 @@ impl NSCursor {
     pub fn arrow<'a>() -> &'a mut Self {
         unsafe {
             &mut *Class::require(c"NSCursor")
-                .send0r::<*mut Object>(Selector::get(c"arrowCursor"))
+                .send0r::<*mut Object>(Selector::get_cached(c"arrowCursor"))
                 .cast::<Self>()
         }
     }
@@ -519,7 +586,7 @@ impl NSCursor {
     pub fn ibeam<'a>() -> &'a mut Self {
         unsafe {
             &mut *Class::require(c"NSCursor")
-                .send0r::<*mut Object>(Selector::get(c"IBeamCursor"))
+                .send0r::<*mut Object>(Selector::get_cached(c"IBeamCursor"))
                 .cast::<Self>()
         }
     }
@@ -528,7 +595,7 @@ impl NSCursor {
     pub fn pointing_hand<'a>() -> &'a mut Self {
         unsafe {
             &mut *Class::require(c"NSCursor")
-                .send0r::<*mut Object>(Selector::get(c"pointingHandCursor"))
+                .send0r::<*mut Object>(Selector::get_cached(c"pointingHandCursor"))
                 .cast::<Self>()
         }
     }
@@ -537,7 +604,7 @@ impl NSCursor {
     pub fn resize_left_right<'a>() -> &'a mut Self {
         unsafe {
             &mut *Class::require(c"NSCursor")
-                .send0r::<*mut Object>(Selector::get(c"resizeLeftRightCursor"))
+                .send0r::<*mut Object>(Selector::get_cached(c"resizeLeftRightCursor"))
                 .cast::<Self>()
         }
     }
@@ -545,7 +612,7 @@ impl NSCursor {
     #[inline(always)]
     pub fn set(&self) {
         unsafe {
-            self.0.send0(Selector::get(c"set"));
+            self.0.send0(Selector::get_cached(c"set"));
         }
     }
 }

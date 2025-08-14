@@ -2,7 +2,7 @@ use std::{cell::UnsafeCell, pin::Pin};
 
 use bedrock::{self as br, SurfaceCreateInfo};
 use objc_rt::{
-    self as objc, AsObject, NSObject,
+    self as objc, AsObject, NSObject, Object, Receiver,
     appkit::{
         NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSCursor, NSEvent,
         NSEventModifierFlags, NSEventType, NSMenu, NSTrackingArea, NSTrackingAreaOptions, NSView,
@@ -28,14 +28,20 @@ impl objc::AsObject for CAMetalLayer {
     fn as_object(&self) -> &objc::Object {
         &self.0
     }
+
+    #[inline(always)]
+    fn as_object_mut(&mut self) -> &mut objc::Object {
+        &mut self.0
+    }
 }
 impl objc::NSObject for CAMetalLayer {}
 impl CAMetalLayer {
     pub fn new() -> Option<objc::Owned<Self>> {
         unsafe {
             objc::Owned::from_ptr(
-                objc::Class::require(c"CAMetalLayer").send0o(objc::Selector::get(c"layer"))
-                    as *mut Self,
+                objc::Class::require(c"CAMetalLayer")
+                    .send0r::<*mut Object>(objc::Selector::get(c"layer"))
+                    .cast::<Self>(),
             )
         }
     }
@@ -183,7 +189,7 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
 
                 tracing::info!(?size, "resize view");
                 let state_vars = unsafe {
-                    &**(*this).get_ivar_by_name::<*const ShellWindowStateVars>(c"stateVars")
+                    &**(*this).ivar_ref_by_name::<*const ShellWindowStateVars>(c"stateVars")
                 };
                 state_vars.events.push(AppEvent::ToplevelWindowNewSize {
                     width_px: (size.width * 2.0) as _,
@@ -232,7 +238,7 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                 // };
                 // state_vars.events.push(AppEvent::ToplevelWindowFrameTiming);
                 let cached_ptr =
-                    unsafe { *(*this).get_ivar_by_name::<*mut NSEvent>(c"doRenderEventCached") };
+                    unsafe { *(*this).ivar_ref_by_name::<*mut NSEvent>(c"doRenderEventCached") };
                 if cached_ptr.is_null() {
                     let e = NSEvent::new_other(
                         NSEventType::Periodic,
@@ -246,7 +252,7 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                         0,
                     );
                     unsafe {
-                        (*this).set_ivar_by_name(c"doRenderEventCached", e.clone().leak());
+                        *(*this).ivar_ref_mut_by_name(c"doRenderEventCached") = e.clone().leak();
                     }
                     NSApplication::shared().post_event(&e, true);
                 } else {
@@ -278,7 +284,7 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                 let stv = unsafe {
                     &**this
                         .as_object()
-                        .get_ivar_by_name::<*const ShellWindowStateVars>(c"stateVars")
+                        .ivar_ref_by_name::<*const ShellWindowStateVars>(c"stateVars")
                 };
                 stv.events.push(AppEvent::MainWindowPointerMove {
                     surface_x: pv.x as _,
@@ -304,7 +310,7 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                 let stv = unsafe {
                     &**this
                         .as_object()
-                        .get_ivar_by_name::<*const ShellWindowStateVars>(c"stateVars")
+                        .ivar_ref_by_name::<*const ShellWindowStateVars>(c"stateVars")
                 };
                 stv.events.push(AppEvent::MainWindowPointerMove {
                     surface_x: pv.x as _,
@@ -329,7 +335,7 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                 let stv = unsafe {
                     &**this
                         .as_object()
-                        .get_ivar_by_name::<*const ShellWindowStateVars>(c"stateVars")
+                        .ivar_ref_by_name::<*const ShellWindowStateVars>(c"stateVars")
                 };
                 stv.events.push(AppEvent::MainWindowPointerMove {
                     surface_x: pv.x as _,
@@ -353,7 +359,7 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                 let stv = unsafe {
                     &**this
                         .as_object()
-                        .get_ivar_by_name::<*const ShellWindowStateVars>(c"stateVars")
+                        .ivar_ref_by_name::<*const ShellWindowStateVars>(c"stateVars")
                 };
                 stv.events.push(AppEvent::MainWindowPointerMove {
                     surface_x: pv.x as _,
@@ -377,7 +383,7 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
                 let stv = unsafe {
                     &**this
                         .as_object()
-                        .get_ivar_by_name::<*const ShellWindowStateVars>(c"stateVars")
+                        .ivar_ref_by_name::<*const ShellWindowStateVars>(c"stateVars")
                 };
                 stv.events.push(AppEvent::MainWindowPointerMove {
                     surface_x: pv.x as _,
@@ -490,8 +496,9 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
         }
 
         let layer = CAMetalLayer::new().expect("Failed to create CAMetalLayer");
-        let content_view = unsafe { custom_view_class.send0o(objc::Selector::get(c"alloc")) };
-        let content_view: *mut objc::Object = unsafe {
+        let content_view: *mut Object =
+            unsafe { custom_view_class.send0r(objc::Selector::get(c"alloc")) };
+        let content_view: *mut Object = unsafe {
             (*content_view).send2r(
                 objc::Selector::get(c"initWithFrame:layer:"),
                 CGRect {
@@ -505,10 +512,10 @@ impl<'event_bus, 'subsystem> AppShell<'event_bus, 'subsystem> {
             )
         };
         unsafe {
-            (*content_view)
-                .set_ivar_by_name(c"stateVars", &*window_state_vars.as_ref() as *const _);
-            (*content_view)
-                .set_ivar_by_name::<*mut NSEvent>(c"doRenderEventCached", core::ptr::null_mut());
+            *(*content_view).ivar_ref_mut_by_name::<*const ShellWindowStateVars>(c"stateVars") =
+                &*window_state_vars.as_ref() as *const _;
+            *(*content_view).ivar_ref_mut_by_name::<*mut NSEvent>(c"doRenderEventCached") =
+                core::ptr::null_mut();
         }
         w.set_content_view(content_view);
 
